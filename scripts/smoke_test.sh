@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_URL="${BASE_URL:-}"
+BASE_URL="${BASE_URL:-https://kanariya.toppymicros.com}"
 TOKEN="${TOKEN:-}"
 SRC="${SRC:-smoke}"
 ADMIN_KEY="${ADMIN_KEY:-}"
 
-if [[ -z "${BASE_URL}" || -z "${TOKEN}" ]]; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -z "${BASE_URL}" ]]; then
   echo "Usage: BASE_URL=https://kanariya.example.com TOKEN=... [ADMIN_KEY=...] $0"
   exit 1
+fi
+
+if [[ -z "${TOKEN}" ]]; then
+  if ! TOKEN="$(python3 "${SCRIPT_DIR}/gen_token.py")"; then
+    echo "Failed to generate token. Set TOKEN=... explicitly."
+    exit 1
+  fi
+  echo "Generated TOKEN=${TOKEN}"
 fi
 
 CANARY_URL="${BASE_URL%/}/canary/${TOKEN}?src=${SRC}"

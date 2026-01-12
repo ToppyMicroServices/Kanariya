@@ -26,6 +26,25 @@ jobs:
       - name: Install Wrangler
         run: npm install -g wrangler
 
+      - name: Update Worker secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          IP_HMAC_KEY: ${{ secrets.IP_HMAC_KEY }}
+          ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -n "${IP_HMAC_KEY}" ]; then
+            printf '%s' "${IP_HMAC_KEY}" | wrangler secret put IP_HMAC_KEY
+          fi
+          if [ -n "${ADMIN_KEY}" ]; then
+            printf '%s' "${ADMIN_KEY}" | wrangler secret put ADMIN_KEY
+          fi
+          if [ -n "${WEBHOOK_URL}" ]; then
+            printf '%s' "${WEBHOOK_URL}" | wrangler secret put WEBHOOK_URL
+          fi
+
       - name: Deploy Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

@@ -8,7 +8,7 @@ routes = [
 ]
 
 kv_namespaces = [
-  { binding = "KANARI_KV", id = "<KV_NAMESPACE_ID>" }
+  { binding = "KANARI_KV", id = "fdde467002b74f65aa4de813dd901ede" }
 ]
 
 [vars]

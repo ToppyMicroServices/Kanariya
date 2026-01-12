@@ -247,6 +247,16 @@ wrangler secret put WEBHOOK_URL   # optional
 
 > Note: This repo may include a ready-to-deploy Worker template (planned). If you already have your Worker code elsewhere, the binding names above match the intended defaults.
 
+## GitHub Pages UI (optional)
+
+The token generator UI is available at `docs/index.html` so you can host it on GitHub Pages.
+
+1. GitHub repo settings → Pages
+2. Source: `Deploy from a branch`
+3. Branch: `main`, Folder: `/docs`
+
+Your UI will be served from the GitHub Pages URL, while the API continues to run on Cloudflare Workers.
+
 ## Token formats
 
 ### 1) URL token (recommended)
