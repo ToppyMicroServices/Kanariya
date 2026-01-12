@@ -86,6 +86,7 @@ export default {
         const dedupeKey = `dedupe:${token}:${ipHash}:${uaHash}`;
         const dedupeHit = canDedupe ? await env.KANARI_KV.get(dedupeKey) : false;
 
+        // Store minimal metadata only; avoid request body or full query logging.
         const event = {
           ts: new Date().toISOString(),
           token,

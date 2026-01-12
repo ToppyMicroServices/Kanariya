@@ -16,11 +16,11 @@
 
 ## Phase 0: 仕様固定（MVPのゴール）
 
-- [ ] (AI) MVP spec v0.1 を README と整合（API/ログ/通知/保持/重複抑制）
-- [ ] (AI) デフォルト値を固定：
-  - [ ] イベント保持：30日（Public MVP）
-  - [ ] dedupe TTL：30分
-  - [ ] `/admin/*` は後段で Access 化（MVPは `ADMIN_KEY` で暫定）
+- [x] (AI) MVP spec v0.1 を README と整合（API/ログ/通知/保持/重複抑制）
+- [x] (AI) デフォルト値を固定：
+  - [x] イベント保持：30日（Public MVP）
+  - [x] dedupe TTL：30分
+  - [x] `/admin/*` は後段で Access 化（MVPは `ADMIN_KEY` で暫定）
 
 ---
 
@@ -28,17 +28,17 @@
 
 ### 1-1. Cloudflare API Token設計（最小権限）
 
-- [ ] (AI) 必要権限のリスト化（zone / dns / workers / kv / rules）
-- [ ] (Human) Cloudflare Dashboardで API Token を発行（推奨：目的別に分割）
+- [x] (AI) 必要権限のリスト化（zone / dns / workers / kv / rules）
+- [x] (Human) Cloudflare Dashboardで API Token を発行（推奨：目的別に分割）
   - [ ] `CF_TOKEN_PROVISION`（プロビジョニング用：DNS/Workers/KV/Routes）
   - [ ] `CF_TOKEN_READONLY`（検証用：read-only）
 - [ ] (Human) Tokenを安全に保管（1Password/Keychain/Secret Manager）
 
 ### 1-2. 権限確認（API疎通）
 
-- [ ] (AI) `scripts/cf_check_access.{py|ts}` を作る（zone取得、権限不足を明示）
-- [ ] (Human) ローカルで `CF_API_TOKEN` を設定して実行
-- [ ] (AI) 失敗時のメッセージ（どの権限が不足か）を整える
+- [x] (AI) `scripts/cf_check_access.{py|ts}` を作る（zone取得、権限不足を明示）
+- [x] (Human) ローカルで `CF_API_TOKEN` を設定して実行
+- [x] (AI) 失敗時のメッセージ（どの権限が不足か）を整える
 
 ---
 
@@ -48,25 +48,25 @@
 
 方針：何度実行しても同じ最終状態になるようにする（冪等）。
 
-- [ ] (AI) `scripts/cf_bootstrap.{py|ts}` を作る（以下を順に実行）
-  - [ ] Zoneの特定（`toppymicros.com`）
-  - [ ] DNSレコード作成：`kanariya.toppymicros.com`（proxied=ON）
-  - [ ] Workers KV namespace 作成：`KANARI_KV`
-  - [ ] Worker ルート設定：
-    - [ ] `kanariya.toppymicros.com/canary/*`
-    - [ ] （任意）`kanariya.toppymicros.com/admin/*`
+- [x] (AI) `scripts/cf_bootstrap.{py|ts}` を作る（以下を順に実行）
+  - [x] Zoneの特定（`toppymicros.com`）
+  - [x] DNSレコード作成：`kanariya.toppymicros.com`（proxied=ON）
+  - [x] Workers KV namespace 作成：`KANARI_KV`
+  - [x] Worker ルート設定：
+    - [x] `kanariya.toppymicros.com/canary/*`
+    - [x] （任意）`kanariya.toppymicros.com/admin/*`
   - [ ] (推奨) WAF/Rate limit ルール（最初は緩く、後で調整）：
     - [ ] `/canary/*` への過剰リクエスト制限
     - [ ] `/admin/*` は challenge/block
-- [ ] (AI) 実行結果を JSON で出力（作成/既存/変更の差分）
-- [ ] (Human) 初回は dry-run を見てレビュー
+- [x] (AI) 実行結果を JSON で出力（作成/既存/変更の差分）
+- [x] (Human) 初回は dry-run を見てレビュー
 
 ### 2-2. Wrangler連携（デプロイ）
 
-- [ ] (AI) `wrangler.toml` の雛形を用意（routes/kv binding）
-- [ ] (AI) `scripts/wrangler_deploy.sh` を作る
-  - [ ] `wrangler deploy`
-  - [ ] `wrangler kv:namespace list` からID取得→toml反映（または手動で固定）
+- [x] (AI) `wrangler.toml` の雛形を用意（routes/kv binding）
+- [x] (AI) `scripts/wrangler_deploy.sh` を作る
+  - [x] `wrangler deploy`
+  - [x] `wrangler kv namespace list` からID取得→toml反映（または手動で固定）
 - [ ] (Human) Secret投入（安全のため原則手動）
   - [ ] `wrangler secret put IP_HMAC_KEY`
   - [ ] `wrangler secret put ADMIN_KEY`
@@ -78,14 +78,14 @@
 
 ## Phase 3: バックエンド実装（Workers）
 
-- [ ] (AI) `src/worker.js`（or TS）を実装
-  - [ ] `GET /canary/:token` でイベント保存 + 通知
-  - [ ] IPはHMAC化して保存（平文IPを残さない）
-  - [ ] dedupe key（`token+ipHash+uaHash`）で通知抑制
-  - [ ] 204応答
-  - [ ] （任意）`GET /admin/export`（ADMIN_KEYで保護）
-- [ ] (AI) 例外系：KV失敗時の挙動（落とす/無通知）を固定
-- [ ] (AI) ルール：保存しない項目（body/queryの最小化）をコメントに明記
+- [x] (AI) `src/worker.js`（or TS）を実装
+  - [x] `GET /canary/:token` でイベント保存 + 通知
+  - [x] IPはHMAC化して保存（平文IPを残さない）
+  - [x] dedupe key（`token+ipHash+uaHash`）で通知抑制
+  - [x] 204応答
+  - [x] （任意）`GET /admin/export`（ADMIN_KEYで保護）
+- [x] (AI) 例外系：KV失敗時の挙動（落とす/無通知）を固定
+- [x] (AI) ルール：保存しない項目（body/queryの最小化）をコメントに明記
 
 ---
 
@@ -93,16 +93,16 @@
 
 ### 4-1. ローカル実行
 
-- [ ] (AI) `make dev`（miniflare）でローカル起動
-- [ ] (Human) ローカルで smoke（curl）確認
+- [x] (AI) `make dev`（wrangler dev）でローカル起動
+- [x] (Human) ローカルで smoke（curl）確認
 
 ### 4-2. GitHub Actions
 
-- [ ] (AI) `.github/workflows/deploy.yml` を作る（手動実行 + main push）
+- [x] (AI) `.github/workflows/deploy.yml` を作る（手動実行 + main push）
 - [ ] (Human) Repo Secretsに投入：
   - [ ] `CF_API_TOKEN`（最小権限）
   - [ ] `IP_HMAC_KEY` / `ADMIN_KEY` / `WEBHOOK_URL`
-- [ ] (AI) CIで `wrangler deploy` まで自動化
+- [x] (AI) CIで `wrangler deploy` まで自動化
 
 ---
 
@@ -110,17 +110,17 @@
 
 ### 5-1. Unit tests（ローカル）
 
-- [ ] (AI) `vitest` 等で Worker単体テスト
-  - [ ] `/canary` が 204 を返す
-  - [ ] KVにイベントが保存される
-  - [ ] dedupeが効く（2回目は通知しない）
-  - [ ] `ipHash` が生成される
+- [x] (AI) `vitest` 等で Worker単体テスト
+  - [x] `/canary` が 204 を返す
+  - [x] KVにイベントが保存される
+  - [x] dedupeが効く（2回目は通知しない）
+  - [x] `ipHash` が生成される
 
 ### 5-2. Integration / Smoke（本番）
 
-- [ ] (AI) `scripts/smoke_test.sh` を作る
-  - [ ] `/canary/<token>?src=smoke` へGET
-  - [ ] `admin/export`（有効時）でイベントが取れる
+- [x] (AI) `scripts/smoke_test.sh` を作る
+  - [x] `/canary/<token>?src=smoke` へGET
+  - [x] `admin/export`（有効時）でイベントが取れる
 - [ ] (Human) 最初の一回はWebhook通知を目視確認
 
 ---
@@ -129,11 +129,11 @@
 
 目的：個人向けに「トークン生成・植え付けテンプレ」を即提供。
 
-- [ ] (AI) `public/index.html`（静的）を作る
-  - [ ] token生成（crypto）
-  - [ ] `src` のテンプレ入力
-  - [ ] URLを生成してコピー
-  - [ ] ファイルトークン（HTML）をその場で生成してDL
+- [x] (AI) `public/index.html`（静的）を作る
+  - [x] token生成（crypto）
+  - [x] `src` のテンプレ入力
+  - [x] URLを生成してコピー
+  - [x] ファイルトークン（HTML）をその場で生成してDL
 - [ ] (AI) Admin UI（後回し）
   - [ ] まずは export JSON の表示だけ（Access導入後に拡張）
 
@@ -143,8 +143,8 @@
 
 - [ ] (Human) Cloudflare WAF/RateLimit の実効確認（DoS耐性）
 - [ ] (Human) `/admin/*` の公開範囲レビュー（Access導入するか）
-- [ ] (AI) Abuse policy（最小）を README に追記
-- [ ] (AI) `SECURITY.md`（脆弱性報告窓口）を追加
+- [x] (AI) Abuse policy（最小）を README に追記
+- [x] (AI) `SECURITY.md`（脆弱性報告窓口）を追加
 
 ---
 

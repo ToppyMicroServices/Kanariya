@@ -4,6 +4,5 @@ node_modules/
 .wrangler/
 dist/
 coverage/
-node_ modules/*
 .DS_Store
 .vscode/

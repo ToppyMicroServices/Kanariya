@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 ToppyMicroServices OÜ
+# Licensed under the Apache License, Version 2.0. See LICENSE.
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-https://kanariya.toppymicros.com}"

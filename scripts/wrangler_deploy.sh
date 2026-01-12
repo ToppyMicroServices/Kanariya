@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
+# Copyright 2026 ToppyMicroServices OÜ
+# Licensed under the Apache License, Version 2.0. See LICENSE.
 set -euo pipefail
 
 WRANGLER_TOML="${WRANGLER_TOML:-wrangler.toml}"
 KV_TITLE="${KV_TITLE:-KANARI_KV}"
+WRANGLER_BIN="${WRANGLER_BIN:-wrangler}"
 
 echo "Deploying worker..."
-wrangler deploy
+${WRANGLER_BIN} deploy
 
-if ! wrangler kv:namespace list --json > /tmp/kv_namespaces.json; then
+if ! ${WRANGLER_BIN} kv namespace list --json > /tmp/kv_namespaces.json; then
   echo "Failed to list KV namespaces. Update ${WRANGLER_TOML} manually."
   exit 1
 fi

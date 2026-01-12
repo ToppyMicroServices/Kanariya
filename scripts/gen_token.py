@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 ToppyMicroServices OÜ
+# Licensed under the Apache License, Version 2.0. See LICENSE.
 import argparse
 import base64
 import os
