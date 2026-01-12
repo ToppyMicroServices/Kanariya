@@ -92,6 +92,10 @@
         resize: vertical;
       }
 
+      .token-output {
+        min-height: 70px;
+      }
+
       .row {
         display: grid;
         gap: 12px;
@@ -162,7 +166,7 @@
       <section class="card stack">
         <div>
           <label>Token URL</label>
-          <input id="tokenUrl" readonly />
+          <textarea id="tokenUrl" class="token-output" readonly></textarea>
         </div>
         <div class="actions">
           <button class="ghost" data-copy="tokenUrl">Copy URL</button>
@@ -287,7 +291,7 @@
         tokenStatus.textContent = "Testing...";
         try {
           const response = await fetch(url, { method: "GET" });
-          tokenStatus.textContent = `Status: ${response.status} (event recorded)`;
+          tokenStatus.textContent = `Status: ${response.status} (request sent)`;
         } catch (err) {
           tokenStatus.textContent = "Failed to reach token URL.";
         }
