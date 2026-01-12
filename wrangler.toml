@@ -1,0 +1,17 @@
+name = "kanariya"
+main = "src/worker.js"
+compatibility_date = "2026-01-12"
+
+routes = [
+  { pattern = "kanariya.toppymicros.com/canary/*", zone_name = "toppymicros.com" },
+  { pattern = "kanariya.toppymicros.com/admin/*", zone_name = "toppymicros.com" }
+]
+
+kv_namespaces = [
+  { binding = "KANARI_KV", id = "<KV_NAMESPACE_ID>" }
+]
+
+[vars]
+EVENT_TTL_SECONDS = "2592000"
+DEDUPE_TTL_SECONDS = "1800"
+EXPORT_MAX_ITEMS = "1000"
