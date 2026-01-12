@@ -84,7 +84,7 @@ This section defines the **minimum** scope for a usable public MVP.
   - Response: JSON array of events for the token
   - Header: `Authorization: Bearer <ADMIN_KEY>`
   - Notes: for MVP, a shared secret is acceptable; later migrate to Cloudflare Access/SSO.
-  - If you do not set `ADMIN_KEY` or you remove the `/admin/*` route, this endpoint is disabled.
+  - If you do not set `ADMIN_KEY`, this endpoint is disabled unless `ALLOW_PUBLIC_EXPORT=1` is set.
 
 ### Data model
 
@@ -166,6 +166,8 @@ Configure the following on the Worker:
   - Used to store `ipHash = HMAC(IP, IP_HMAC_KEY)` instead of plain IP.
 - `ADMIN_KEY` (**secret**, optional)
   - Required only if `/admin/export` is enabled. If unset, `/admin/export` returns 403.
+- `ALLOW_PUBLIC_EXPORT` (non-secret, optional)
+  - Set to `1` to allow `/admin/export` without `ADMIN_KEY`. Not recommended for public use.
 
 Optional:
 

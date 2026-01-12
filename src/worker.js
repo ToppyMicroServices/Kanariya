@@ -223,8 +223,15 @@ export default {
       const authHeader = request.headers.get("authorization") || "";
       const adminKey = env.ADMIN_KEY || "";
       const bearerKey = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+      const allowPublicExport = ["1", "true", "yes"].includes(
+        String(env.ALLOW_PUBLIC_EXPORT || "").toLowerCase()
+      );
 
-      if (!adminKey || bearerKey !== adminKey) {
+      if (adminKey) {
+        if (bearerKey !== adminKey) {
+          return new Response("Forbidden", { status: 403, headers: corsHeaders() });
+        }
+      } else if (!allowPublicExport) {
         return new Response("Forbidden", { status: 403, headers: corsHeaders() });
       }
       if (!token) {

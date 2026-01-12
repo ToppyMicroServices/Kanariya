@@ -204,7 +204,7 @@
         </div>
         <div class="hint" id="exportStatus"></div>
         <textarea id="exportOutput" readonly></textarea>
-        <div class="hint">Admin key is used locally in your browser.</div>
+        <div class="hint">Admin key is optional if public export is enabled.</div>
       </section>
     </main>
 
@@ -277,16 +277,15 @@
         exportStatus.textContent = "";
         exportOutput.value = "";
 
-        if (!baseUrl || !token || !key) {
-          exportStatus.textContent = "Base URL, token, and admin key are required.";
+        if (!baseUrl || !token) {
+          exportStatus.textContent = "Base URL and token are required.";
           return;
         }
 
         const url = `${baseUrl}/admin/export?token=${encodeURIComponent(token)}`;
         try {
-          const response = await fetch(url, {
-            headers: { Authorization: `Bearer ${key}` },
-          });
+          const headers = key ? { Authorization: `Bearer ${key}` } : {};
+          const response = await fetch(url, { headers });
           const body = await response.text();
           exportStatus.textContent = `Status: ${response.status}`;
           exportOutput.value = body;
