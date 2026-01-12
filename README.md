@@ -196,7 +196,7 @@ Optional:
 - `RATE_LIMIT_MAX` (non-secret, optional)
   - Default: 60 (max hits per window, set 0 to disable).
 - `REQUIRE_SIGNATURE` (non-secret, optional)
-  - Set to `1` to require signed canary URLs.
+  - Default: 0. Set to `1` to require signed canary URLs.
 - `SIGNATURE_WINDOW_SECONDS` (non-secret, optional)
   - Default: 300 (allowed clock skew for `ts`, set 0 to disable window check).
 
