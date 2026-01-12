@@ -18,6 +18,7 @@
 - Active attacker engagement, retaliation, or any offensive behavior
 - Capturing payload data beyond minimal request metadata
 
+
 ## How it works
 
 1. Generate a unique token URL:
@@ -26,6 +27,25 @@
 3. When accessed, Kanariya:
    - stores an event record (timestamp, token, src, country/ASN/UA, etc.)
    - optionally sends an alert (Webhook / email)
+
+
+## Quick diagram
+
+```mermaid
+flowchart LR
+  Plant["Plant a unique token<br/>(URL / file / email)"] --> Access["Token is accessed"]
+  Access --> Worker["Cloudflare Worker<br/>GET /canary/:token"]
+  Worker --> Dedupe{"Dedupe window<br/>(token, ipHash, ua)"}
+  Dedupe -->|first hit| Store[("Workers KV<br/>Event record + TTL")]
+  Dedupe -->|repeat| Store
+  Store --> Notify["Notify<br/>Webhook / email (optional)"]
+  Store --> Export["Admin export<br/>JSON (optional)"]
+
+  subgraph Minimal metadata
+    Meta[ts, token, src, ipHash, country, asn, ua, referer]
+  end
+  Worker -.writes.-> Meta
+```
 
 ## Architecture (recommended)
 
