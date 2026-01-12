@@ -33,6 +33,43 @@ class MemoryKV {
   }
 }
 
+function canonicalQuery(params) {
+  const entries = [];
+  for (const [key, value] of params.entries()) {
+    if (key === "sig") continue;
+    entries.push([key, value]);
+  }
+  entries.sort((a, b) => (a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
+  return entries
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+    .join("&");
+}
+
+async function hmacHex(secret, value) {
+  const encoder = new TextEncoder();
+  const key = await globalThis.crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await globalThis.crypto.subtle.sign("HMAC", key, encoder.encode(value));
+  return [...new Uint8Array(signature)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function makeSignedUrl({ token, secret, src, ts, nonce }) {
+  const params = new URLSearchParams();
+  params.set("ts", String(ts));
+  if (src) params.set("src", src);
+  if (nonce) params.set("nonce", nonce);
+  const query = canonicalQuery(params);
+  const path = `/canary/${token}`;
+  const stringToSign = `${ts}|${path}|${query}`;
+  const sig = await hmacHex(secret, stringToSign);
+  return `https://example.com${path}?${query}&sig=${sig}`;
+}
+
 const baseEnv = () => ({
   KANARI_KV: new MemoryKV(),
   IP_HMAC_KEY: "unit-test-secret",
@@ -105,5 +142,55 @@ describe("kanariya worker", () => {
     const event = await env.KANARI_KV.get(listed.keys[0].name, "json");
     expect(event.ipHash).toBeTruthy();
     expect(event.ipHash).not.toEqual("203.0.113.9");
+  });
+
+  it("accepts signed requests when signature is required", async () => {
+    const env = {
+      ...baseEnv(),
+      REQUIRE_SIGNATURE: "1",
+      SIGNING_SECRET: "signing-secret",
+      SIGNATURE_WINDOW_SECONDS: "300",
+    };
+    const ts = Math.floor(Date.now() / 1000);
+    const url = await makeSignedUrl({
+      token: "sig-token",
+      secret: env.SIGNING_SECRET,
+      src: "signed",
+      ts,
+      nonce: "nonce-1",
+    });
+    const request = withCf(
+      new Request(url, {
+        headers: { "user-agent": "UnitTest", "cf-connecting-ip": "203.0.113.2" },
+      }),
+      { country: "JP", asn: 64515 }
+    );
+
+    const response = await worker.fetch(request, env, { waitUntil() {} });
+    expect(response.status).toBe(204);
+
+    const listed = await env.KANARI_KV.list({ prefix: "event:sig-token:" });
+    expect(listed.keys.length).toBe(1);
+  });
+
+  it("rejects unsigned requests when signature is required", async () => {
+    const env = {
+      ...baseEnv(),
+      REQUIRE_SIGNATURE: "1",
+      SIGNING_SECRET: "signing-secret",
+      SIGNATURE_WINDOW_SECONDS: "300",
+    };
+    const request = withCf(
+      new Request("https://example.com/canary/sig-token?src=plain", {
+        headers: { "user-agent": "UnitTest", "cf-connecting-ip": "203.0.113.3" },
+      }),
+      { country: "JP", asn: 64516 }
+    );
+
+    const response = await worker.fetch(request, env, { waitUntil() {} });
+    expect(response.status).toBe(204);
+
+    const listed = await env.KANARI_KV.list({ prefix: "event:sig-token:" });
+    expect(listed.keys.length).toBe(0);
   });
 });

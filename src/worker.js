@@ -3,6 +3,7 @@ const DEFAULT_DEDUPE_TTL_SECONDS = 60 * 30;
 const DEFAULT_EXPORT_MAX_ITEMS = 1000;
 const DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60;
 const DEFAULT_RATE_LIMIT_MAX = 60;
+const DEFAULT_SIGNATURE_WINDOW_SECONDS = 300;
 
 function getTtl(envValue, fallback) {
   const parsed = Number(envValue);
@@ -17,6 +18,18 @@ function getNumber(envValue, fallback) {
 function textOrEmpty(value, max = 512) {
   if (!value) return "";
   return value.length > max ? value.slice(0, max) : value;
+}
+
+function canonicalQuery(params) {
+  const entries = [];
+  for (const [key, value] of params.entries()) {
+    if (key === "sig") continue;
+    entries.push([key, value]);
+  }
+  entries.sort((a, b) => (a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
+  return entries
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+    .join("&");
 }
 
 async function hmacHex(secret, value) {
@@ -102,6 +115,45 @@ export default {
       const ua = textOrEmpty(request.headers.get("user-agent") || "", 256);
       const referer = textOrEmpty(request.headers.get("referer") || "", 512);
       const cf = request.cf || {};
+
+      const requireSignature = ["1", "true", "yes"].includes(
+        String(env.REQUIRE_SIGNATURE || "").toLowerCase()
+      );
+      const signingSecret = env.SIGNING_SECRET || "";
+      const signatureWindow = getNumber(
+        env.SIGNATURE_WINDOW_SECONDS,
+        DEFAULT_SIGNATURE_WINDOW_SECONDS
+      );
+      if (requireSignature) {
+        const tsParam = searchParams.get("ts");
+        const sigParam = (searchParams.get("sig") || "").toLowerCase();
+        const nonce = searchParams.get("nonce") || "";
+        const ts = Number(tsParam);
+        if (!signingSecret || !Number.isFinite(ts) || !sigParam) {
+          return new Response(null, { status: 204, headers: corsHeaders() });
+        }
+        const now = Math.floor(Date.now() / 1000);
+        if (signatureWindow > 0 && Math.abs(now - ts) > signatureWindow) {
+          return new Response(null, { status: 204, headers: corsHeaders() });
+        }
+
+        const query = canonicalQuery(searchParams);
+        const stringToSign = `${ts}|${pathname}|${query}`;
+        const expected = await hmacHex(signingSecret, stringToSign);
+        if (expected !== sigParam) {
+          return new Response(null, { status: 204, headers: corsHeaders() });
+        }
+
+        if (nonce) {
+          const nonceKey = `nonce:${token}:${nonce}`;
+          const seen = await env.KANARI_KV.get(nonceKey);
+          if (seen) {
+            return new Response(null, { status: 204, headers: corsHeaders() });
+          }
+          const nonceTtl = signatureWindow > 0 ? signatureWindow : DEFAULT_SIGNATURE_WINDOW_SECONDS;
+          await env.KANARI_KV.put(nonceKey, "1", { expirationTtl: nonceTtl });
+        }
+      }
 
       const eventTtl = getTtl(env.EVENT_TTL_SECONDS, DEFAULT_EVENT_TTL_SECONDS);
       const dedupeTtl = getTtl(env.DEDUPE_TTL_SECONDS, DEFAULT_DEDUPE_TTL_SECONDS);

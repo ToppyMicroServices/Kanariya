@@ -147,6 +147,16 @@
         <div class="actions">
           <button class="primary" id="generate">Generate</button>
         </div>
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <div class="row">
+            <div>
+              <label>Signing key (optional)</label>
+              <input id="signingKey" type="password" placeholder="SIGNING_SECRET" />
+            </div>
+          </div>
+          <div class="hint">If signature is required, enter the signing key to generate signed URLs.</div>
+        </details>
       </section>
 
       <section class="card stack">
@@ -191,6 +201,7 @@
       const tokenUrlOutput = document.getElementById("tokenUrl");
       const htmlBeaconOutput = document.getElementById("htmlBeacon");
       const tokenStatus = document.getElementById("tokenStatus");
+      const signingKeyInput = document.getElementById("signingKey");
       const adminTokenInput = document.getElementById("adminToken");
       const exportStatus = document.getElementById("exportStatus");
       const exportOutput = document.getElementById("exportOutput");
@@ -206,10 +217,56 @@
         return toBase64Url(bytes);
       }
 
-      function buildOutputs() {
+      function canonicalQuery(params) {
+        const entries = [];
+        for (const [key, value] of params.entries()) {
+          if (key === "sig") continue;
+          entries.push([key, value]);
+        }
+        entries.sort((a, b) =>
+          a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])
+        );
+        return entries
+          .map(
+            ([key, value]) =>
+              `${encodeURIComponent(key)}=${encodeURIComponent(value)}`
+          )
+          .join("&");
+      }
+
+      async function hmacHex(secret, value) {
+        const encoder = new TextEncoder();
+        const key = await crypto.subtle.importKey(
+          "raw",
+          encoder.encode(secret),
+          { name: "HMAC", hash: "SHA-256" },
+          false,
+          ["sign"]
+        );
+        const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(value));
+        return [...new Uint8Array(signature)]
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("");
+      }
+
+      async function buildOutputs() {
         const tokenBytes = 16;
         const token = generateToken(tokenBytes);
-        const url = `${BASE_URL}/${token}`;
+        const signingKey = signingKeyInput.value.trim();
+        const basePath = new URL(BASE_URL);
+        const path = `${basePath.pathname}/${token}`.replace(/\/{2,}/g, "/");
+        let url = `${BASE_URL}/${token}`;
+        if (signingKey) {
+          const ts = Math.floor(Date.now() / 1000);
+          const nonce = toBase64Url(crypto.getRandomValues(new Uint8Array(8)));
+          const params = new URLSearchParams();
+          params.set("ts", String(ts));
+          params.set("nonce", nonce);
+          const query = canonicalQuery(params);
+          const stringToSign = `${ts}|${path}|${query}`;
+          const sig = await hmacHex(signingKey, stringToSign);
+          url = `${BASE_URL}/${token}?${query}&sig=${sig}`;
+        }
 
         tokenUrlOutput.value = url;
         htmlBeaconOutput.value = `<!doctype html>
@@ -258,7 +315,9 @@
         }
       }
 
-      document.getElementById("generate").addEventListener("click", buildOutputs);
+      document.getElementById("generate").addEventListener("click", () => {
+        void buildOutputs();
+      });
       document.getElementById("testToken").addEventListener("click", testToken);
       document.getElementById("downloadHtml").addEventListener("click", () => {
         const blob = new Blob([htmlBeaconOutput.value], { type: "text/html" });

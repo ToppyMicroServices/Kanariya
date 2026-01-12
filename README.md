@@ -79,6 +79,7 @@ This section defines the **minimum** scope for a usable public MVP.
     - Write event record to storage
     - Notify on first hit per `(token, ipHash, ua)` within a window
     - Apply rate limiting / abuse protection
+    - If signatures are required, only signed requests within the time window are accepted
 
 - `GET /admin/export?token=<token>` (optional, admin-only)
   - Response: JSON array of events for the token
@@ -169,6 +170,8 @@ Configure the following on the Worker:
   - Required only if `/admin/export` is enabled. If unset, `/admin/export` returns 403.
 - `ALLOW_PUBLIC_EXPORT` (non-secret, optional)
   - Set to `1` to allow `/admin/export` without `ADMIN_KEY` (overrides admin key). Not recommended for public use.
+- `SIGNING_SECRET` (**secret**, optional)
+  - Required when `REQUIRE_SIGNATURE=1`. Used to sign canary URLs.
 
 Optional:
 
@@ -192,6 +195,10 @@ Optional:
   - Default: 60 (per-IP window, set 0 to disable).
 - `RATE_LIMIT_MAX` (non-secret, optional)
   - Default: 60 (max hits per window, set 0 to disable).
+- `REQUIRE_SIGNATURE` (non-secret, optional)
+  - Set to `1` to require signed canary URLs.
+- `SIGNATURE_WINDOW_SECONDS` (non-secret, optional)
+  - Default: 300 (allowed clock skew for `ts`, set 0 to disable window check).
 
 ### 5) Cloudflare security controls (strongly recommended)
 
@@ -369,6 +376,31 @@ Authorization: Bearer <ADMIN_KEY>
 
 Return JSON array of events for the token.
 If you do not need admin export, remove the `/admin/*` route and omit `ADMIN_KEY`.
+
+## Signed canary URLs (recommended for public MVP)
+
+To reduce spoofed alerts, you can require signatures on canary URLs.
+
+Signed query parameters:
+
+- `ts`: UNIX timestamp (seconds)
+- `nonce`: optional random nonce for replay protection
+- `sig`: HMAC-SHA256 over `ts|path|query` (query excludes `sig`)
+
+Environment:
+
+- Set `REQUIRE_SIGNATURE=1`
+- Set `SIGNING_SECRET` (secret)
+- Optionally set `SIGNATURE_WINDOW_SECONDS` (default 300s)
+
+Generate a signed URL:
+
+```bash
+SIGNING_SECRET="..." python3 scripts/gen_signed_url.py \
+  --base-url "https://kanariya.toppymicros.com/canary" \
+  --token "<token>" \
+  --src "doc_invoices_2026q1"
+```
 
 ## Security & privacy
 
