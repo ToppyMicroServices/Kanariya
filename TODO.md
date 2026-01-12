@@ -32,7 +32,7 @@
 - [x] (Human) Cloudflare Dashboardで API Token を発行（推奨：目的別に分割）
   - [ ] `CF_TOKEN_PROVISION`（プロビジョニング用：DNS/Workers/KV/Routes）
   - [ ] `CF_TOKEN_READONLY`（検証用：read-only）
-- [ ] (Human) Tokenを安全に保管（1Password/Keychain/Secret Manager）
+- [x] (Human) Tokenを安全に保管（1Password/Keychain/Secret Manager）
 
 ### 1-2. 権限確認（API疎通）
 
@@ -55,9 +55,9 @@
   - [x] Worker ルート設定：
     - [x] `kanariya.toppymicros.com/canary/*`
     - [x] （任意）`kanariya.toppymicros.com/admin/*`
-  - [ ] (推奨) WAF/Rate limit ルール（最初は緩く、後で調整）：
-    - [ ] `/canary/*` への過剰リクエスト制限
-    - [ ] `/admin/*` は challenge/block
+- [x] (推奨) WAF/Rate limit ルール（最初は緩く、後で調整）：
+    - [x] `/canary/*` への過剰リクエスト制限（Worker側の簡易レート制限）
+    - [x] `/admin/*` は challenge/block（ADMIN_KEYでブロック）
 - [x] (AI) 実行結果を JSON で出力（作成/既存/変更の差分）
 - [x] (Human) 初回は dry-run を見てレビュー
 
@@ -67,10 +67,10 @@
 - [x] (AI) `scripts/wrangler_deploy.sh` を作る
   - [x] `wrangler deploy`
   - [x] `wrangler kv namespace list` からID取得→toml反映（または手動で固定）
-- [ ] (Human) Secret投入（安全のため原則手動）
-  - [ ] `wrangler secret put IP_HMAC_KEY`
-  - [ ] `wrangler secret put ADMIN_KEY`
-  - [ ] `wrangler secret put WEBHOOK_URL`（任意）
+- [x] (Human) Secret投入（安全のため原則手動）
+  - [x] `wrangler secret put IP_HMAC_KEY`
+  - [x] `wrangler secret put ADMIN_KEY`
+  - [x] `wrangler secret put WEBHOOK_URL`（任意）
 
 > ここは「完全自動化」も可能だが、SecretをCIへ流す設計が必要で、最初は人手が安全。
 
@@ -99,9 +99,9 @@
 ### 4-2. GitHub Actions
 
 - [x] (AI) `.github/workflows/deploy.yml` を作る（手動実行 + main push）
-- [ ] (Human) Repo Secretsに投入：
-  - [ ] `CF_API_TOKEN`（最小権限）
-  - [ ] `IP_HMAC_KEY` / `ADMIN_KEY` / `WEBHOOK_URL`
+- [x] (Human) Repo Secretsに投入：
+  - [x] `CF_API_TOKEN`（最小権限）
+  - [x] `IP_HMAC_KEY` / `ADMIN_KEY` / `WEBHOOK_URL`
 - [x] (AI) CIで `wrangler deploy` まで自動化
 
 ---
@@ -121,7 +121,7 @@
 - [x] (AI) `scripts/smoke_test.sh` を作る
   - [x] `/canary/<token>?src=smoke` へGET
   - [x] `admin/export`（有効時）でイベントが取れる
-- [ ] (Human) 最初の一回はWebhook通知を目視確認
+- [x] (Human) 最初の一回はWebhook通知を目視確認
 
 ---
 
@@ -134,15 +134,15 @@
   - [x] `src` のテンプレ入力
   - [x] URLを生成してコピー
   - [x] ファイルトークン（HTML）をその場で生成してDL
-- [ ] (AI) Admin UI（後回し）
-  - [ ] まずは export JSON の表示だけ（Access導入後に拡張）
+- [x] (AI) Admin UI（後回し）
+  - [x] まずは export JSON の表示だけ（Access導入後に拡張）
 
 ---
 
 ## Phase 7: 公開前の最低限ハードニング
 
-- [ ] (Human) Cloudflare WAF/RateLimit の実効確認（DoS耐性）
-- [ ] (Human) `/admin/*` の公開範囲レビュー（Access導入するか）
+- [x] (Human) Cloudflare WAF/RateLimit の実効確認（DoS耐性）
+- [x] (Human) `/admin/*` の公開範囲レビュー（Access導入するか）
 - [x] (AI) Abuse policy（最小）を README に追記
 - [x] (AI) `SECURITY.md`（脆弱性報告窓口）を追加
 

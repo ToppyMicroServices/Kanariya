@@ -1,10 +1,17 @@
 const DEFAULT_EVENT_TTL_SECONDS = 60 * 60 * 24 * 30;
 const DEFAULT_DEDUPE_TTL_SECONDS = 60 * 30;
 const DEFAULT_EXPORT_MAX_ITEMS = 1000;
+const DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60;
+const DEFAULT_RATE_LIMIT_MAX = 60;
 
 function getTtl(envValue, fallback) {
   const parsed = Number(envValue);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getNumber(envValue, fallback) {
+  const parsed = Number(envValue);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function textOrEmpty(value, max = 512) {
@@ -31,10 +38,26 @@ async function sha256Hex(value) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function parseEmailList(value) {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function randomId() {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function corsHeaders() {
+  return {
+    "access-control-allow-origin": "*",
+    "access-control-allow-headers": "authorization, content-type",
+    "access-control-allow-methods": "GET, OPTIONS",
+  };
 }
 
 async function listEventsForToken(env, token, maxItems) {
@@ -78,6 +101,11 @@ export default {
 
       const eventTtl = getTtl(env.EVENT_TTL_SECONDS, DEFAULT_EVENT_TTL_SECONDS);
       const dedupeTtl = getTtl(env.DEDUPE_TTL_SECONDS, DEFAULT_DEDUPE_TTL_SECONDS);
+      const rateLimitWindow = getNumber(
+        env.RATE_LIMIT_WINDOW_SECONDS,
+        DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+      );
+      const rateLimitMax = getNumber(env.RATE_LIMIT_MAX, DEFAULT_RATE_LIMIT_MAX);
 
       try {
         const ipHash = ip && env.IP_HMAC_KEY ? await hmacHex(env.IP_HMAC_KEY, ip) : "";
@@ -99,6 +127,19 @@ export default {
         };
 
         const eventKey = `event:${token}:${event.ts}:${randomId()}`;
+        const canRateLimit = Boolean(ipHash && rateLimitWindow > 0 && rateLimitMax > 0);
+        if (canRateLimit) {
+          const windowId = Math.floor(Date.now() / 1000 / rateLimitWindow);
+          const rateKey = `rl:${token}:${ipHash}:${windowId}`;
+          const rateCount = Number(await env.KANARI_KV.get(rateKey)) || 0;
+          if (rateCount >= rateLimitMax) {
+            return new Response(null, { status: 204 });
+          }
+          await env.KANARI_KV.put(rateKey, String(rateCount + 1), {
+            expirationTtl: rateLimitWindow,
+          });
+        }
+
         await env.KANARI_KV.put(eventKey, JSON.stringify(event), {
           expirationTtl: eventTtl,
         });
@@ -121,6 +162,46 @@ export default {
               })
             );
           }
+
+          if (env.MAIL_FROM && env.MAIL_TO) {
+            const toList = parseEmailList(env.MAIL_TO);
+            if (toList.length) {
+              const subjectPrefix = env.MAIL_SUBJECT_PREFIX || "Kanariya alert";
+              const subject = `${subjectPrefix}: ${token}`;
+              const body = [
+                `token: ${token}`,
+                `src: ${src}`,
+                `ts: ${event.ts}`,
+                `country: ${event.country}`,
+                `asn: ${event.asn}`,
+                `ipHash: ${event.ipHash}`,
+                `ua: ${event.ua}`,
+                `referer: ${event.referer}`,
+              ].join("\n");
+
+              const message = {
+                personalizations: [
+                  {
+                    to: toList.map((email) => ({ email })),
+                  },
+                ],
+                from: {
+                  email: env.MAIL_FROM,
+                  name: env.MAIL_FROM_NAME || "Kanariya",
+                },
+                subject,
+                content: [{ type: "text/plain", value: body }],
+              };
+
+              ctx.waitUntil(
+                fetch("https://api.mailchannels.net/tx/v1/send", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify(message),
+                })
+              );
+            }
+          }
         }
       } catch (err) {
         console.error("kanariya_error", err);
@@ -130,16 +211,20 @@ export default {
     }
 
     if (pathname === "/admin/export") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders() });
+      }
+
       const token = textOrEmpty(searchParams.get("token") || "");
       const authHeader = request.headers.get("authorization") || "";
       const adminKey = env.ADMIN_KEY || "";
       const bearerKey = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
 
       if (!adminKey || bearerKey !== adminKey) {
-        return new Response("Forbidden", { status: 403 });
+        return new Response("Forbidden", { status: 403, headers: corsHeaders() });
       }
       if (!token) {
-        return new Response("Missing token", { status: 400 });
+        return new Response("Missing token", { status: 400, headers: corsHeaders() });
       }
 
       try {
@@ -147,11 +232,11 @@ export default {
         const events = await listEventsForToken(env, token, maxItems);
         return new Response(JSON.stringify(events), {
           status: 200,
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...corsHeaders() },
         });
       } catch (err) {
         console.error("kanariya_admin_error", err);
-        return new Response("Error", { status: 500 });
+        return new Response("Error", { status: 500, headers: corsHeaders() });
       }
     }
 

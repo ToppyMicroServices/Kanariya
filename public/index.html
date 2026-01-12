@@ -5,20 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Kanariya Token Studio</title>
     <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
       rel="stylesheet"
     />
     <style>
       :root {
-        --bg-1: #f6efe3;
-        --bg-2: #dcefe9;
-        --ink: #1e2a2f;
-        --muted: #4a5b63;
-        --accent: #e85d44;
-        --accent-dark: #c94a34;
+        --bg-1: #f7f5f0;
+        --bg-2: #e7f2f4;
+        --ink: #1b2429;
+        --muted: #5a6a72;
+        --accent: #ed6a3a;
         --panel: #ffffff;
-        --stroke: rgba(30, 42, 47, 0.12);
-        --shadow: 0 24px 60px rgba(24, 33, 38, 0.15);
+        --stroke: rgba(27, 36, 41, 0.12);
+        --shadow: 0 12px 30px rgba(27, 36, 41, 0.12);
       }
 
       * {
@@ -28,250 +27,184 @@
       body {
         margin: 0;
         min-height: 100vh;
-        font-family: "Space Grotesk", sans-serif;
+        font-family: "DM Sans", sans-serif;
         color: var(--ink);
-        background: radial-gradient(circle at 15% 20%, #fef6e8 0%, transparent 55%),
-          radial-gradient(circle at 80% 0%, #d7f2ea 0%, transparent 50%),
-          linear-gradient(120deg, var(--bg-1), var(--bg-2));
+        background: linear-gradient(135deg, var(--bg-1), var(--bg-2));
       }
 
       main {
-        max-width: 1100px;
+        max-width: 920px;
         margin: 0 auto;
-        padding: 64px 24px 80px;
+        padding: 48px 20px 72px;
         display: grid;
-        grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
-        gap: 32px;
+        gap: 20px;
       }
 
       header {
-        grid-column: 1 / -1;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 24px;
-        margin-bottom: 10px;
-        animation: drop 0.6s ease-out;
+        display: grid;
+        gap: 10px;
       }
 
-      header h1 {
-        font-size: clamp(2.2rem, 4vw, 3.4rem);
+      h1 {
         margin: 0;
-        letter-spacing: -0.03em;
+        font-size: clamp(2rem, 3vw, 2.6rem);
+        letter-spacing: -0.02em;
       }
 
-      header p {
-        margin: 8px 0 0;
+      p {
+        margin: 0;
         color: var(--muted);
-        max-width: 520px;
-      }
-
-      .license {
-        margin: 6px 0 0;
-        font-size: 0.85rem;
-        color: var(--muted);
-      }
-
-      .pill {
-        border: 1px solid var(--stroke);
-        border-radius: 999px;
-        padding: 6px 14px;
-        font-size: 0.85rem;
-        background: rgba(255, 255, 255, 0.6);
       }
 
       .card {
         background: var(--panel);
-        border-radius: 24px;
-        padding: 28px;
+        border: 1px solid var(--stroke);
+        border-radius: 16px;
+        padding: 20px;
         box-shadow: var(--shadow);
-        border: 1px solid rgba(255, 255, 255, 0.6);
-        animation: rise 0.7s ease-out;
       }
 
       .stack {
         display: grid;
-        gap: 16px;
+        gap: 14px;
       }
 
       label {
         font-weight: 600;
         font-size: 0.95rem;
-        display: flex;
-        justify-content: space-between;
       }
 
       input,
       textarea {
         width: 100%;
         margin-top: 8px;
-        padding: 12px 14px;
-        border-radius: 12px;
+        padding: 10px 12px;
+        border-radius: 10px;
         border: 1px solid var(--stroke);
-        font-family: "IBM Plex Mono", monospace;
-        font-size: 0.95rem;
+        background: #fbfbfb;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.92rem;
         color: var(--ink);
-        background: #fdfdfb;
       }
 
       textarea {
-        min-height: 160px;
+        min-height: 140px;
         resize: vertical;
+      }
+
+      .row {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       }
 
       .actions {
         display: flex;
         flex-wrap: wrap;
-        gap: 12px;
+        gap: 10px;
       }
 
       button {
         border: none;
-        padding: 12px 18px;
+        padding: 10px 16px;
         border-radius: 999px;
         font-weight: 600;
         cursor: pointer;
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
       }
 
-      button.primary {
+      .primary {
         background: var(--accent);
         color: white;
-        box-shadow: 0 14px 30px rgba(232, 93, 68, 0.3);
       }
 
-      button.ghost {
-        background: #f2f4f3;
+      .ghost {
+        background: #f1f4f5;
         color: var(--ink);
-      }
-
-      button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 18px 34px rgba(30, 42, 47, 0.12);
-      }
-
-      .preview {
-        display: grid;
-        gap: 14px;
       }
 
       .hint {
         color: var(--muted);
-        font-size: 0.9rem;
-      }
-
-      .copy-row {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-      }
-
-      .copy-row button {
         font-size: 0.85rem;
-        padding: 8px 14px;
       }
 
       .footer {
-        margin-top: 22px;
+        margin-top: 4px;
         font-size: 0.85rem;
         color: var(--muted);
-      }
-
-      @keyframes rise {
-        from {
-          opacity: 0;
-          transform: translateY(18px);
-        }
-        to {
-          opacity: 1;
-          transform: translateY(0);
-        }
-      }
-
-      @keyframes drop {
-        from {
-          opacity: 0;
-          transform: translateY(-12px);
-        }
-        to {
-          opacity: 1;
-          transform: translateY(0);
-        }
-      }
-
-      @media (max-width: 900px) {
-        main {
-          grid-template-columns: 1fr;
-        }
       }
     </style>
   </head>
   <body>
     <main>
       <header>
-        <div>
-          <div class="pill">Kanariya Token Studio</div>
-          <h1>Plant a quiet canary.</h1>
-          <p>
-            Generate unique token URLs and file beacons in seconds. Keep the
-            payload minimal and the signal clear.
-          </p>
-          <p class="license">
-            Copyright 2026 ToppyMicroServices OÜ. Licensed under Apache-2.0.
-          </p>
-        </div>
+        <h1>Kanariya Token Studio</h1>
+        <p>Generate a token URL and a simple HTML beacon.</p>
+        <p class="footer">© 2026 ToppyMicroServices OÜ. Licensed under Apache-2.0.</p>
       </header>
 
       <section class="card stack">
-        <div>
-          <label>
-            Base URL
-            <span class="hint">Your canary host + path</span>
-          </label>
-          <input id="baseUrl" value="https://kanariya.toppymicros.com/canary" />
-        </div>
-        <div>
-          <label>
-            Source ID
-            <span class="hint">Where you planted it</span>
-          </label>
-          <input id="srcId" value="doc_invoices_2026q1" />
-        </div>
-        <div>
-          <label>
-            Token length (bytes)
-            <span class="hint">16-24 recommended</span>
-          </label>
-          <input id="tokenLength" type="number" min="8" max="32" value="16" />
+        <div class="row">
+          <div>
+            <label>Base URL</label>
+            <input id="baseUrl" value="https://kanariya.toppymicros.com/canary" />
+          </div>
+          <div>
+            <label>Source ID</label>
+            <input id="srcId" value="doc_invoices_2026q1" />
+          </div>
+          <div>
+            <label>Token length (bytes)</label>
+            <input id="tokenLength" type="number" min="8" max="32" value="16" />
+          </div>
         </div>
         <div class="actions">
-          <button class="primary" id="generate">Generate token</button>
-          <button class="ghost" id="regenerate">Regenerate</button>
-        </div>
-        <div class="footer">
-          Tip: use one token per location to avoid ambiguity.
+          <button class="primary" id="generate">Generate</button>
         </div>
       </section>
 
-      <section class="card preview">
+      <section class="card stack">
         <div>
           <label>Token URL</label>
-          <div class="copy-row">
-            <input id="tokenUrl" readonly />
-            <button class="ghost" data-copy="tokenUrl">Copy</button>
-          </div>
+          <input id="tokenUrl" readonly />
         </div>
+        <div class="actions">
+          <button class="ghost" data-copy="tokenUrl">Copy URL</button>
+          <button class="ghost" id="testToken">Test token</button>
+        </div>
+        <div class="hint" id="tokenStatus"></div>
         <div>
           <label>HTML file beacon</label>
           <textarea id="htmlBeacon" readonly></textarea>
-          <div class="actions">
-            <button class="ghost" data-copy="htmlBeacon">Copy HTML</button>
-            <button class="primary" id="downloadHtml">Download HTML</button>
+        </div>
+        <div class="actions">
+          <button class="ghost" data-copy="htmlBeacon">Copy HTML</button>
+          <button class="primary" id="downloadHtml">Download HTML</button>
+        </div>
+        <div class="hint">Use one token per location.</div>
+      </section>
+
+      <section class="card stack">
+        <div class="row">
+          <div>
+            <label>Admin API Base URL</label>
+            <input id="adminBaseUrl" value="https://kanariya.toppymicros.com" />
+          </div>
+          <div>
+            <label>Token</label>
+            <input id="adminToken" placeholder="token" />
+          </div>
+          <div>
+            <label>Admin key</label>
+            <input id="adminKey" type="password" placeholder="ADMIN_KEY" />
           </div>
         </div>
-        <div class="hint">
-          The file beacon loads the canary URL via a hidden image tag.
+        <div class="actions">
+          <button class="primary" id="fetchExport">Fetch export</button>
+          <button class="ghost" id="clearExport">Clear</button>
         </div>
+        <div class="hint" id="exportStatus"></div>
+        <textarea id="exportOutput" readonly></textarea>
+        <div class="hint">Admin key is used locally in your browser.</div>
       </section>
     </main>
 
@@ -281,6 +214,12 @@
       const tokenLengthInput = document.getElementById("tokenLength");
       const tokenUrlOutput = document.getElementById("tokenUrl");
       const htmlBeaconOutput = document.getElementById("htmlBeacon");
+      const tokenStatus = document.getElementById("tokenStatus");
+      const adminBaseUrlInput = document.getElementById("adminBaseUrl");
+      const adminTokenInput = document.getElementById("adminToken");
+      const adminKeyInput = document.getElementById("adminKey");
+      const exportStatus = document.getElementById("exportStatus");
+      const exportOutput = document.getElementById("exportOutput");
 
       function toBase64Url(bytes) {
         const chars = Array.from(bytes).map((b) => String.fromCharCode(b)).join("");
@@ -293,11 +232,12 @@
         return toBase64Url(bytes);
       }
 
+      function deriveAdminBase(baseUrl) {
+        return baseUrl.replace(/\/+$/, "").replace(/\/canary$/, "");
+      }
+
       function buildOutputs() {
-        const tokenBytes = Math.min(
-          32,
-          Math.max(8, Number(tokenLengthInput.value || 16))
-        );
+        const tokenBytes = Math.min(32, Math.max(8, Number(tokenLengthInput.value || 16)));
         const token = generateToken(tokenBytes);
         const baseUrl = baseUrlInput.value.replace(/\/+$/, "");
         const srcId = encodeURIComponent(srcIdInput.value.trim());
@@ -308,10 +248,69 @@
 <meta charset="utf-8"/>
 <title>Kanariya Canary</title>
 <img src="${url}" style="display:none" alt="" />`;
+        tokenStatus.textContent = "";
+        adminTokenInput.value = token;
+        adminBaseUrlInput.value = deriveAdminBase(baseUrl);
+      }
+
+      async function testToken() {
+        const url = tokenUrlOutput.value.trim();
+        if (!url) {
+          tokenStatus.textContent = "Generate a token first.";
+          return;
+        }
+
+        tokenStatus.textContent = "Testing...";
+        try {
+          const response = await fetch(url, { method: "GET" });
+          tokenStatus.textContent = `Status: ${response.status} (event recorded)`;
+        } catch (err) {
+          tokenStatus.textContent = "Failed to reach token URL.";
+        }
+      }
+
+      async function fetchExport() {
+        const baseUrl = adminBaseUrlInput.value.replace(/\/+$/, "");
+        const token = adminTokenInput.value.trim();
+        const key = adminKeyInput.value.trim();
+
+        exportStatus.textContent = "";
+        exportOutput.value = "";
+
+        if (!baseUrl || !token || !key) {
+          exportStatus.textContent = "Base URL, token, and admin key are required.";
+          return;
+        }
+
+        const url = `${baseUrl}/admin/export?token=${encodeURIComponent(token)}`;
+        try {
+          const response = await fetch(url, {
+            headers: { Authorization: `Bearer ${key}` },
+          });
+          const body = await response.text();
+          exportStatus.textContent = `Status: ${response.status}`;
+          exportOutput.value = body;
+        } catch (err) {
+          exportStatus.textContent = "Failed to fetch export.";
+        }
       }
 
       document.getElementById("generate").addEventListener("click", buildOutputs);
-      document.getElementById("regenerate").addEventListener("click", buildOutputs);
+      document.getElementById("testToken").addEventListener("click", testToken);
+      document.getElementById("downloadHtml").addEventListener("click", () => {
+        const blob = new Blob([htmlBeaconOutput.value], { type: "text/html" });
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = "kanariya_canary.html";
+        link.click();
+        URL.revokeObjectURL(link.href);
+      });
+
+      document.getElementById("fetchExport").addEventListener("click", fetchExport);
+      document.getElementById("clearExport").addEventListener("click", () => {
+        exportStatus.textContent = "";
+        exportOutput.value = "";
+      });
 
       document.querySelectorAll("[data-copy]").forEach((btn) => {
         btn.addEventListener("click", async () => {
@@ -320,15 +319,6 @@
           btn.textContent = "Copied";
           setTimeout(() => (btn.textContent = "Copy"), 1200);
         });
-      });
-
-      document.getElementById("downloadHtml").addEventListener("click", () => {
-        const blob = new Blob([htmlBeaconOutput.value], { type: "text/html" });
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = "kanariya_canary.html";
-        link.click();
-        URL.revokeObjectURL(link.href);
       });
 
       buildOutputs();

@@ -84,6 +84,7 @@ This section defines the **minimum** scope for a usable public MVP.
   - Response: JSON array of events for the token
   - Header: `Authorization: Bearer <ADMIN_KEY>`
   - Notes: for MVP, a shared secret is acceptable; later migrate to Cloudflare Access/SSO.
+  - If you do not set `ADMIN_KEY` or you remove the `/admin/*` route, this endpoint is disabled.
 
 ### Data model
 
@@ -141,6 +142,7 @@ Bind the Worker to your hostname and paths (example):
 
 - Route: `kanariya.toppymicros.com/canary/*`
 - (Optional admin) Route: `kanariya.toppymicros.com/admin/*`
+  - Omit this route if you do not need `/admin/export`.
 
 > You can also attach the Worker to the whole host and switch by path in code.
 
@@ -162,19 +164,31 @@ Configure the following on the Worker:
 
 - `IP_HMAC_KEY` (**secret**, required)
   - Used to store `ipHash = HMAC(IP, IP_HMAC_KEY)` instead of plain IP.
-- `ADMIN_KEY` (**secret**, required if `/admin/export` is enabled)
-  - Shared secret for the admin export endpoint (MVP). Later: replace with Cloudflare Access.
+- `ADMIN_KEY` (**secret**, optional)
+  - Required only if `/admin/export` is enabled. If unset, `/admin/export` returns 403.
 
 Optional:
 
 - `WEBHOOK_URL` (**secret**, optional)
   - Webhook destination for notifications.
+- `MAIL_FROM` (optional)
+  - Sender email address for MailChannels.
+- `MAIL_TO` (optional)
+  - Comma-separated recipient list for MailChannels.
+- `MAIL_FROM_NAME` (optional)
+  - Sender display name (default: Kanariya).
+- `MAIL_SUBJECT_PREFIX` (optional)
+  - Subject prefix (default: Kanariya alert).
 - `EVENT_TTL_SECONDS` (non-secret, optional)
   - Default: 2592000 (30 days).
 - `DEDUPE_TTL_SECONDS` (non-secret, optional)
   - Default: 1800 (30 minutes).
 - `EXPORT_MAX_ITEMS` (non-secret, optional)
   - Default: 1000 (admin export cap).
+- `RATE_LIMIT_WINDOW_SECONDS` (non-secret, optional)
+  - Default: 60 (per-IP window, set 0 to disable).
+- `RATE_LIMIT_MAX` (non-secret, optional)
+  - Default: 60 (max hits per window, set 0 to disable).
 
 ### 5) Cloudflare security controls (strongly recommended)
 
@@ -201,6 +215,7 @@ Optional:
 Minimum (MVP):
 
 - Require `Authorization: Bearer <ADMIN_KEY>` header.
+  - To disable admin export entirely, remove the `/admin/*` route and omit `ADMIN_KEY`.
 
 Recommended (post-MVP):
 
@@ -216,6 +231,7 @@ compatibility_date = "2026-01-12"
 # Route binding
 routes = [
   { pattern = "kanariya.toppymicros.com/canary/*", zone_name = "toppymicros.com" },
+  # Optional admin export
   { pattern = "kanariya.toppymicros.com/admin/*", zone_name = "toppymicros.com" }
 ]
 
@@ -232,7 +248,7 @@ Secrets:
 
 ```bash
 wrangler secret put IP_HMAC_KEY
-wrangler secret put ADMIN_KEY
+wrangler secret put ADMIN_KEY   # optional (only if /admin/export enabled)
 wrangler secret put WEBHOOK_URL   # optional
 ```
 
@@ -248,7 +264,7 @@ wrangler secret put WEBHOOK_URL   # optional
 
 1. Create a KV namespace (for events) and bind it to your Worker as `KANARI_KV`.
 2. Configure secrets:
-   - `ADMIN_KEY`: export endpoint guard
+   - `ADMIN_KEY`: export endpoint guard (optional)
    - `IP_HMAC_KEY`: HMAC secret used to hash IPs (PII minimization)
    - `WEBHOOK_URL` (optional): Discord/Slack webhook
 3. Deploy the Worker.
@@ -260,7 +276,7 @@ Create bindings/secrets via Wrangler (example names):
 ```bash
 wrangler kv namespace create "KANARI_KV"
 wrangler kv namespace list
-wrangler secret put ADMIN_KEY
+wrangler secret put ADMIN_KEY   # optional
 wrangler secret put IP_HMAC_KEY
 wrangler secret put WEBHOOK_URL   # optional
 ```
@@ -270,6 +286,7 @@ wrangler secret put WEBHOOK_URL   # optional
 ## GitHub Pages UI (optional)
 
 The token generator UI is available at `docs/index.html` so you can host it on GitHub Pages.
+It includes a basic admin export viewer (Authorization header required). If admin export is disabled, it will return 403.
 
 1. GitHub repo settings → Pages
 2. Source: `Deploy from a branch`
@@ -332,6 +349,11 @@ Recommended behavior:
 - Notify only on **first hit** per `(token, ipHash, ua)` within a time window
 - Rate-limit aggressively to prevent spam
 
+MailChannels email (optional):
+
+- Requires sender domain verification with MailChannels (see their docs).
+- Set `MAIL_FROM` and `MAIL_TO` to enable email alerts.
+
 ## Admin export (optional)
 
 Provide a simple endpoint like:
@@ -343,6 +365,7 @@ Authorization: Bearer <ADMIN_KEY>
 ```
 
 Return JSON array of events for the token.
+If you do not need admin export, remove the `/admin/*` route and omit `ADMIN_KEY`.
 
 ## Security & privacy
 
