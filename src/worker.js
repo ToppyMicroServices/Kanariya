@@ -86,9 +86,13 @@ export default {
     const { pathname, searchParams } = url;
 
     if (pathname.startsWith("/canary/")) {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders() });
+      }
+
       const token = pathname.slice("/canary/".length).split("/")[0];
       if (!token) {
-        return new Response("Not found", { status: 404 });
+        return new Response("Not found", { status: 404, headers: corsHeaders() });
       }
 
       const src = textOrEmpty(searchParams.get("src") || "");
@@ -133,7 +137,7 @@ export default {
           const rateKey = `rl:${token}:${ipHash}:${windowId}`;
           const rateCount = Number(await env.KANARI_KV.get(rateKey)) || 0;
           if (rateCount >= rateLimitMax) {
-            return new Response(null, { status: 204 });
+            return new Response(null, { status: 204, headers: corsHeaders() });
           }
           await env.KANARI_KV.put(rateKey, String(rateCount + 1), {
             expirationTtl: rateLimitWindow,
@@ -207,7 +211,7 @@ export default {
         console.error("kanariya_error", err);
       }
 
-      return new Response(null, { status: 204 });
+      return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
     if (pathname === "/admin/export") {
