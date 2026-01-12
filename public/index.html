@@ -143,20 +143,7 @@
       </header>
 
       <section class="card stack">
-        <div class="row">
-          <div>
-            <label>Base URL</label>
-            <input id="baseUrl" value="https://kanariya.toppymicros.com/canary" />
-          </div>
-          <div>
-            <label>Source ID</label>
-            <input id="srcId" value="doc_invoices_2026q1" />
-          </div>
-          <div>
-            <label>Token length (bytes)</label>
-            <input id="tokenLength" type="number" min="8" max="32" value="16" />
-          </div>
-        </div>
+        <div class="hint">Base URL is fixed to https://kanariya.toppymicros.com/canary</div>
         <div class="actions">
           <button class="primary" id="generate">Generate</button>
         </div>
@@ -184,19 +171,9 @@
       </section>
 
       <section class="card stack">
-        <div class="row">
-          <div>
-            <label>Admin API Base URL</label>
-            <input id="adminBaseUrl" value="https://kanariya.toppymicros.com" />
-          </div>
-          <div>
-            <label>Token</label>
-            <input id="adminToken" placeholder="token" />
-          </div>
-          <div>
-            <label>Admin key</label>
-            <input id="adminKey" type="password" placeholder="ADMIN_KEY" />
-          </div>
+        <div>
+          <label>Token</label>
+          <input id="adminToken" placeholder="token" />
         </div>
         <div class="actions">
           <button class="primary" id="fetchExport">Fetch export</button>
@@ -204,20 +181,17 @@
         </div>
         <div class="hint" id="exportStatus"></div>
         <textarea id="exportOutput" readonly></textarea>
-        <div class="hint">Admin key is optional if public export is enabled.</div>
+        <div class="hint">Admin export is available when public export is enabled.</div>
       </section>
     </main>
 
     <script>
-      const baseUrlInput = document.getElementById("baseUrl");
-      const srcIdInput = document.getElementById("srcId");
-      const tokenLengthInput = document.getElementById("tokenLength");
+      const BASE_URL = "https://kanariya.toppymicros.com/canary";
+      const ADMIN_BASE_URL = "https://kanariya.toppymicros.com";
       const tokenUrlOutput = document.getElementById("tokenUrl");
       const htmlBeaconOutput = document.getElementById("htmlBeacon");
       const tokenStatus = document.getElementById("tokenStatus");
-      const adminBaseUrlInput = document.getElementById("adminBaseUrl");
       const adminTokenInput = document.getElementById("adminToken");
-      const adminKeyInput = document.getElementById("adminKey");
       const exportStatus = document.getElementById("exportStatus");
       const exportOutput = document.getElementById("exportOutput");
 
@@ -232,16 +206,10 @@
         return toBase64Url(bytes);
       }
 
-      function deriveAdminBase(baseUrl) {
-        return baseUrl.replace(/\/+$/, "").replace(/\/canary$/, "");
-      }
-
       function buildOutputs() {
-        const tokenBytes = Math.min(32, Math.max(8, Number(tokenLengthInput.value || 16)));
+        const tokenBytes = 16;
         const token = generateToken(tokenBytes);
-        const baseUrl = baseUrlInput.value.replace(/\/+$/, "");
-        const srcId = encodeURIComponent(srcIdInput.value.trim());
-        const url = `${baseUrl}/${token}${srcId ? `?src=${srcId}` : ""}`;
+        const url = `${BASE_URL}/${token}`;
 
         tokenUrlOutput.value = url;
         htmlBeaconOutput.value = `<!doctype html>
@@ -250,7 +218,6 @@
 <img src="${url}" style="display:none" alt="" />`;
         tokenStatus.textContent = "";
         adminTokenInput.value = token;
-        adminBaseUrlInput.value = deriveAdminBase(baseUrl);
       }
 
       async function testToken() {
@@ -270,22 +237,19 @@
       }
 
       async function fetchExport() {
-        const baseUrl = adminBaseUrlInput.value.replace(/\/+$/, "");
         const token = adminTokenInput.value.trim();
-        const key = adminKeyInput.value.trim();
 
         exportStatus.textContent = "";
         exportOutput.value = "";
 
-        if (!baseUrl || !token) {
-          exportStatus.textContent = "Base URL and token are required.";
+        if (!token) {
+          exportStatus.textContent = "Token is required.";
           return;
         }
 
-        const url = `${baseUrl}/admin/export?token=${encodeURIComponent(token)}`;
+        const url = `${ADMIN_BASE_URL}/admin/export?token=${encodeURIComponent(token)}`;
         try {
-          const headers = key ? { Authorization: `Bearer ${key}` } : {};
-          const response = await fetch(url, { headers });
+          const response = await fetch(url);
           const body = await response.text();
           exportStatus.textContent = `Status: ${response.status}`;
           exportOutput.value = body;

@@ -85,6 +85,7 @@ This section defines the **minimum** scope for a usable public MVP.
   - Header: `Authorization: Bearer <ADMIN_KEY>`
   - Notes: for MVP, a shared secret is acceptable; later migrate to Cloudflare Access/SSO.
   - If you do not set `ADMIN_KEY`, this endpoint is disabled unless `ALLOW_PUBLIC_EXPORT=1` is set.
+  - If `ALLOW_PUBLIC_EXPORT=1`, the admin key is ignored.
 
 ### Data model
 
@@ -167,7 +168,7 @@ Configure the following on the Worker:
 - `ADMIN_KEY` (**secret**, optional)
   - Required only if `/admin/export` is enabled. If unset, `/admin/export` returns 403.
 - `ALLOW_PUBLIC_EXPORT` (non-secret, optional)
-  - Set to `1` to allow `/admin/export` without `ADMIN_KEY`. Not recommended for public use.
+  - Set to `1` to allow `/admin/export` without `ADMIN_KEY` (overrides admin key). Not recommended for public use.
 
 Optional:
 

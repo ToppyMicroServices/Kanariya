@@ -227,12 +227,10 @@ export default {
         String(env.ALLOW_PUBLIC_EXPORT || "").toLowerCase()
       );
 
-      if (adminKey) {
-        if (bearerKey !== adminKey) {
+      if (!allowPublicExport) {
+        if (!adminKey || bearerKey !== adminKey) {
           return new Response("Forbidden", { status: 403, headers: corsHeaders() });
         }
-      } else if (!allowPublicExport) {
-        return new Response("Forbidden", { status: 403, headers: corsHeaders() });
       }
       if (!token) {
         return new Response("Missing token", { status: 400, headers: corsHeaders() });
