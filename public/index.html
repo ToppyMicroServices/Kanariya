@@ -155,6 +155,11 @@
           <summary>Advanced</summary>
           <div class="row">
             <div>
+              <label>Source id (src)</label>
+              <input id="sourceId" placeholder="form_invoice_2026q1" />
+              <div class="hint">Optional. Helps identify where the token was planted.</div>
+            </div>
+            <div>
               <label>Signing key (optional)</label>
               <input id="signingKey" type="password" placeholder="SIGNING_SECRET" />
             </div>
@@ -206,6 +211,7 @@
       const htmlBeaconOutput = document.getElementById("htmlBeacon");
       const tokenStatus = document.getElementById("tokenStatus");
       const signingKeyInput = document.getElementById("signingKey");
+      const sourceIdInput = document.getElementById("sourceId");
       const adminTokenInput = document.getElementById("adminToken");
       const exportStatus = document.getElementById("exportStatus");
       const exportOutput = document.getElementById("exportOutput");
@@ -257,19 +263,24 @@
         const tokenBytes = 16;
         const token = generateToken(tokenBytes);
         const signingKey = signingKeyInput.value.trim();
+        const src = (sourceIdInput.value || "").trim();
         const basePath = new URL(BASE_URL);
         const path = `${basePath.pathname}/${token}`.replace(/\/{2,}/g, "/");
+        const params = new URLSearchParams();
+        if (src) params.set("src", src);
+
         let url = `${BASE_URL}/${token}`;
         if (signingKey) {
           const ts = Math.floor(Date.now() / 1000);
           const nonce = toBase64Url(crypto.getRandomValues(new Uint8Array(8)));
-          const params = new URLSearchParams();
           params.set("ts", String(ts));
           params.set("nonce", nonce);
           const query = canonicalQuery(params);
           const stringToSign = `${ts}|${path}|${query}`;
           const sig = await hmacHex(signingKey, stringToSign);
           url = `${BASE_URL}/${token}?${query}&sig=${sig}`;
+        } else if ([...params.keys()].length) {
+          url = `${BASE_URL}/${token}?${canonicalQuery(params)}`;
         }
 
         tokenUrlOutput.value = url;

@@ -200,6 +200,24 @@ Optional:
 - `SIGNATURE_WINDOW_SECONDS` (non-secret, optional)
   - Default: 300 (allowed clock skew for `ts`, set 0 to disable window check).
 
+## Signed canary URLs (optional)
+
+You can require a valid signature on every `/canary/*` request.
+This is useful when you want to reduce random scanning noise (only URLs you generated will be accepted).
+
+1) Enable signature requirement:
+
+- Set `REQUIRE_SIGNATURE=1`
+- Set the secret key:
+  - `wrangler secret put SIGNING_SECRET`
+
+> Important: If `REQUIRE_SIGNATURE=1` but `SIGNING_SECRET` is not set, the Worker will silently ignore all canary hits (returns `204` but does not store events).
+
+2) Generate signed URLs:
+
+- UI: open the Token Studio (GitHub Pages `docs/index.html` or `public/index.html`) and enter `SIGNING_SECRET` under Advanced.
+- CLI: `python3 scripts/gen_signed_url.py --base-url https://<your-domain>/canary --src <source_id>`
+
 ### 5) Cloudflare security controls (strongly recommended)
 
 - **Rate limiting**
@@ -269,6 +287,26 @@ wrangler secret put WEBHOOK_URL   # optional
 - Cloudflare account
 - Node.js (LTS)
 - Wrangler CLI
+
+## Local test environment
+
+- Install deps: `npm install`
+- Run unit tests: `npm test`
+
+### Local Worker dev
+
+1) Create a local vars file:
+
+- Copy `.dev.vars.example` to `.dev.vars` and edit values.
+
+2) Start the Worker:
+
+- `npm run dev`
+
+If `REQUIRE_SIGNATURE=1`, generate signed canary URLs via:
+
+- UI: use `public/index.html` (Advanced → Signing key)
+- CLI: `python3 scripts/gen_signed_url.py --base-url http://127.0.0.1:8787/canary --secret "$SIGNING_SECRET"`
 
 ### Setup
 
