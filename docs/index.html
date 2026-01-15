@@ -155,11 +155,17 @@
           <summary>Advanced</summary>
           <div class="row">
             <div>
-              <label>Signing key (optional)</label>
-              <input id="signingKey" type="password" placeholder="SIGNING_SECRET" />
+              <label>Source id (src)</label>
+              <input id="sourceId" placeholder="form_invoice_2026q1" />
+              <div class="hint">Optional. Helps identify where the token was planted.</div>
+            </div>
+            <div>
+              <label>Admin key (optional)</label>
+              <input id="adminKey" type="password" placeholder="ADMIN_KEY (for /admin/sign)" />
+              <div class="hint">Used only to request signed URLs from the server.</div>
             </div>
           </div>
-          <div class="hint">If signature is required, enter the signing key to generate signed URLs.</div>
+          <div class="hint">When signatures are required, this UI requests a signed URL from <code>/admin/sign</code>.</div>
         </details>
       </section>
 
@@ -205,7 +211,8 @@
       const tokenUrlOutput = document.getElementById("tokenUrl");
       const htmlBeaconOutput = document.getElementById("htmlBeacon");
       const tokenStatus = document.getElementById("tokenStatus");
-      const signingKeyInput = document.getElementById("signingKey");
+      const sourceIdInput = document.getElementById("sourceId");
+      const adminKeyInput = document.getElementById("adminKey");
       const adminTokenInput = document.getElementById("adminToken");
       const exportStatus = document.getElementById("exportStatus");
       const exportOutput = document.getElementById("exportOutput");
@@ -238,38 +245,43 @@
           .join("&");
       }
 
-      async function hmacHex(secret, value) {
-        const encoder = new TextEncoder();
-        const key = await crypto.subtle.importKey(
-          "raw",
-          encoder.encode(secret),
-          { name: "HMAC", hash: "SHA-256" },
-          false,
-          ["sign"]
-        );
-        const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(value));
-        return [...new Uint8Array(signature)]
-          .map((b) => b.toString(16).padStart(2, "0"))
-          .join("");
+      async function fetchSignedUrl({ token, src }) {
+        const params = new URLSearchParams();
+        params.set("token", token);
+        if (src) params.set("src", src);
+        const url = `${ADMIN_BASE_URL}/admin/sign?${params.toString()}`;
+
+        const headers = {};
+        const adminKey = (adminKeyInput.value || "").trim();
+        if (adminKey) headers.authorization = `Bearer ${adminKey}`;
+
+        const response = await fetch(url, { method: "GET", headers });
+        const bodyText = await response.text();
+        if (!response.ok) {
+          throw new Error(`${response.status}: ${bodyText}`);
+        }
+        const parsed = JSON.parse(bodyText);
+        if (!parsed || !parsed.url) {
+          throw new Error("Invalid /admin/sign response");
+        }
+        return parsed.url;
       }
 
       async function buildOutputs() {
         const tokenBytes = 16;
         const token = generateToken(tokenBytes);
-        const signingKey = signingKeyInput.value.trim();
-        const basePath = new URL(BASE_URL);
-        const path = `${basePath.pathname}/${token}`.replace(/\/{2,}/g, "/");
+        const src = (sourceIdInput.value || "").trim();
+        const params = new URLSearchParams();
+        if (src) params.set("src", src);
+
         let url = `${BASE_URL}/${token}`;
-        if (signingKey) {
-          const ts = Math.floor(Date.now() / 1000);
-          const nonce = toBase64Url(crypto.getRandomValues(new Uint8Array(8)));
-          const params = new URLSearchParams();
-          params.set("ts", String(ts));
-          params.set("nonce", nonce);
-          const query = canonicalQuery(params);
-          const stringToSign = `${ts}|${path}|${query}`;
-          const sig = await hmacHex(signingKey, stringToSign);
-          url = `${BASE_URL}/${token}?${query}&sig=${sig}`;
+        try {
+          url = await fetchSignedUrl({ token, src });
+        } catch (err) {
+          if ([...params.keys()].length) {
+            url = `${BASE_URL}/${token}?${canonicalQuery(params)}`;
+          }
+          tokenStatus.textContent = `Signed URL failed: ${err?.message || "unknown error"}`;
         }
 
         tokenUrlOutput.value = url;
@@ -277,7 +289,6 @@
 <meta charset="utf-8"/>
 <title>Kanariya Canary</title>
 <img src="${url}" style="display:none" alt="" />`;
-        tokenStatus.textContent = "";
         adminTokenInput.value = token;
       }
 

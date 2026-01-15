@@ -170,8 +170,13 @@ Configure the following on the Worker:
   - Required only if `/admin/export` is enabled. If unset, `/admin/export` returns 403.
 - `ALLOW_PUBLIC_EXPORT` (non-secret, optional)
   - Set to `1` to allow `/admin/export` without `ADMIN_KEY` (overrides admin key). Not recommended for public use.
-- `SIGNING_SECRET` (**secret**, optional)
-  - Required when `REQUIRE_SIGNATURE=1`. Used to sign canary URLs.
+- `MASTER_SECRET` (**secret**, recommended)
+  - Master secret used to derive per-token signing keys.
+  - Signing key derivation: `derivedKey = HMAC(MASTER_SECRET, "token:" + token)`
+  - Recommended when you want different effective keys per token without storing them.
+- `SIGNING_SECRET` (**secret**, legacy)
+  - Backward-compatible fallback if `MASTER_SECRET` is not set.
+  - If `MASTER_SECRET` is not set, Kanariya will also treat `SIGNING_SECRET` as the master secret for derived signing (ops-friendly), while still accepting legacy signatures created directly with `SIGNING_SECRET`.
 
 Optional:
 
@@ -199,6 +204,8 @@ Optional:
   - Default: 0. Set to `1` to require signed canary URLs.
 - `SIGNATURE_WINDOW_SECONDS` (non-secret, optional)
   - Default: 300 (allowed clock skew for `ts`, set 0 to disable window check).
+- `ALLOW_PUBLIC_SIGN` (non-secret, optional)
+  - Default: 0. If set to `1`, `/admin/sign` can be called without `ADMIN_KEY`.
 
 ## Signed canary URLs (optional)
 
@@ -208,15 +215,40 @@ This is useful when you want to reduce random scanning noise (only URLs you gene
 1) Enable signature requirement:
 
 - Set `REQUIRE_SIGNATURE=1`
-- Set the secret key:
-  - `wrangler secret put SIGNING_SECRET`
+- Set the master secret key (recommended):
+  - `wrangler secret put MASTER_SECRET`
+  - (Optional legacy) `wrangler secret put SIGNING_SECRET`
 
-> Important: If `REQUIRE_SIGNATURE=1` but `SIGNING_SECRET` is not set, the Worker will silently ignore all canary hits (returns `204` but does not store events).
+> Important: If `REQUIRE_SIGNATURE=1` but neither `MASTER_SECRET` nor `SIGNING_SECRET` is set, the Worker will silently ignore all canary hits (returns `204` but does not store events).
 
 2) Generate signed URLs:
 
-- UI: open the Token Studio (GitHub Pages `docs/index.html` or `public/index.html`) and enter `SIGNING_SECRET` under Advanced.
-- CLI: `python3 scripts/gen_signed_url.py --base-url https://<your-domain>/canary --src <source_id>`
+- UI (recommended): call the signing endpoint `/admin/sign` from the Token Studio.
+  - Set `ADMIN_KEY` and keep `ALLOW_PUBLIC_SIGN=0` (recommended).
+  - The UI can pass `Authorization: Bearer <ADMIN_KEY>`.
+- CLI: `python3 scripts/gen_signed_url.py --base-url https://<your-domain>/canary --master-secret <MASTER_SECRET> --src <source_id>`
+
+### Admin signing endpoint
+
+`GET /admin/sign?token=<token>&src=<src>`
+
+- Response: `{ "url": "https://<host>/canary/<token>?ts=...&nonce=...&src=...&sig=..." }`
+- Protection:
+  - Default: requires `Authorization: Bearer <ADMIN_KEY>`
+  - Set `ALLOW_PUBLIC_SIGN=1` to disable auth (not recommended for public exposure)
+
+## Deploy notes (GitHub Actions)
+
+This repo includes a workflow that deploys on every push to `main`.
+It also syncs selected GitHub repo secrets into Worker secrets before deploying.
+
+- Required Worker secrets for signed URLs:
+  - `MASTER_SECRET` (recommended) or `SIGNING_SECRET` (fallback)
+  - `ADMIN_KEY` (to protect `/admin/sign`)
+  - `IP_HMAC_KEY`
+- GitHub Actions repo secrets are not automatically available to the Worker runtime.
+  - This workflow copies selected values into Worker secrets using `wrangler secret put`.
+  - It does not update signing secrets; keep `MASTER_SECRET`/`SIGNING_SECRET` managed on the Cloudflare side.
 
 ### 5) Cloudflare security controls (strongly recommended)
 

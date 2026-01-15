@@ -70,6 +70,10 @@ async function makeSignedUrl({ token, secret, src, ts, nonce }) {
   return `https://example.com${path}?${query}&sig=${sig}`;
 }
 
+async function derivedSigningKey(masterSecret, token) {
+  return await hmacHex(masterSecret, `token:${token}`);
+}
+
 const baseEnv = () => ({
   KANARI_KV: new MemoryKV(),
   IP_HMAC_KEY: "unit-test-secret",
@@ -148,13 +152,14 @@ describe("kanariya worker", () => {
     const env = {
       ...baseEnv(),
       REQUIRE_SIGNATURE: "1",
-      SIGNING_SECRET: "signing-secret",
+      MASTER_SECRET: "master-secret",
       SIGNATURE_WINDOW_SECONDS: "300",
     };
     const ts = Math.floor(Date.now() / 1000);
+    const perToken = await derivedSigningKey(env.MASTER_SECRET, "sig-token");
     const url = await makeSignedUrl({
       token: "sig-token",
-      secret: env.SIGNING_SECRET,
+      secret: perToken,
       src: "signed",
       ts,
       nonce: "nonce-1",
@@ -177,7 +182,7 @@ describe("kanariya worker", () => {
     const env = {
       ...baseEnv(),
       REQUIRE_SIGNATURE: "1",
-      SIGNING_SECRET: "signing-secret",
+      MASTER_SECRET: "master-secret",
       SIGNATURE_WINDOW_SECONDS: "300",
     };
     const request = withCf(
@@ -192,5 +197,70 @@ describe("kanariya worker", () => {
 
     const listed = await env.KANARI_KV.list({ prefix: "event:sig-token:" });
     expect(listed.keys.length).toBe(0);
+  });
+
+  it("/admin/sign requires admin key by default", async () => {
+    const env = {
+      ...baseEnv(),
+      MASTER_SECRET: "master-secret",
+      ADMIN_KEY: "admin-key",
+      ALLOW_PUBLIC_SIGN: "0",
+    };
+    const request = new Request("https://example.com/admin/sign?token=t1&src=s", {
+      headers: { "user-agent": "UnitTest" },
+    });
+    const response = await worker.fetch(request, env, { waitUntil() {} });
+    expect(response.status).toBe(403);
+  });
+
+  it("/admin/sign returns a signed URL", async () => {
+    const env = {
+      ...baseEnv(),
+      MASTER_SECRET: "master-secret",
+      ADMIN_KEY: "admin-key",
+      ALLOW_PUBLIC_SIGN: "0",
+    };
+    const request = new Request("https://example.com/admin/sign?token=t2&src=s", {
+      headers: { authorization: "Bearer admin-key" },
+    });
+    const response = await worker.fetch(request, env, { waitUntil() {} });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.url).toContain("/canary/t2?");
+    expect(body.url).toContain("sig=");
+    expect(body.url).toContain("ts=");
+    expect(body.url).toContain("nonce=");
+    expect(body.url).toContain("src=s");
+  });
+
+  it("treats SIGNING_SECRET as master when MASTER_SECRET is missing", async () => {
+    const env = {
+      ...baseEnv(),
+      REQUIRE_SIGNATURE: "1",
+      // No MASTER_SECRET on purpose
+      SIGNING_SECRET: "existing-secret",
+      SIGNATURE_WINDOW_SECONDS: "300",
+      ADMIN_KEY: "admin-key",
+      ALLOW_PUBLIC_SIGN: "0",
+    };
+
+    const signReq = new Request("https://example.com/admin/sign?token=t3&src=s", {
+      headers: { authorization: "Bearer admin-key" },
+    });
+    const signRes = await worker.fetch(signReq, env, { waitUntil() {} });
+    expect(signRes.status).toBe(200);
+    const { url } = await signRes.json();
+
+    const canaryReq = withCf(
+      new Request(url, {
+        headers: { "user-agent": "UnitTest", "cf-connecting-ip": "203.0.113.10" },
+      }),
+      { country: "JP", asn: 64517 }
+    );
+    const canaryRes = await worker.fetch(canaryReq, env, { waitUntil() {} });
+    expect(canaryRes.status).toBe(204);
+
+    const listed = await env.KANARI_KV.list({ prefix: "event:t3:" });
+    expect(listed.keys.length).toBe(1);
   });
 });

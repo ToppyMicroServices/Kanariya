@@ -45,6 +45,11 @@ async function hmacHex(secret, value) {
   return [...new Uint8Array(signature)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+async function derivedSigningKey(masterSecret, token) {
+  if (!masterSecret || !token) return "";
+  return await hmacHex(masterSecret, `token:${token}`);
+}
+
 async function sha256Hex(value) {
   const encoder = new TextEncoder();
   const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
@@ -119,7 +124,12 @@ export default {
       const requireSignature = ["1", "true", "yes"].includes(
         String(env.REQUIRE_SIGNATURE || "").toLowerCase()
       );
-      const signingSecret = env.SIGNING_SECRET || "";
+      const legacySigningSecret = env.SIGNING_SECRET || "";
+      // Backward/ops-friendly behavior:
+      // - If MASTER_SECRET is not set but SIGNING_SECRET exists, treat SIGNING_SECRET as the master secret
+      //   for per-token derived signing.
+      // - Still accept legacy signatures that were created directly with SIGNING_SECRET.
+      const masterSecret = env.MASTER_SECRET || legacySigningSecret || "";
       const signatureWindow = getNumber(
         env.SIGNATURE_WINDOW_SECONDS,
         DEFAULT_SIGNATURE_WINDOW_SECONDS
@@ -129,7 +139,7 @@ export default {
         const sigParam = (searchParams.get("sig") || "").toLowerCase();
         const nonce = searchParams.get("nonce") || "";
         const ts = Number(tsParam);
-        if (!signingSecret || !Number.isFinite(ts) || !sigParam) {
+        if ((!masterSecret && !legacySigningSecret) || !Number.isFinite(ts) || !sigParam) {
           return new Response(null, { status: 204, headers: corsHeaders() });
         }
         const now = Math.floor(Date.now() / 1000);
@@ -139,9 +149,13 @@ export default {
 
         const query = canonicalQuery(searchParams);
         const stringToSign = `${ts}|${pathname}|${query}`;
-        const expected = await hmacHex(signingSecret, stringToSign);
-        if (expected !== sigParam) {
-          return new Response(null, { status: 204, headers: corsHeaders() });
+        const derivedKey = masterSecret ? await derivedSigningKey(masterSecret, token) : "";
+        const legacyExpected = legacySigningSecret ? await hmacHex(legacySigningSecret, stringToSign) : "";
+        const expected = derivedKey ? await hmacHex(derivedKey, stringToSign) : "";
+        if (!expected || expected !== sigParam) {
+          if (!legacyExpected || legacyExpected !== sigParam) {
+            return new Response(null, { status: 204, headers: corsHeaders() });
+          }
         }
 
         if (nonce) {
@@ -264,6 +278,63 @@ export default {
       }
 
       return new Response(null, { status: 204, headers: corsHeaders() });
+    }
+
+    if (pathname === "/admin/sign") {
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders() });
+      }
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405, headers: corsHeaders() });
+      }
+
+      const token = textOrEmpty(searchParams.get("token") || "");
+      const src = textOrEmpty(searchParams.get("src") || "");
+      const nonceParam = textOrEmpty(searchParams.get("nonce") || "", 256);
+      const authHeader = request.headers.get("authorization") || "";
+      const adminKey = env.ADMIN_KEY || "";
+      const bearerKey = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+      const allowPublicSign = ["1", "true", "yes"].includes(
+        String(env.ALLOW_PUBLIC_SIGN || "").toLowerCase()
+      );
+      if (!allowPublicSign) {
+        if (!adminKey || bearerKey !== adminKey) {
+          return new Response("Forbidden", { status: 403, headers: corsHeaders() });
+        }
+      }
+
+      if (!token) {
+        return new Response("Missing token", { status: 400, headers: corsHeaders() });
+      }
+
+      const legacySigningSecret = env.SIGNING_SECRET || "";
+      const masterSecret = env.MASTER_SECRET || legacySigningSecret || "";
+      if (!masterSecret) {
+        return new Response("Signing not configured", { status: 503, headers: corsHeaders() });
+      }
+
+      try {
+        const ts = Math.floor(Date.now() / 1000);
+        const nonce = nonceParam || randomId();
+        const params = new URLSearchParams();
+        params.set("ts", String(ts));
+        if (src) params.set("src", src);
+        if (nonce) params.set("nonce", nonce);
+        const query = canonicalQuery(params);
+        const path = `/canary/${token}`;
+        const stringToSign = `${ts}|${path}|${query}`;
+        const derivedKey = await derivedSigningKey(masterSecret, token);
+        const sig = await hmacHex(derivedKey, stringToSign);
+
+        const signedUrl = `${url.origin}${path}?${query}&sig=${sig}`;
+        return new Response(JSON.stringify({ url: signedUrl, token, ts, nonce }), {
+          status: 200,
+          headers: { "content-type": "application/json", ...corsHeaders() },
+        });
+      } catch (err) {
+        console.error("kanariya_admin_error", err);
+        return new Response("Error", { status: 500, headers: corsHeaders() });
+      }
     }
 
     if (pathname === "/admin/export") {
