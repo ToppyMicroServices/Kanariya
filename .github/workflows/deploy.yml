@@ -48,7 +48,8 @@ jobs:
         run: npm run test:runtime
 
       - name: Run Vault local runtime checks
-        run: npm --prefix vault run test:runtime
+        working-directory: vault
+        run: npm run test:runtime
 
       - name: Validate Cloudflare secrets
         env:
