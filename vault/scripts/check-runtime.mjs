@@ -57,7 +57,7 @@ try {
     .setIssuer(env.ACCESS_ISSUER).setAudience(env.ACCESS_AUDIENCE).setIssuedAt().setExpirationTime("10m").sign(pair.privateKey);
   const notifications = [], forbidden = [];
   mf = new runtime.Miniflare({ modules: true, modulesRoot: build, scriptPath: join(build, "worker.js"),
-    compatibilityDate: "2026-01-12", host: "127.0.0.1", port: 0, cf: false,
+    compatibilityDate: "2026-01-12", compatibilityFlags: ["nodejs_compat"], host: "127.0.0.1", port: 0, cf: false,
     log: new runtime.Log(runtime.LogLevel.ERROR), bindings: env,
     durableObjects: { VAULT: { className: "VaultDocument", useSQLite: true } }, durableObjectsPersist: persist,
     r2Buckets: ["VAULT_DOCUMENTS"],
@@ -116,6 +116,68 @@ try {
   assert.equal((await request("revoke", env.VAULT_OWNER_SUB)).status, 200);
   assert.equal((await request("open")).status, 403);
   report.checks.push("owner_revocation");
+  // A separate fresh dummy document exercises shared-password mode without
+  // weakening the Access document or reusing its irreversible revocation state.
+  await mf.dispose(); mf = null;
+  const passwordId = crypto.randomUUID(), password = "synthetic-shared-password-only";
+  const passwordRecord = JSON.stringify(await sealDocument({ id: passwordId, bytes: pdf, subjects: [],
+    expiresAt: Date.now() + 300000, authMode: "password", password }, await importKey(env.VAULT_WRAP_KEY)));
+  const passwordEnv = { ...env, PASSWORD_READER_ENABLED: "1", DUMMY_DOCUMENT_ID: passwordId,
+    DUMMY_RECORD_SHA256: createHash("sha256").update(passwordRecord).digest("hex") };
+  const passwordPersist = join(temporary, "password-durable-objects");
+  mf = new runtime.Miniflare({ modules: true, modulesRoot: build, scriptPath: join(build, "worker.js"),
+    compatibilityDate: "2026-01-12", compatibilityFlags: ["nodejs_compat"], host: "127.0.0.1", port: 0, cf: false,
+    log: new runtime.Log(runtime.LogLevel.ERROR), bindings: passwordEnv,
+    durableObjects: { VAULT: { className: "VaultDocument", useSQLite: true } }, durableObjectsPersist: passwordPersist,
+    r2Buckets: ["VAULT_DOCUMENTS"], outboundService: async request => {
+      if (request.url === env.ACCESS_ISSUER + "/cdn-cgi/access/certs") return new runtime.Response(JSON.stringify({ keys: [jwk] }), { headers: { "content-type": "application/json" } });
+      if (request.url !== env.WEBHOOK_URL) { forbidden.push("blocked"); throw new Error("unexpected_network"); }
+      const body = await request.text();
+      for (const secret of [password, passwordId, subject, env.VAULT_WRAP_KEY, env.VAULT_AUDIT_KEY]) assert.ok(!body.includes(secret));
+      return new runtime.Response(null, { status: 202 });
+    } });
+  await mf.ready;
+  await (await mf.getR2Bucket("VAULT_DOCUMENTS")).put(`${passwordId}.sealed.json`, passwordRecord);
+  async function shared(action, { method = action === "status" ? "GET" : "POST", cookie = "", body, headers = {} } = {}) {
+    return mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/p/${passwordId}/${action}`, { method,
+      headers: { origin: env.PUBLIC_ORIGIN, "content-type": "application/json", cookie, ...headers },
+      ...(method === "GET" || method === "HEAD" ? {} : { body: JSON.stringify(body ?? (action === "open" ? { requestId: crypto.randomUUID() } : {})) }),
+      signal: AbortSignal.timeout(10000) });
+  }
+  assert.equal((await shared("open")).status, 401);
+  assert.equal((await shared("session", { body: { password: "wrong-synthetic-password" } })).status, 401);
+  const unlocked = await shared("session", { body: { password } });
+  assert.equal(unlocked.status, 200);
+  const setCookie = unlocked.headers.get("set-cookie");
+  assert.match(setCookie, /Secure/); assert.match(setCookie, /HttpOnly/); assert.match(setCookie, /SameSite=Strict/);
+  const cookie = setCookie.split(";")[0];
+  assert.equal((await shared("status", { cookie })).status, 200);
+  const opened = await shared("open", { cookie });
+  assert.equal(opened.status, 200); assert.deepEqual(new Uint8Array(await opened.arrayBuffer()), pdf);
+  assert.match(opened.headers.get("cache-control"), /no-store/);
+  assert.ok(Number(opened.headers.get("x-vault-expires-at")) > Date.now());
+  assert.ok(Number(opened.headers.get("x-vault-session-expires-at")) > Date.now());
+  report.checks.push("native_scrypt_password_unlock_cookie_and_exact_pdf");
+  assert.equal((await request("status", "", crypto.randomUUID(), passwordId)).status, 401);
+  assert.equal((await request("open", subject, crypto.randomUUID(), passwordId)).status, 403);
+  assert.equal((await shared("open", { method: "HEAD", cookie, headers: { range: "bytes=0-9" } })).status, 405);
+  assert.equal((await shared("session", { body: { password }, headers: { origin: "https://elsewhere.example.test" } })).status, 403);
+  report.checks.push("password_cannot_authorize_owner_or_access_routes_or_head_range");
+  const guesses = await Promise.all(Array.from({ length: 12 }, () => shared("session", { body: { password: "wrong-synthetic-password" } })));
+  assert.equal(guesses.filter(r => r.status === 401).length, 8);
+  assert.equal(guesses.filter(r => r.status === 429).length, 4);
+  report.checks.push("concurrent_password_attempt_limit_persists");
+  assert.equal((await request("revoke", env.VAULT_OWNER_SUB, crypto.randomUUID(), passwordId)).status, 200);
+  assert.equal((await shared("status", { cookie })).status, 403);
+  assert.equal((await shared("open", { cookie })).status, 403);
+  assert.equal((await shared("session", { method: "DELETE", cookie })).status, 200);
+  report.checks.push("owner_revocation_invalidates_existing_password_session");
+  for (const path of await files(passwordPersist)) {
+    const bytes = await readFile(path);
+    for (const secret of [password, cookie.split("=")[1], env.VAULT_WRAP_KEY, env.VAULT_AUDIT_KEY]) assert.ok(!bytes.includes(Buffer.from(secret)));
+    assert.ok(!bytes.includes(Buffer.from(pdf)));
+  }
+  report.checks.push("password_session_and_document_secrets_not_persisted_in_plaintext");
   assert.deepEqual(forbidden, []); report.checks.push("no_unexpected_outbound");
   report.status = "passed"; report.runtime = { node: process.version, wrangler: pkg.version };
 } catch {

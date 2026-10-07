@@ -1,3 +1,5 @@
+import { createPasswordVerifier, passwordVerifierValid } from "./password.js";
+
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const MAX_PDF_BYTES = 1024 * 1024;
 export const MAX_RECORD_BYTES = 2 * MAX_PDF_BYTES;
@@ -38,23 +40,39 @@ export const sealJSON = (value, key, context) => seal(utf8(JSON.stringify(value)
 export async function openJSON(box, key, context) { return JSON.parse(decoder.decode(await open(box, key, context))); }
 
 export function validatePolicy(policy) {
-  if (!policy || policy.mime !== "application/pdf" || !Number.isSafeInteger(policy.size) || policy.size < 5 || policy.size > MAX_PDF_BYTES ||
-      !Number.isSafeInteger(policy.expiresAt) || !Array.isArray(policy.subjects) || !policy.subjects.length || policy.subjects.length > 50 ||
-      policy.subjects.some(s => typeof s !== "string" || s.length < 1 || s.length > 256) || typeof policy.revoked !== "boolean") throw new Error("invalid_policy");
+  if (!policy || typeof policy !== "object" || Array.isArray(policy) || policy.mime !== "application/pdf" ||
+      !Number.isSafeInteger(policy.size) || policy.size < 5 || policy.size > MAX_PDF_BYTES ||
+      !Number.isSafeInteger(policy.expiresAt) || !Array.isArray(policy.subjects) || policy.subjects.length > 50 ||
+      policy.subjects.some(s => typeof s !== "string" || s.length < 1 || s.length > 256) ||
+      typeof policy.revoked !== "boolean" || Object.hasOwn(policy, "password")) throw new Error("invalid_policy");
+  const mode = Object.hasOwn(policy, "authMode") ? policy.authMode : "access";
+  if (mode === "access") {
+    if (!policy.subjects.length || Object.hasOwn(policy, "passwordVerifier")) throw new Error("invalid_policy");
+  } else if (mode === "password") {
+    if (policy.subjects.length || !passwordVerifierValid(policy.passwordVerifier)) throw new Error("invalid_policy");
+  } else throw new Error("invalid_policy");
   return policy;
 }
 // Provisioning is an offline operation. This function is never a public upload API.
-export async function sealDocument({ id, bytes, subjects, expiresAt }, wrappingKey) {
+export async function sealDocument(options, wrappingKey) {
+  const { id, bytes, subjects, expiresAt } = options;
   if (!UUID.test(id) || !(bytes instanceof Uint8Array) || decoder.decode(bytes.subarray(0, 5)) !== "%PDF-") throw new Error("invalid_document");
-  const policy = validatePolicy({ mime: "application/pdf", size: bytes.length, subjects, expiresAt, revoked: false });
+  const authMode = Object.hasOwn(options, "authMode") ? options.authMode : "access";
+  if (Object.hasOwn(options, "passwordVerifier") || (authMode !== "password" && Object.hasOwn(options, "password"))) throw new Error("invalid_policy");
+  const policy = { mime: "application/pdf", size: bytes.length, subjects, expiresAt, revoked: false, authMode };
+  if (authMode === "password") {
+    if (!Array.isArray(subjects) || subjects.length) throw new Error("invalid_policy");
+    policy.passwordVerifier = createPasswordVerifier(options.password);
+  }
+  validatePolicy(policy);
   const raw = crypto.getRandomValues(new Uint8Array(32));
-  const dek = await importKey(b64(raw));
-  const record = { version: 2, id,
-    policy: await sealJSON(policy, wrappingKey, `policy:v2:${id}`),
-    wrappedKey: await seal(raw, wrappingKey, `key:v2:${id}`),
-    document: await seal(bytes, dek, `document:v2:${id}`) };
-  raw.fill(0);
-  return record;
+  try {
+    const dek = await importKey(b64(raw));
+    return { version: 2, id,
+      policy: await sealJSON(policy, wrappingKey, `policy:v2:${id}`),
+      wrappedKey: await seal(raw, wrappingKey, `key:v2:${id}`),
+      document: await seal(bytes, dek, `document:v2:${id}`) };
+  } finally { raw.fill(0); }
 }
 export async function readPolicy(record, id, wrappingKey) {
   if (record?.version !== 2 || record.id !== id) throw new Error("invalid_record");

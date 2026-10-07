@@ -1,6 +1,41 @@
 # Kanariya Vault
 
-An Access-authenticated document service that decrypts on the server, commits an encrypted audit record and notification job, then returns the document bytes. There is no client key endpoint. This is a separate Worker; the existing public canary endpoint is not an authorization or acknowledgement mechanism.
+A document service with per-document Access or shared-password authentication. It decrypts on the server, commits an encrypted audit record and notification job, then returns the document bytes. There is no client key endpoint. This is a separate Worker; the existing public canary endpoint is not an authorization or acknowledgement mechanism.
+
+## Two reader modes; owner administration always uses Access
+
+The encrypted version-2 document policy selects exactly one `authMode`:
+
+- `access` is the default, including historical policies with no mode field. It requires a verified Cloudflare Access JWT and an explicitly granted subject. Existing `/#<uuid>` links and `/v1/documents/<uuid>/open` remain supported.
+- `password` requires a 12–256 UTF-8-byte shared password and an empty `subjects` array. Its reader link is `/p/<uuid>`. It does not require the reader to obtain an Access JWT. It is **disabled by default** with `PASSWORD_READER_ENABLED="0"`; only the exact string `"1"` enables these reader routes.
+
+There is no fallback between modes. A password session cannot open an Access document, and an Access JWT cannot substitute for the shared password. Owner status, revocation and notification repair stay under `/v1/documents/...` and always require the verified owner Access subject. Shared access is audited as `shared-password`, not as an identified individual.
+
+This source change does not activate the private deployment. The origin, Access configuration, owner/secrets, exact dummy UUID/ciphertext digest and provider setup must still be valid. The dummy-only gate is unchanged; real CVs remain excluded. Before any approved activation, review the Access application routing: `/` and `/v1/*` must remain protected, while only the separate `/p/*` reader surface may be reachable without a reader JWT. Do not turn off Access for the whole hostname. Use a dedicated origin without an existing service worker or cache rules that override the no-store headers. No Access policy, secret, bucket or live document is provisioned by these scripts or by the main repository workflow.
+
+For offline preparation, the trusted stdin object accepted by `seal-document.mjs` adds `authMode`. Password mode uses `authMode:"password"`, `subjects:[]`, and `password`; Access mode uses `authMode:"access"` (or omission), `subjects`, and no password. Do not put credentials in command arguments, shell history, URLs, logs or checked-in files. Use the existing trusted secret-store bridge. Prefer a long randomly generated password or passphrase; communicate it separately from the document link.
+
+Only a salted scrypt verifier is stored inside the encrypted policy. The fixed [OWASP scrypt profile](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#scrypt) is N=16384, r=8, p=5, with a 32-byte salt and 32-byte output. Native [`node:crypto`](https://developers.cloudflare.com/workers/runtime-apis/nodejs/crypto/) needs `nodejs_compat` in the Vault configuration. Provisioning validates the exact profile and rejects malformed verifiers or mixed-mode policies. Worker/operator key access remains a trust boundary; this is not end-to-end encryption.
+
+Password unlocks issue opaque 256-bit sessions lasting at most five minutes, capped by the document expiry. The browser receives a Secure, HttpOnly, SameSite=Strict cookie scoped to `/p/<uuid>/`; only its hash, current ciphertext digest and expiry are kept in the encrypted per-document Durable Object journal. Sessions do not slide or renew automatically. Logout removes the current session; owner revocation removes all sessions and remains irreversible. Changing the pinned record invalidates existing sessions. Use a newly reviewed dummy UUID when rotating a document or changing its mode rather than trying to undo revocation.
+
+Public request bodies are limited to 2 KiB and five seconds and are read outside the per-document state queue, so a slow upload cannot block owner controls. A durable per-document budget allows ten validly formed password attempts in each five-minute window, including successful attempts. Parallel requests and object restarts do not reset it. At most 32 live sessions are allowed. This protects the expensive KDF without collecting reader IPs, but someone who knows the link can temporarily exhaust the shared budget; assess edge abuse controls and actual Worker CPU costs before enabling it.
+
+Both modes recheck the deadline immediately before returning plaintext. The viewer also clears canvases at the document deadline; password mode clears at session expiry and checks current authorization every 15 seconds while showing a document. Hidden pages, logout, close and navigation cancel pending display work. These controls cannot retract bytes already delivered, screenshots, saved files or an in-flight network response. A web password is separate from PDF-file encryption; the viewer does not unlock a separately password-encrypted PDF.
+
+Password reader API (all responses, including errors, are `no-store`; no cross-origin CORS):
+
+| Path | Method | Effect |
+| --- | --- | --- |
+| `/p/<uuid>` | GET | Empty password reader shell; no document bytes |
+| `/p/<uuid>/session` | POST | Same-origin JSON `{ "password": "..." }`; checks the verifier and issues a short cookie |
+| `/p/<uuid>/session` | DELETE | Same-origin empty JSON `{}`; removes current session and clears cookie |
+| `/p/<uuid>/status` | GET | Requires the current session; returns document/session deadlines only |
+| `/p/<uuid>/open` | POST | Same-origin fresh request UUID plus current session; audited PDF release |
+
+PDF release is POST-only. GET, HEAD, Range headers and conditional requests do not provide alternate content endpoints. Renderer assets at `/p/assets/*` contain only the pinned PDF.js library and empty viewer UI; they do not carry passwords, document bytes or owner data.
+
+Notification sends now take place outside the document's serialized request queue. A short encrypted durable lease is committed before each send and its result is committed afterward; owner status/revoke remain responsive during a slow provider call. Retries remain at-least-once and retain the same event idempotency key; a process crash can still cause duplicate provider acceptance.
 
 **Status (2026-10-07):** the native Cloudflare notification candidate is active as private version `f9921a18-5a91-4af1-a97a-99a31b3208a6`, with source SHA-256 `dc71446d70cd91969e57b478d94b79f9dd184080ba01bbfb354e3919f02568ec` verified by readback. The owner confirmed both local dummy-test notifications in Proton's Spam folder. Inbox placement remains unverified. Activation preserved the original nine bindings, keys, runtime/settings, disabled public endpoints and root Proton mail DNS. Origin, Access, owner subject and dummy pins remain unconfigured, so production document viewing is inactive. No real CV access, Proton mailbox access, paid upgrade or additional notification send occurred during activation.
 
@@ -21,7 +56,7 @@ flowchart LR
   Vault -->|PDF bytes after durable success commit| Reader
 ```
 
-The Worker first limits document routes to the pinned dummy UUID, then verifies the Access JWT signature, issuer, audience, expiry and subject using `jose`. It ignores the unsigned email header. On each open, the exact R2 bytes must match the pinned digest before keys are imported or the encrypted policy is read. Document policies grant explicit Access subjects and an expiry time; a valid Access login alone does not grant document access. The browser uses a same-origin POST with a fresh request UUID, so an ordinary link preview does not decrypt the document.
+The Worker first limits document routes to the pinned dummy UUID. Access readers and all owner operations then verify the Access JWT signature, issuer, audience, expiry and subject using `jose`; explicitly enabled password readers follow the isolated session flow above. It ignores the unsigned email header. On each open, the exact R2 bytes must match the pinned digest before keys are imported or the encrypted policy is read. Access-mode policies grant explicit subjects and an expiry time; a valid Access login alone does not grant document access. The browser uses a same-origin POST with a fresh request UUID, so an ordinary link preview does not decrypt the document.
 
 Before document decryption, the Durable Object commits an encrypted attempt, replay guard and delayed notification job. After successful decryption it commits the success outcome before returning PDF bytes. If this second commit fails, no PDF is returned; the attempt remains and its job can report `unknown`. A decryption failure reports `failed`. A lost HTTP response after the success commit does not prove the recipient received or read the document.
 
@@ -40,7 +75,7 @@ Alarms retry transient provider failures. A 2xx provider response records `accep
 - Documents use an independent random AES-256-GCM data key. The data key and access policy are encrypted under `VAULT_WRAP_KEY` with separate authenticated contexts. Only the encrypted record is stored in R2.
 - Audit records, access subjects, request history and outbox details are encrypted with a separate `VAULT_AUDIT_KEY` before every Durable Object write. The wrapping and audit key values must differ. Only ciphertext, object IDs and alarm scheduling metadata persist outside that envelope.
 - Server keys and notification credentials belong in Worker secret bindings, not Wrangler vars, source control, uploaded objects or browser JavaScript. Sender and recipient addresses also belong in secret bindings. Binding separation is not an HSM or protection against a compromised Cloudflare administrator/Worker.
-- No code path returns a decryption key. There is no public provisioning API. Responses set `no-store`; the viewer passes the PDF bytes in memory to a same-origin PDF.js worker and renders pages on canvases. Closing, leaving the page or changing the link cancels rendering, destroys the loading task and clears canvas dimensions/references. There is no localStorage, sessionStorage, IndexedDB or service worker. Destroying browser objects is not a guarantee of immediate physical memory erasure.
+- No code path returns a decryption key. There is no public provisioning API. Responses set `no-store`; the viewer passes the PDF bytes in memory to a same-origin PDF.js worker and renders pages on canvases. Closing, hiding or leaving the page, changing the link, or reaching the enforced deadline cancels rendering, destroys the loading task and clears canvas dimensions/references. There is no localStorage, sessionStorage, IndexedDB or service worker. Destroying browser objects is not a guarantee of immediate physical memory erasure.
 - Closing the viewer, leaving the page or changing the document link invalidates pending responses, so a late response cannot redisplay the old document. Canceling the browser request cannot undo a server-side decryption or notification job already committed.
 - The viewer intentionally displays plaintext to an authorized reader. These cache instructions do not prevent screenshots, downloads, OS swap, browser crash recovery, malicious extensions or retention by a permitted recipient. Browser disk-cache behavior has not been independently verified. A saved plaintext copy can be read again without this service.
 - Worker observability is disabled in the template; application errors use fixed codes. Cloudflare Access, account audit, billing, backup and infrastructure logs are a separate boundary. Review their actual retention and content before importing personal data. This change does not claim provider-wide absence of identity metadata.
@@ -51,11 +86,13 @@ The wrapping key authorizes server-side decryption of the document key. The encr
 
 `wrangler.toml` deliberately has no production route and disables `workers.dev` and preview URLs. `wrangler.production.toml` identifies the provisioned account and private bucket, but keeps public endpoints disabled and invalid origin, Access and dummy-pin placeholders. Neither configuration activates document viewing. The deployment was built with Wrangler 4.136.3. Remote observability status was not established by the settings readback; the local configuration disables it.
 
+Both checked-in Vault configurations are templates with placeholders; do not use them to overwrite an existing deployment. For a source update, first read the live Worker metadata and inherit all bindings, including secret bindings and the `send_email` sender/recipient restrictions. Preserve the live compatibility date, runtime settings and migrations. If `nodejs_compat` is absent, add that flag for this source's native `node:crypto` support; leave other runtime values unchanged. Read back the uploaded version to confirm these settings before activation. Any public route or Access scope change requires a separate review and approval.
+
 1. Select the target account, Access-protected HTTPS origin and private R2 bucket. Confirm the deployment scope and current provider costs. Keep the existing canary Worker and its routes separate.
 2. Set `PUBLIC_ORIGIN`, `ACCESS_ISSUER` and `ACCESS_AUDIENCE` to the actual Access application. Pin the same issuer/audience in the deployed Worker. Set the owner subject as secret `VAULT_OWNER_SUB` and review each reader's subject-based grant.
-3. Provision independent 256-bit base64 values for `VAULT_WRAP_KEY` and `VAULT_AUDIT_KEY` in the service's secret bindings. Keep recoverable protected backups outside the bucket. Do not rotate these by simply replacing the current values: existing encrypted objects/journals would become unreadable without a migration.
+3. For a new isolated installation only, provision independent 256-bit base64 values for `VAULT_WRAP_KEY` and `VAULT_AUDIT_KEY` in the service's secret bindings. An existing deployment must retain its current keys. Keep recoverable protected backups outside the bucket. Do not rotate these by simply replacing the current values: existing encrypted objects/journals would become unreadable without a migration.
 4. Configure the notification provider after verifying the sender domain and recipient. Cloudflare uses `MAIL_PROVIDER=cloudflare`, `MAIL_FROM` and `MAIL_TO` secrets, and a `NOTIFY_EMAIL` send binding restricted to the verified recipient. It needs no MailChannels API key. MailChannels remains the default when `MAIL_PROVIDER` is absent; that path needs `MAILCHANNELS_API_KEY`, `MAIL_FROM`, `MAIL_TO` and optionally `MAIL_FROM_NAME`. No real recipient or API key is in the template.
-5. Prepare only the reviewed dummy PDF using fresh service test keys. Set `DUMMY_DOCUMENT_ID` to the sealed record UUID and `DUMMY_RECORD_SHA256` to the SHA-256 of the exact encrypted file uploaded to the private bucket. Hash the encrypted record, not the original PDF. Do not reformat JSON after hashing; whitespace changes also invalidate the pin. Invalid placeholder defaults deny all requests.
+5. Prepare only the reviewed dummy PDF. For an existing deployment, seal it with the current `VAULT_WRAP_KEY` through the trusted secret-store bridge; fresh service test keys belong only to a new isolated installation. Set `DUMMY_DOCUMENT_ID` to the sealed record UUID and `DUMMY_RECORD_SHA256` to the SHA-256 of the exact encrypted file uploaded to the private bucket. Hash the encrypted record, not the original PDF. Do not reformat JSON after hashing; whitespace changes also invalidate the pin. Invalid placeholder defaults deny all requests.
 6. Deploy and verify with that dummy: signature rejection, unauthorized document rejection, changed-record rejection, encrypted persistence, actual alert delivery, revocation, provider outage/recovery and viewer cache behavior. A replacement dummy requires an explicit pin update; there is no acceptance of arbitrary bucket contents.
 7. Keep real CVs and their Mac keys outside this deployment. Passing the dummy checks does not activate or migrate them. Any later real-CV rollout requires a separate explicit decision and revised admission policy after target/permissions/logging/recovery checks; this version provides no live-mode bypass.
 
@@ -73,7 +110,7 @@ Drive remains an encrypted archive. This service uses a private R2 working copy 
 | `/v1/documents/<uuid>/revoke` | POST | Owner only, same-origin empty JSON `{}`; durable revocation |
 | `/v1/documents/<uuid>/retry-notifications` | POST | Owner only, same-origin `{}`; explicit rebinding of failed jobs to corrected configured destinations |
 
-Viewer links use the document UUID in the URL fragment (`/#<uuid>`), with no identity, filename, token or key in the URL. The subsequent API path contains an opaque document ID. Revocation blocks future requests; it cannot retract an in-flight response or an already saved copy. Revocation is currently irreversible through the API; publish a separately reviewed new object if needed.
+Access viewer links use the document UUID in the URL fragment (`/#<uuid>`); password links use `/p/<uuid>`. Neither contains identity, filename, password, session token or key. The subsequent API path contains an opaque document ID. Revocation blocks future requests; it cannot retract an in-flight response or an already saved copy. Revocation is currently irreversible through the API; publish a separately reviewed new object if needed.
 
 All document routes, including owner operations, are restricted to the configured dummy UUID. Replacing the encrypted object without updating its configured digest blocks subsequent opens.
 
@@ -86,6 +123,8 @@ npm ci --ignore-scripts
 npm test
 node scripts/check-runtime.mjs /absolute/path/runtime-report.json
 ```
+
+Root CI now runs both the root and Vault unit/runtime suites, while deployment still targets only the ordinary canary Worker. The Vault runtime check covers both Access and shared-password synthetic records, including real native scrypt, concurrent attempts and cookie revocation.
 
 The runtime check requires globally installed Wrangler with Miniflare 4, and permission to listen on loopback. It passed with Wrangler 4.58.0; Wrangler 4.148.0 bundles Miniflare 5 and is incompatible with this checker. It bundles with `--dry-run`, uses generated identities/keys and PDF-like synthetic bytes, intercepts outbound requests, and deletes its test state. It never sends a real notification or loads a real CV. The report starts at `running_not_verified`; unhandled runtime termination must not be interpreted as a pass.
 

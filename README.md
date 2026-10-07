@@ -216,7 +216,7 @@ npx wrangler@4 secret put MAILCHANNELS_API_KEY
 
 When the target account, routes, configuration, and costs have been reviewed, deploy with `npx wrangler@4 deploy`. Verify the deployed service by creating a registered token, using its test action, inspecting export status, and checking the intended destination. Those are live checks and can send messages.
 
-The GitHub Actions workflow deploys on pushes to `main` and manual dispatch. It uses repository secrets `CF_API_TOKEN` and `CF_ACCOUNT_ID` for deployment and syncs nonempty `ADMIN_KEY`, `IP_HMAC_KEY`, `WEBHOOK_URL`, `SLACK_WEBHOOK_URL`, `DISCORD_WEBHOOK_URL`, and `MAILCHANNELS_API_KEY` into Worker secrets. An unset optional GitHub secret does not delete an existing Worker secret. Configure `MAIL_FROM`, `MAIL_TO`, and other mail variables separately in the deployment configuration. Manage legacy signing secrets directly in Cloudflare; the workflow does not sync them.
+The GitHub Actions workflow runs the root and Vault unit/runtime checks, then deploys only the ordinary canary Worker on pushes to `main` and manual dispatch. Vault deployment is separate. It uses repository secrets `CF_API_TOKEN` and `CF_ACCOUNT_ID` for deployment and syncs nonempty `ADMIN_KEY`, `IP_HMAC_KEY`, `WEBHOOK_URL`, `SLACK_WEBHOOK_URL`, `DISCORD_WEBHOOK_URL`, and `MAILCHANNELS_API_KEY` into Worker secrets. An unset optional GitHub secret does not delete an existing Worker secret. Configure `MAIL_FROM`, `MAIL_TO`, and other mail variables separately in the deployment configuration. Manage legacy signing secrets directly in Cloudflare; the workflow does not sync them.
 
 ### Existing planted URLs
 
@@ -239,3 +239,7 @@ One Durable Object serves the installation. Inventory and delivery limits bound 
 Apache License 2.0 (Apache-2.0). Copyright (c) 2026 ToppyMicroServices OÜ.
 
 See `LICENSE` for the full text.
+
+### Vault reader authentication
+
+The separate [Vault](vault/README.md) retains Access-based readers and now supports an explicitly enabled per-document shared-password mode with short sessions and expiry. Owner administration always uses Access. Password mode, public Vault routes and real-document admission remain disabled in the checked-in configuration. Main pushes automatically deploy the canary Worker after both packages pass CI; they do not deploy or activate Vault.

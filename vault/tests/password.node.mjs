@@ -1,0 +1,457 @@
+import test, { after } from "node:test";
+import assert from "node:assert/strict";
+import cryptoNode, { createHash } from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
+import { generateKeyPair, exportJWK, SignJWT } from "jose";
+import worker, { VaultDocument } from "../src/worker.js";
+import { newKey, importKey, sealDocument, readPolicy, openJSON, sealJSON, utf8 } from "../src/crypto.js";
+
+// Isolated dummy fixtures: no account, remote bucket, or notification service is used.
+const originalFetch = globalThis.fetch;
+after(() => { globalThis.fetch = originalFetch; });
+const pair = await generateKeyPair("RS256", { extractable: true });
+const jwk = { ...await exportJWK(pair.publicKey), kid: "password-fixture", use: "sig", alg: "RS256" };
+const PASSWORD = "synthetic reader password";
+let fixtureNumber = 0;
+class Storage {
+  constructor() { this.map = new Map(); this.alarmAt = null; this.writes = 0; this.failAt = Infinity; this.afterCommit = null; }
+  async get(key) { return structuredClone(this.map.get(key)); }
+  async setAlarm(at) { this.alarmAt = at; }
+  async transaction(fn) {
+    const draft = new Map(structuredClone([...this.map])); let alarm = this.alarmAt;
+    const result = await fn({
+      get: async key => structuredClone(draft.get(key)),
+      put: async (key, value) => { if (++this.writes === this.failAt) throw new Error("synthetic_failure"); draft.set(key, structuredClone(value)); },
+      setAlarm: async at => { alarm = at; }, deleteAlarm: async () => { alarm = null; },
+    });
+    this.map = draft; this.alarmAt = alarm;
+    if (this.afterCommit) await this.afterCommit();
+    return result;
+  }
+}
+async function fixture({ authMode = "password", expiresAt = Date.now() + 600000 } = {}) {
+  const id = crypto.randomUUID(), subject = "synthetic-access-reader", pdf = utf8("%PDF-1.4\nSYNTHETIC_PASSWORD_BODY\n");
+  const env = { PUBLIC_ORIGIN: "https://vault.example.test", ACCESS_ISSUER: `https://password-fixture-${++fixtureNumber}.cloudflareaccess.com`,
+    ACCESS_AUDIENCE: "synthetic-audience", VAULT_WRAP_KEY: newKey(), VAULT_AUDIT_KEY: newKey(), VAULT_OWNER_SUB: "synthetic-owner",
+    PASSWORD_READER_ENABLED: "1", WEBHOOK_URL: "https://notify.example.test/synthetic-path" };
+  const wrappingKey = await importKey(env.VAULT_WRAP_KEY), auditKey = await importKey(env.VAULT_AUDIT_KEY);
+  let record = await sealDocument({ id, bytes: pdf, expiresAt, subjects: authMode === "password" ? [] : [subject],
+    ...(authMode === undefined ? {} : { authMode }), ...(authMode === "password" ? { password: PASSWORD } : {}) }, wrappingKey);
+  const pinRecord = () => { env.DUMMY_DOCUMENT_ID = id; env.DUMMY_RECORD_SHA256 = createHash("sha256").update(JSON.stringify(record)).digest("hex"); };
+  pinRecord();
+  let reads = 0, jwksReads = 0, providerStatus = 202, providerHandler;
+  const calls = [], storage = new Storage(), ctx = { storage, id: { toString: () => `password-object-${id}` } };
+  const context = `journal:v1:password-object-${id}`;
+  let instance = new VaultDocument(ctx, env);
+  env.VAULT_DOCUMENTS = { async get(name) { reads++; assert.equal(name, `${id}.sealed.json`);
+    if (!record) return null; const bytes = utf8(JSON.stringify(record)); return { size: bytes.length, body: new Response(bytes).body }; } };
+  env.VAULT = { idFromName: value => { assert.equal(value, id); return value; }, get: () => instance };
+  globalThis.fetch = async (url, options) => {
+    if (String(url) === `${env.ACCESS_ISSUER}/cdn-cgi/access/certs`) { jwksReads++; return Response.json({ keys: [jwk] }); }
+    assert.equal(String(url), env.WEBHOOK_URL); calls.push({ url, options, payload: JSON.parse(options.body) });
+    if (providerHandler) return providerHandler(url, options);
+    return new Response("synthetic provider response", { status: providerStatus });
+  };
+  async function token(sub = subject) {
+    return new SignJWT({ sub, iss: env.ACCESS_ISSUER, aud: env.ACCESS_AUDIENCE, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 600 })
+      .setProtectedHeader({ alg: "RS256", kid: "password-fixture" }).sign(pair.privateKey);
+  }
+  async function request(action = "session", options = {}) {
+    const ownerRoute = options.access === true;
+    const method = options.method || (action === "status" ? "GET" : "POST");
+    const headers = { origin: env.PUBLIC_ORIGIN, "content-type": "application/json", ...(options.cookie ? { cookie: options.cookie } : {}),
+      ...(options.subject ? { "cf-access-jwt-assertion": await token(options.subject) } : {}), ...options.headers };
+    const body = options.body ?? JSON.stringify(action === "session" && method === "POST" ? { password: PASSWORD } :
+      action === "open" ? { requestId: options.requestId || crypto.randomUUID() } : {});
+    const url = `${env.PUBLIC_ORIGIN}${ownerRoute ? "/v1/documents" : "/p"}/${options.id || id}/${action}${options.query || ""}`;
+    const req = new Request(options.url || url, { method, headers, ...(["GET", "HEAD"].includes(method) ? {} : { body }) });
+    return options.direct ? instance.fetch(req) : worker.fetch(req, env);
+  }
+  async function login(options) {
+    const response = await request("session", options); assert.equal(response.status, 200);
+    const setCookie = response.headers.get("set-cookie"); assert.ok(setCookie);
+    return { cookie: setCookie.split(";")[0], setCookie, response, body: await response.json() };
+  }
+  async function state() { return openJSON(await storage.get("encrypted-journal"), auditKey, context); }
+  async function replacePolicy(change) {
+    const policy = await openJSON(record.policy, wrappingKey, `policy:v2:${id}`); change(policy);
+    record.policy = await sealJSON(policy, wrappingKey, `policy:v2:${id}`); pinRecord();
+  }
+  return { env, id, subject, pdf, expiresAt, wrappingKey, auditKey, context, storage, token, request, login, state, replacePolicy, pinRecord, calls,
+    get reads() { return reads; }, get jwksReads() { return jwksReads; }, get record() { return record; }, set record(value) { record = value; },
+    set providerHandler(value) { providerHandler = value; }, set providerStatus(value) { providerStatus = value; },
+    restart() { instance = new VaultDocument(ctx, env); }, alarm() { return instance.alarm(); },
+    async writeState(value) { storage.map.set("encrypted-journal", await sealJSON(value, auditKey, context)); },
+  };
+}
+function privateResponse(response) {
+  assert.match(response.headers.get("cache-control"), /no-store/);
+  assert.equal(response.headers.get("cdn-cache-control"), "no-store");
+  assert.notEqual(response.headers.get("access-control-allow-origin"), "*");
+}
+function keyReads(env) {
+  let count = 0;
+  for (const name of ["VAULT_WRAP_KEY", "VAULT_AUDIT_KEY"]) {
+    const value = env[name]; Object.defineProperty(env, name, { get() { count++; return value; } });
+  }
+  return () => count;
+}
+async function withClock(at, operation) {
+  const original = Date.now; Date.now = () => at;
+  try { return await operation(); } finally { Date.now = original; }
+}
+function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
+async function within(promise, ms = 1000) {
+  let timer;
+  try { return await Promise.race([promise, new Promise(resolve => { timer = setTimeout(() => resolve(null), ms); })]); }
+  finally { clearTimeout(timer); }
+}
+
+test("password session and PDF open work without any reader JWT and set bounded secure cookies", async () => {
+  const f = await fixture(), startedAt = Date.now(), session = await f.login();
+  assert.match(session.setCookie, new RegExp(`^__Secure-vault-${f.id}=[^;]+;`));
+  assert.match(session.setCookie, new RegExp(`(?:^|;\\s*)Path=/p/${f.id}/(?:;|$)`));
+  for (const attribute of ["Secure", "HttpOnly", "SameSite=Strict"]) assert.match(session.setCookie, new RegExp(`(?:^|;\\s*)${attribute}(?:;|$)`, "i"));
+  assert.doesNotMatch(session.setCookie, /(?:^|;\s*)Domain=/i);
+  const maxAge = /(?:^|;\s*)Max-Age=(\d+)(?:;|$)/i.exec(session.setCookie);
+  assert.ok(maxAge); assert.ok(Number(maxAge[1]) > 0 && Number(maxAge[1]) <= 300);
+  assert.equal(session.body.expiresAt, f.expiresAt);
+  assert.ok(session.body.sessionExpiresAt > startedAt && session.body.sessionExpiresAt <= Date.now() + 300000);
+  assert.ok(session.body.sessionExpiresAt <= session.body.expiresAt);
+  const response = await f.request("open", { cookie: session.cookie });
+  assert.equal(response.status, 200); assert.deepEqual(new Uint8Array(await response.arrayBuffer()), f.pdf);
+  assert.equal(response.headers.get("content-type"), "application/pdf");
+  assert.equal(Number(response.headers.get("x-vault-expires-at")), f.expiresAt);
+  assert.equal(Number(response.headers.get("x-vault-session-expires-at")), session.body.sessionExpiresAt);
+  privateResponse(session.response); privateResponse(response); assert.equal(f.jwksReads, 0);
+  assert.equal((await f.state()).events[0].outcome, "decrypted"); assert.ok(f.storage.alarmAt); assert.equal(f.calls.length, 0);
+});
+test("password status is authenticated, has current timestamps, and contains no body or verifier", async () => {
+  const f = await fixture();
+  const denied = await f.request("status"); assert.ok([401, 403].includes(denied.status)); privateResponse(denied);
+  const { cookie, body } = await f.login(), response = await f.request("status", { cookie });
+  assert.equal(response.status, 200); privateResponse(response);
+  const value = await response.json(); assert.equal(value.expiresAt, f.expiresAt); assert.equal(value.sessionExpiresAt, body.sessionExpiresAt);
+  assert.doesNotMatch(JSON.stringify(value), /SYNTHETIC_PASSWORD_BODY|scrypt|password|ciphertext/);
+});
+test("session token is encrypted durably, survives restart, and logout invalidates it durably", async () => {
+  const f = await fixture(), { cookie } = await f.login(), rawToken = cookie.slice(cookie.indexOf("=") + 1);
+  const persisted = JSON.stringify([...f.storage.map]), state = JSON.stringify(await f.state());
+  for (const secret of [PASSWORD, rawToken, "SYNTHETIC_PASSWORD_BODY", f.env.VAULT_WRAP_KEY, f.env.VAULT_AUDIT_KEY]) assert.ok(!persisted.includes(secret));
+  assert.ok(!state.includes(rawToken)); assert.ok(!state.includes(PASSWORD));
+  f.restart(); assert.equal((await f.request("open", { cookie })).status, 200);
+  const logout = await f.request("session", { method: "DELETE", cookie }); assert.equal(logout.status, 200);
+  assert.match(logout.headers.get("set-cookie"), /(?:^|;\s*)Max-Age=0(?:;|$)/i); privateResponse(logout);
+  f.restart(); assert.ok([401, 403].includes((await f.request("open", { cookie })).status));
+  assert.ok([401, 403].includes((await f.request("status", { cookie })).status));
+});
+test("wrong password, malformed token, and unrelated document cookie cannot release content", async () => {
+  const f = await fixture();
+  const wrong = await f.request("session", { body: JSON.stringify({ password: "synthetic wrong password" }) });
+  assert.equal(wrong.status, 401); assert.equal(wrong.headers.get("set-cookie"), null); privateResponse(wrong);
+  const { cookie } = await f.login(), otherName = cookie.replace(f.id, crypto.randomUUID());
+  for (const candidate of [otherName, `__Secure-vault-${f.id}=wrong`, cookie.slice(0, -1) + (cookie.endsWith("a") ? "b" : "a")]) {
+    const response = await f.request("open", { cookie: candidate }); assert.ok([401, 403].includes(response.status)); privateResponse(response);
+  }
+  assert.equal((await f.state()).events.length, 0);
+});
+test("a cookie and copied session journal cannot authenticate another document", async () => {
+  const first = await fixture(), { cookie } = await first.login(), copiedState = await first.state();
+  const second = await fixture();
+  copiedState.documentId = second.id; await second.writeState(copiedState);
+  const response = await second.request("open", { cookie: cookie.replace(first.id, second.id) });
+  assert.ok([401, 403].includes(response.status)); assert.doesNotMatch(await response.text(), /SYNTHETIC_PASSWORD_BODY/);
+});
+test("same-ID re-sealing and re-pinning invalidates an existing password session", async () => {
+  const f = await fixture(), { cookie } = await f.login();
+  f.record = await sealDocument({ id: f.id, bytes: f.pdf, subjects: [], authMode: "password", password: PASSWORD, expiresAt: f.expiresAt }, f.wrappingKey);
+  f.pinRecord();
+  assert.ok([401, 403].includes((await f.request("status", { cookie })).status));
+  assert.ok([401, 403].includes((await f.request("open", { cookie })).status));
+});
+test("password sessions cannot authenticate any owner operation", async () => {
+  const f = await fixture(), { cookie } = await f.login();
+  for (const action of ["status", "revoke", "retry-notifications"]) {
+    assert.equal((await f.request(action, { access: true, cookie })).status, 401);
+    assert.equal((await f.request(action, { access: true, cookie, subject: f.subject })).status, 403);
+    assert.equal((await f.request(action, { access: true, cookie, headers: { "cf-access-authenticated-user-email": "synthetic-owner@example.test" } })).status, 401);
+  }
+  assert.equal((await f.request("status", { access: true, subject: f.env.VAULT_OWNER_SUB })).status, 200);
+});
+test("owner revocation denies live and restarted password sessions", async () => {
+  const f = await fixture(), { cookie } = await f.login();
+  assert.equal((await f.request("revoke", { access: true, subject: f.env.VAULT_OWNER_SUB })).status, 200);
+  for (const restart of [false, true]) {
+    if (restart) f.restart();
+    for (const action of ["status", "open", "session"]) assert.equal((await f.request(action, { cookie })).status, 403);
+  }
+});
+test("Access and password routes cannot be confused, even with valid credentials for both", async () => {
+  const password = await fixture();
+  for (const subject of [password.subject, password.env.VAULT_OWNER_SUB]) {
+    assert.equal((await password.request("open", { access: true, subject })).status, 403);
+  }
+  const access = await fixture({ authMode: "access" });
+  assert.equal((await access.request("session", { subject: access.subject })).status, 403);
+  assert.equal((await access.request("open", { subject: access.subject })).status, 401);
+  assert.equal((await access.request("status", { subject: access.env.VAULT_OWNER_SUB })).status, 401);
+  assert.equal((await access.request("open", { access: true, subject: access.subject })).status, 200);
+});
+for (const enabled of [undefined, "0", true, 1, "true"]) test(`password reader requires the exact opt-in value (${String(enabled)})`, async () => {
+  const f = await fixture(); f.env.PASSWORD_READER_ENABLED = enabled; const observe = keyReads(f.env);
+  for (const direct of [false, true]) for (const action of ["session", "status", "open"]) {
+    const response = await f.request(action, { direct }); assert.equal(response.status, 403); privateResponse(response);
+  }
+  assert.equal(observe(), 0); assert.equal(f.reads, 0); assert.equal(f.storage.map.size, 0);
+});
+for (const direct of [false, true]) test(`password routes reject unknown and malformed IDs before storage or key use (${direct ? "object" : "worker"})`, async () => {
+  const f = await fixture(), observe = keyReads(f.env);
+  for (const id of [crypto.randomUUID(), "not-a-document", f.id.toUpperCase(), "00000000-0000-0000-0000-000000000000"]) {
+    const response = await f.request("session", { id, direct }); assert.equal(response.status, 403); privateResponse(response);
+  }
+  assert.equal(observe(), 0); assert.equal(f.reads, 0); assert.equal(f.storage.map.size, 0);
+});
+for (const [name, value] of [["DUMMY_DOCUMENT_ID", undefined], ["DUMMY_DOCUMENT_ID", "invalid"],
+  ["DUMMY_RECORD_SHA256", undefined], ["DUMMY_RECORD_SHA256", "A".repeat(64)], ["DUMMY_RECORD_SHA256", "b".repeat(64)]]) {
+  test(`password routes retain mandatory document/ciphertext pin admission (${name}, ${String(value)})`, async () => {
+    const f = await fixture(); f.env[name] = value; const observe = keyReads(f.env);
+    const response = await f.request(); assert.equal(response.status, value === "b".repeat(64) ? 403 : 503); privateResponse(response);
+    assert.equal(observe(), 0); assert.equal(f.storage.map.size, 0);
+  });
+}
+for (const [label, options, status] of [
+  ["cross-origin POST", { headers: { origin: "https://evil.example.test" } }, 403],
+  ["missing origin", { headers: { origin: "" } }, 403],
+  ["query string", { query: "?password=synthetic" }, 403],
+  ["non-JSON request", { headers: { "content-type": "text/plain" } }, 403],
+  ["malformed JSON", { body: "{" }, 400],
+  ["unknown JSON fields", { body: JSON.stringify({ password: PASSWORD, extra: true }) }, 400],
+  ["non-object JSON", { body: JSON.stringify(PASSWORD) }, 400],
+  ["array JSON", { body: "[]" }, 400],
+  ["oversized password body", { body: JSON.stringify({ password: "a".repeat(10000) }) }, 400],
+]) test(`password session rejects ${label}`, async () => {
+  const f = await fixture(), response = await f.request("session", options); assert.equal(response.status, status); privateResponse(response);
+  assert.equal(response.headers.get("set-cookie"), null);
+});
+test("reader endpoints reject GET/HEAD/Range content bypasses and unsupported methods", async () => {
+  const f = await fixture(), { cookie } = await f.login();
+  for (const [action, methods] of [["open", ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"]], ["session", ["GET", "HEAD", "PUT", "OPTIONS"]], ["status", ["HEAD", "POST", "OPTIONS"]]]) {
+    for (const method of methods) {
+      const response = await f.request(action, { method, cookie }); assert.equal(response.status, 405, `${method} ${action}`); privateResponse(response);
+    }
+  }
+  for (const headers of [{ range: "bytes=0-4" }, { "if-range": '"synthetic-etag"' }]) {
+    for (const direct of [false, true]) {
+      const ranged = await f.request("open", { cookie, headers, direct });
+      assert.equal(ranged.status, 400); privateResponse(ranged); assert.doesNotMatch(await ranged.text(), /%PDF/);
+      assert.equal((await f.request("open", { headers, direct })).status, 401);
+    }
+  }
+  assert.equal((await f.state()).events.length, 0);
+});
+test("open and logout require same-origin strict JSON", async () => {
+  const f = await fixture(), { cookie } = await f.login();
+  for (const [action, method] of [["open", "POST"], ["session", "DELETE"]]) {
+    for (const headers of [{ origin: "https://evil.example.test" }, { origin: "" }, { "content-type": "text/plain" }]) {
+      const response = await f.request(action, { method, cookie, headers }); assert.equal(response.status, 403); privateResponse(response);
+    }
+  }
+  assert.equal((await f.request("open", { cookie, query: "?download=1" })).status, 403);
+  assert.equal((await f.request("status", { cookie, query: "?token=synthetic" })).status, 403);
+  assert.equal((await f.request("session", { method: "DELETE", cookie, body: '{"all":true}' })).status, 400);
+});
+test("password open validates request IDs and prevents concurrent and restarted replay", async () => {
+  const f = await fixture(), { cookie } = await f.login();
+  for (const body of ["{}", "{", '{"requestId":"not-a-uuid"}', JSON.stringify({ requestId: crypto.randomUUID(), extra: true })]) {
+    assert.equal((await f.request("open", { cookie, body })).status, 400);
+  }
+  const requestId = crypto.randomUUID(), results = await Promise.all([f.request("open", { cookie, requestId }), f.request("open", { cookie, requestId })]);
+  assert.deepEqual(results.map(r => r.status).sort(), [200, 409]);
+  f.restart(); assert.equal((await f.request("open", { cookie, requestId })).status, 409); assert.equal((await f.state()).events.length, 1);
+});
+test("password sessions expire at five minutes and never outlive the document", async () => {
+  const f = await fixture(), { cookie, body } = await f.login();
+  await withClock(body.sessionExpiresAt, async () => {
+    assert.ok([401, 403].includes((await f.request("status", { cookie })).status));
+    assert.ok([401, 403].includes((await f.request("open", { cookie })).status));
+  });
+  const short = await fixture({ expiresAt: Date.now() + 60000 }), session = await short.login();
+  assert.ok(session.body.sessionExpiresAt <= short.expiresAt);
+  await withClock(short.expiresAt, async () => {
+    for (const action of ["status", "open", "session"]) assert.equal((await short.request(action, { cookie: session.cookie })).status, 403);
+  });
+});
+for (const boundary of ["document", "session"]) test(`expiry crossing an asynchronous final audit commit denies the PDF (${boundary})`, async () => {
+  const f = await fixture({ expiresAt: Date.now() + (boundary === "document" ? 60000 : 600000) });
+  const { cookie, body } = await f.login(), originalNow = Date.now, initialWrites = f.storage.writes;
+  let crossed = false;
+  f.storage.afterCommit = async () => {
+    if (f.storage.writes >= initialWrites + 2) {
+      await Promise.resolve(); crossed = true; Date.now = () => boundary === "document" ? f.expiresAt : body.sessionExpiresAt;
+    }
+  };
+  let response;
+  try { response = await f.request("open", { cookie }); } finally { Date.now = originalNow; f.storage.afterCommit = null; }
+  assert.ok(crossed, "the simulated expiry occurred after the final audit transaction");
+  assert.equal(response.status, boundary === "session" ? 401 : 403); assert.doesNotMatch(await response.text(), /SYNTHETIC_PASSWORD_BODY/);
+});
+test("password authentication admits only ten attempts per fixed five-minute window, including successes", async () => {
+  const f = await fixture(), start = Date.now();
+  await withClock(start, async () => {
+    for (let i = 0; i < 10; i++) {
+      const response = await f.request("session", { body: JSON.stringify({ password: i === 4 ? PASSWORD : "synthetic wrong password" }) });
+      assert.equal(response.status, i === 4 ? 200 : 401);
+    }
+    assert.equal((await f.request()).status, 429);
+    f.restart(); assert.equal((await f.request()).status, 429);
+  });
+  await withClock(start + 299999, async () => { assert.equal((await f.request()).status, 429); });
+  await withClock(start + 300001, async () => { assert.equal((await f.request()).status, 200); });
+});
+test("concurrent wrong-password attempts cannot bypass the durable per-document budget", async () => {
+  const f = await fixture();
+  const responses = await Promise.all(Array.from({ length: 15 }, () => f.request("session", { body: JSON.stringify({ password: "synthetic wrong password" }) })));
+  assert.equal(responses.filter(r => r.status === 401).length, 10); assert.equal(responses.filter(r => r.status === 429).length, 5);
+  f.restart(); assert.equal((await f.request()).status, 429);
+  assert.equal((await f.state()).events.length, 0); assert.equal(f.calls.length, 0);
+});
+test("failure to persist the authentication attempt cannot issue a cookie or session", async () => {
+  const f = await fixture(); f.storage.failAt = 1;
+  const response = await f.request(); assert.equal(response.status, 503); assert.equal(response.headers.get("set-cookie"), null);
+  assert.equal(f.storage.map.size, 0); privateResponse(response);
+});
+for (const stage of [1, 2]) test(`password open with failing audit commit ${stage} never releases plaintext`, async () => {
+  const f = await fixture(), { cookie } = await f.login(); f.storage.failAt = f.storage.writes + stage;
+  const response = await f.request("open", { cookie }); assert.equal(response.status, 503); privateResponse(response);
+  assert.doesNotMatch(await response.text(), /SYNTHETIC_PASSWORD_BODY/);
+});
+test("outbound notification waiting cannot block owner status or revocation", async () => {
+  const f = await fixture(), { cookie } = await f.login(); assert.equal((await f.request("open", { cookie })).status, 200);
+  const entered = deferred(), release = deferred();
+  f.providerHandler = async () => { entered.resolve(); await release.promise; return new Response("synthetic accepted", { status: 202 }); };
+  const nextAt = Math.max(...(await f.state()).jobs.map(job => job.nextAt)) + 1;
+  await withClock(nextAt, async () => {
+    const alarm = f.alarm(); let status, revoke;
+    try {
+      assert.ok(await within(entered.promise.then(() => true)), "notification dispatch started");
+      status = await within(f.request("status", { access: true, subject: f.env.VAULT_OWNER_SUB }));
+      revoke = await within(f.request("revoke", { access: true, subject: f.env.VAULT_OWNER_SUB }));
+    } finally { release.resolve(); await alarm; }
+    assert.ok(status, "status completed before the provider responded"); assert.equal(status.status, 200);
+    assert.ok(revoke, "revocation completed before the provider responded"); assert.equal(revoke.status, 200);
+  });
+  assert.equal((await f.request("open", { cookie })).status, 403);
+  assert.equal((await f.state()).revoked, true); assert.equal(f.calls.length, 1);
+  for (const secret of [f.id, PASSWORD, cookie, "SYNTHETIC_PASSWORD_BODY"]) assert.ok(!JSON.stringify(f.calls[0].payload).includes(secret));
+});
+
+for (const [label, change] of [
+  ["unknown mode", policy => { policy.authMode = "unrecognized"; }],
+  ["null mode", policy => { policy.authMode = null; }],
+  ["password grant with Access subjects", policy => { policy.subjects = ["synthetic-access-reader"]; }],
+  ["missing verifier", policy => { delete policy.passwordVerifier; }],
+  ["unknown verifier version", policy => { policy.passwordVerifier.version = 2; }],
+  ["unknown KDF", policy => { policy.passwordVerifier.kdf = "scrypt-2-1-1"; }],
+  ["short salt", policy => { policy.passwordVerifier.salt = "ab".repeat(31); }],
+  ["malformed salt", policy => { policy.passwordVerifier.salt = "G".repeat(64); }],
+  ["short hash", policy => { policy.passwordVerifier.hash = "ab".repeat(31); }],
+  ["malformed hash", policy => { policy.passwordVerifier.hash = "G".repeat(64); }],
+  ["downgraded mode with password verifier", policy => { policy.authMode = "access"; policy.subjects = ["synthetic-access-reader"]; }],
+  ["omitted mode with password verifier", policy => { delete policy.authMode; policy.subjects = ["synthetic-access-reader"]; }],
+]) test(`malformed encrypted policy fails closed: ${label}`, async () => {
+  const f = await fixture(); await f.replacePolicy(change);
+  await assert.rejects(() => readPolicy(f.record, f.id, f.wrappingKey));
+  const response = await f.request(); assert.ok([403, 503].includes(response.status)); assert.equal(response.headers.get("set-cookie"), null);
+  assert.doesNotMatch(await response.text(), /SYNTHETIC_PASSWORD_BODY/); privateResponse(response);
+});
+test("legacy Access encrypted policy without authMode remains readable", async () => {
+  const f = await fixture({ authMode: "access" }); await f.replacePolicy(policy => { delete policy.authMode; });
+  const policy = await readPolicy(f.record, f.id, f.wrappingKey); assert.equal(policy.authMode ?? "access", "access");
+  assert.equal((await f.request("open", { access: true, subject: f.subject })).status, 200);
+  assert.equal((await f.request()).status, 403);
+});
+test("session journal stores only hashed tokens bound to the pinned record digest", async () => {
+  const f = await fixture(), { cookie, body } = await f.login(), token = cookie.slice(cookie.indexOf("=") + 1), state = await f.state();
+  assert.equal(state.sessions.length, 1);
+  assert.match(state.sessions[0].hash, /^[a-f0-9]{64}$/); assert.notEqual(state.sessions[0].hash, token);
+  assert.equal(state.sessions[0].expiresAt, body.sessionExpiresAt); assert.equal(state.sessions[0].recordDigest, f.env.DUMMY_RECORD_SHA256);
+  assert.equal(state.passwordRate.count, 1); assert.ok(Number.isSafeInteger(state.passwordRate.start));
+});
+test("password-session allocation never persists more than 32 active sessions", async () => {
+  const f = await fixture(), { cookie } = await f.login(), state = await f.state(), actual = state.sessions[0];
+  state.sessions = [actual, ...Array.from({ length: 31 }, (_, i) => ({ ...actual, hash: createHash("sha256").update(`synthetic-${i}`).digest("hex") }))];
+  await f.writeState(state); f.restart();
+  const response = await f.request(); assert.ok([200, 429, 503].includes(response.status));
+  assert.ok((await f.state()).sessions.length <= 32);
+  if (response.status !== 200) assert.equal(response.headers.get("set-cookie"), null);
+  assert.equal((await f.request("status", { cookie })).status, 200);
+});
+test("the password rate budget is durable before authentication succeeds or fails", async () => {
+  const f = await fixture(), observedCounts = [];
+  f.storage.afterCommit = async () => { observedCounts.push((await f.state()).passwordRate.count); };
+  assert.equal((await f.request("session", { body: JSON.stringify({ password: "synthetic wrong password" }) })).status, 401);
+  assert.equal(observedCounts[0], 1); assert.equal((await f.state()).sessions.length, 0);
+  f.storage.afterCommit = null; f.restart();
+  assert.equal((await f.request()).status, 200); assert.equal((await f.state()).passwordRate.count, 2);
+});
+
+async function observeScrypt(callback, operation) {
+  // Built-in ESM bindings let this instrument the actual native KDF without a
+  // production injection hook or substituting weaker cryptographic parameters.
+  const native = cryptoNode.scryptSync;
+  cryptoNode.scryptSync = (...args) => { callback(); return native(...args); }; syncBuiltinESMExports();
+  try { return await operation(); }
+  finally { cryptoNode.scryptSync = native; syncBuiltinESMExports(); }
+}
+test("every password KDF follows a durable budget commit and over-budget attempts never run it", async () => {
+  const f = await fixture(); let durableCount = 0, kdfs = 0;
+  f.storage.afterCommit = async () => { durableCount = (await f.state()).passwordRate.count; };
+  await observeScrypt(() => { kdfs++; assert.equal(durableCount, kdfs, "the attempt must be durable before native scrypt starts"); }, async () => {
+    const responses = await Promise.all(Array.from({ length: 12 }, () => f.request("session", { body: JSON.stringify({ password: "synthetic wrong password" }) })));
+    assert.equal(responses.filter(response => response.status === 401).length, 10);
+    assert.equal(responses.filter(response => response.status === 429).length, 2);
+    assert.equal(kdfs, 10); assert.equal(durableCount, 10);
+  });
+});
+test("unknown IDs, bad pins, disabled reader, and failed attempt persistence do not run password KDF", async () => {
+  const f = await fixture(); let kdfs = 0;
+  await observeScrypt(() => { kdfs++; }, async () => {
+    assert.equal((await f.request("session", { id: crypto.randomUUID() })).status, 403);
+    const pin = f.env.DUMMY_RECORD_SHA256; f.env.DUMMY_RECORD_SHA256 = "b".repeat(64);
+    assert.equal((await f.request()).status, 403); f.env.DUMMY_RECORD_SHA256 = pin;
+    f.env.PASSWORD_READER_ENABLED = "0"; assert.equal((await f.request()).status, 403); f.env.PASSWORD_READER_ENABLED = "1";
+    f.storage.failAt = 1; assert.equal((await f.request()).status, 503);
+  });
+  assert.equal(kdfs, 0);
+});
+test("password content and status recheck the exact ciphertext pin before importing keys", async () => {
+  const f = await fixture(), { cookie } = await f.login();
+  f.record.document.ciphertext = "!!!!" + f.record.document.ciphertext.slice(4);
+  const observe = keyReads(f.env), writes = f.storage.writes;
+  for (const action of ["open", "status", "session"]) {
+    const response = await f.request(action, { cookie }); assert.equal(response.status, 403); privateResponse(response);
+  }
+  assert.equal(observe(), 0); assert.equal(f.storage.writes, writes);
+});
+test("password cookies with duplicate names are rejected instead of choosing an attacker-controlled value", async () => {
+  const f = await fixture(), { cookie } = await f.login();
+  for (const duplicate of [`${cookie}; ${cookie}`, `${cookie}; __Secure-vault-${f.id}=bad`, `__Secure-vault-${f.id}=bad; ${cookie}`]) {
+    assert.equal((await f.request("open", { cookie: duplicate })).status, 401);
+    assert.equal((await f.request("status", { cookie: duplicate })).status, 401);
+  }
+  assert.equal((await f.state()).events.length, 0);
+});
+test("password feature does not bypass mandatory owner and Access configuration", async () => {
+  const f = await fixture();
+  for (const name of ["ACCESS_ISSUER", "ACCESS_AUDIENCE", "VAULT_OWNER_SUB"]) {
+    const value = f.env[name]; delete f.env[name];
+    const response = await f.request(); assert.equal(response.status, 503, name); assert.equal(response.headers.get("set-cookie"), null);
+    f.env[name] = value;
+  }
+  assert.equal(f.storage.map.size, 0);
+});
+test("password document release retains mandatory notification configuration", async () => {
+  const f = await fixture(), { cookie } = await f.login(); delete f.env.WEBHOOK_URL;
+  const response = await f.request("open", { cookie }); assert.equal(response.status, 503); privateResponse(response);
+  assert.doesNotMatch(await response.text(), /SYNTHETIC_PASSWORD_BODY/); assert.equal((await f.state()).events.length, 0);
+});

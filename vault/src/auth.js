@@ -1,9 +1,13 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 const sets = new Map();
 
-export async function identity(request, env) {
+export function accessConfiguration(env) {
   if (!/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(env.ACCESS_ISSUER || "") ||
-      !env.ACCESS_AUDIENCE || env.ACCESS_AUDIENCE === "unconfigured") throw new Error("auth_configuration");
+      typeof env.ACCESS_AUDIENCE !== "string" || !env.ACCESS_AUDIENCE || env.ACCESS_AUDIENCE.length > 256 || env.ACCESS_AUDIENCE === "unconfigured") throw new Error("auth_configuration");
+}
+
+export async function identity(request, env) {
+  accessConfiguration(env);
   const token = request.headers.get("cf-access-jwt-assertion");
   if (!token || token.length > 16384) throw new Error("unauthenticated");
   let keys = sets.get(env.ACCESS_ISSUER);

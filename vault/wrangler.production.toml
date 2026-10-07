@@ -4,6 +4,7 @@ name = "kanariya-vault"
 account_id = "4ff9cceea79d470ba49cca2a796cf61c"
 main = "src/worker.js"
 compatibility_date = "2026-01-12"
+compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 preview_urls = false
 routes = []
@@ -14,6 +15,8 @@ command = "node scripts/prepare-viewer-assets.mjs"
 # Set the actual Access-protected hostname before deployment.
 # No deployment route, personal address, or production secret is checked in.
 [vars]
+# Opt-in only after the narrow /p/* Access routing has been reviewed.
+PASSWORD_READER_ENABLED = "0"
 PUBLIC_ORIGIN = "https://vault.invalid"
 ACCESS_ISSUER = "https://unconfigured.cloudflareaccess.com"
 ACCESS_AUDIENCE = "unconfigured"
