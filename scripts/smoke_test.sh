@@ -16,6 +16,15 @@ if [[ -z "${BASE_URL}" ]]; then
   exit 1
 fi
 
+# Validate before sending either a token or an admin credential over the network.
+BASE_URL="${BASE_URL}" python3 -B - "${SCRIPT_DIR}" <<'PY'
+import os
+import sys
+sys.path.insert(0, sys.argv[1])
+from gen_signed_url import parse_base_url
+parse_base_url(os.environ["BASE_URL"])
+PY
+
 if [[ -z "${TOKEN}" ]]; then
   if ! TOKEN="$(python3 "${SCRIPT_DIR}/gen_token.py")"; then
     echo "Failed to generate token. Set TOKEN=... explicitly."

@@ -1,519 +1,241 @@
 # Kanariya
 
-**Kanariya** is a simple *canary token* service: you place unique URLs/files into specific locations (forms, notes, emails, local files), and if that token is ever accessed, Kanariya records the event and notifies you.
+Kanariya records access to canary URLs placed in your documents, notes, or files and queues notifications to your chosen destinations. An access event shows that a URL was requested; it does not prove a data leak or identify the person responsible.
 
-> Scope: **detection + evidence (logs)**. Not a high-interaction honeypot.
+The current implementation provides registered tokens with expiry and revocation, a token inventory, a separate notification test, and durable delivery through generic webhooks, Slack, Discord, or MailChannels email. This README describes the repository implementation, not the state of a deployed service.
 
-## What you can detect
+## Registered tokens
 
-- Leakage / re-sharing of URLs embedded in:
-  - Web forms (free text fields)
-  - Documents or local files (HTML/shortcut tokens)
-  - Emails (click-detection)
-- Recon / automated scanning to “obviously sensitive” paths (optional templates)
+Create one token for each placement through Token Studio or `POST /admin/tokens`. Each token has a name, optional location and source label, and a URL containing `kr_` followed by 64 random hexadecimal characters (256 random bits).
 
-## Non-goals
+- URLs remain reusable until expiry or revocation. The default expiry is 90 days after creation. Set `expiresAt` to a future ISO timestamp or `null` for no scheduled expiry.
+- Name, location, and source come from the registry. A visitor cannot change the notification's placement labels by adding query parameters.
+- Revocation is permanent and stops future public hits. It does not cancel notifications already queued. There is no restore, metadata-edit, expiry-extension, or delete endpoint; create a replacement token when needed.
+- The inventory retains expired and revoked records, including their last-seen time and hit count. These records count toward the default limit of 1,000 tokens.
 
-- Hosting intentionally vulnerable services
-- Active attacker engagement, retaliation, or any offensive behavior
-- Capturing payload data beyond minimal request metadata
+Registered URLs do not use the legacy timestamp signature or nonce. `REQUIRE_SIGNATURE` applies only to legacy URLs.
 
+Use the separate **Send test notification** action to check a registered token's notification configuration. It records an event marked `test: true` and queues real test notifications, without accessing the planted URL or increasing its hit count. Tests are limited to one per token every ten seconds. An administrator can also test an expired or revoked token; this does not reactivate it.
 
-## How it works
+## Storage and delivery
 
-1. Generate a unique token URL:
-   - `https://<your-domain>/canary/<token>?src=<source_id>`
-2. Place it *only* in one specific location.
-3. When accessed, Kanariya:
-   - stores an event record (timestamp, token, src, country/ASN/UA, etc.)
-   - optionally sends an alert (Webhook / email)
+One SQLite-backed Durable Object holds an installation's registry, events, delivery outbox, and temporary rate-limit, deduplication, and nonce records. The binding is `KANARI_STORE`, the class is `KanariyaStore`, and the object name is `kanariya-v1`.
 
-
-## Quick diagram
+An accepted hit commits its event, token summary update, outbox entries, and alarm scheduling in a storage transaction. Provider requests run later, outside that transaction. Alarms process due deliveries and schedule recovery after interruptions. Cloudflare documents [at-least-once alarm execution](https://developers.cloudflare.com/durable-objects/api/alarms/); delivery can therefore be duplicated if a provider accepts a message before its result is saved.
 
 ```mermaid
 flowchart LR
-  Plant["Plant a unique token<br/>(URL / file / email)"] --> Access["Token is accessed"]
-  Access --> Worker["Cloudflare Worker<br/>GET /canary/:token"]
-  Worker --> Dedupe{"Dedupe window<br/>(token, ipHash, ua)"}
-  Dedupe -->|first hit| Store[("Workers KV<br/>Event record + TTL")]
-  Dedupe -->|repeat| Store
-  Store --> Notify["Notify<br/>Webhook / email (optional)"]
-  Store --> Export["Admin export<br/>JSON (optional)"]
-
-  subgraph Minimal metadata
-    Meta[ts, token, src, ipHash, country, asn, ua, referer]
-  end
-  Worker -.writes.-> Meta
+  Placement[Planted URL] --> Worker[Worker validates request]
+  Studio[Authenticated Token Studio] --> Worker
+  Worker --> Store[(SQLite Durable Object)]
+  Store --> Alarm[Delivery and cleanup alarm]
+  Alarm --> Provider[Webhook / Slack / Discord / email]
+  Store --> Export[Private inventory and event export]
+  Legacy[(Existing Workers KV)] --> Export
 ```
 
-## Architecture (recommended)
+Events and their delivery records expire after 30 days by default. Export excludes expired SQLite events immediately; alarms remove expired events, delivery rows, and temporary guards, with cleanup scheduled at least hourly while records remain. Token summaries and revoked/expired inventory records persist independently of event retention. Hit counts describe accepted non-test requests, including repeats whose notifications were deduplicated; dropped requests do not increase them.
 
-- **Cloudflare Workers**: event collector endpoint (`/canary/*`)
-- **Workers KV**: lightweight event storage + dedupe keys
-- **Webhook** (Discord/Slack/etc.): instant notifications
-- (Optional) **Admin export endpoint** for JSON export
+`KANARI_KV` is an optional compatibility binding for historical events and still-live legacy nonce records. New data is written to SQLite. Legacy export reads at most the first `EXPORT_MAX_ITEMS` matching KV keys, in batches of up to 100 values, and merges that subset with current events. The returned subset is sorted newest first and capped at 1,000 by default. If the response header `x-kanariya-legacy-truncated` is `true`, more old KV keys exist; the response does not represent the globally newest legacy history. Historical KV entries retain their existing KV expiration, and are not copied into SQLite.
 
-## MVP spec (v0.1)
+## Local quick start
 
-This section defines the **minimum** scope for a usable public MVP.
+Use a current Node.js 22 release or newer with `node:sqlite`, plus Wrangler 4. The store tests use Node's SQLite support. Wrangler follows the supported Node.js release lifecycle; see its [installation requirements](https://developers.cloudflare.com/workers/wrangler/install-and-update/).
 
-### Goals
-
-- **Plant** unique tokens (URL / file / email) per location.
-- **Detect** when a token is accessed.
-- **Preserve evidence** (timestamp + minimal metadata) with low false-positive noise.
-- **Notify** quickly (Webhook-first).
-
-### Non-goals (MVP)
-
-- High-interaction honeypots (SSH, intentionally vulnerable services)
-- Payload capture (request bodies), content inspection, or user tracking
-- “Attribution” beyond coarse network fingerprints (country/ASN/UA)
-
-### Public API (MVP)
-
-- `GET /canary/:token?src=<source_id>&v=1`
-  - Response: `204 No Content`
-  - Behavior:
-    - Write event record to storage
-    - Notify on first hit per `(token, ipHash, ua)` within a window
-    - Apply rate limiting / abuse protection
-    - If signatures are required, only signed requests within the time window are accepted
-
-- `GET /admin/export?token=<token>` (optional, admin-only)
-  - Response: JSON array of events for the token
-  - Header: `Authorization: Bearer <ADMIN_KEY>`
-  - Notes: for MVP, a shared secret is acceptable; later migrate to Cloudflare Access/SSO.
-  - If you do not set `ADMIN_KEY`, this endpoint is disabled unless `ALLOW_PUBLIC_EXPORT=1` is set.
-  - If `ALLOW_PUBLIC_EXPORT=1`, the admin key is ignored.
-
-### Data model
-
-Per event (recommended minimum):
-
-- `ts` (ISO8601)
-- `token`
-- `src`
-- `ipHash` (HMAC(IP, IP_HMAC_KEY))
-- `country` (edge header)
-- `asn` (edge header, if available)
-- `ua`
-- `referer` (when present)
-
-Dedupe / notify key:
-
-- `(token, ipHash, ua)` with TTL (e.g., 30 minutes)
-
-Retention (MVP defaults):
-
-- Events TTL: 30 days
-- Dedupe TTL: 30 minutes
-
-### Delivery modes (recommended)
-
-- **Personal / local use**: tokens placed in local files/notes; expect *click/open* to trigger.
-- **Enterprise / cloud use**: primary audit comes from the cloud provider; Kanariya acts as an *external-leak evidence* supplement.
-
-### MVP checklist
-
-- [ ] `/canary/*` deployed and reachable from your domain
-- [ ] KV bound as `KANARI_KV`
-- [ ] `IP_HMAC_KEY` set (no plain IP persistence)
-- [ ] Webhook notification tested
-- [ ] Dedupe window prevents spam on repeated hits
-- [ ] Rate limiting enabled (Worker logic and/or Cloudflare WAF)
-- [ ] A small “token planting” playbook exists (URL/file/email examples)
-
-## Server-side configuration (Cloudflare)
-
-This project assumes Cloudflare is the “server side” for the public MVP.
-
-For API token scopes, see `docs/cloudflare_token_permissions.md`.
-
-### 1) DNS / TLS
-
-- Create a DNS record for the service hostname (example):
-  - `kanariya.toppymicros.com` (proxied = **ON**)
-- Ensure Universal SSL is enabled for the zone.
-- (Recommended) Set SSL/TLS mode to **Full (strict)**.
-
-### 2) Worker route binding
-
-Bind the Worker to your hostname and paths (example):
-
-- Route: `kanariya.toppymicros.com/canary/*`
-- (Optional admin) Route: `kanariya.toppymicros.com/admin/*`
-  - Omit this route if you do not need `/admin/export`.
-
-> You can also attach the Worker to the whole host and switch by path in code.
-
-### 3) Storage: Workers KV namespaces
-
-Create and bind the following KV namespaces:
-
-- `KANARI_KV` (required)
-  - Stores event records and dedupe keys.
-
-Recommended TTL defaults (tune as needed):
-
-- Events: 30 days
-- Dedupe keys: 30 minutes
-
-### 4) Environment variables / secrets (required)
-
-Configure the following on the Worker:
-
-- `IP_HMAC_KEY` (**secret**, required)
-  - Used to store `ipHash = HMAC(IP, IP_HMAC_KEY)` instead of plain IP.
-- `ADMIN_KEY` (**secret**, optional)
-  - Required only if `/admin/export` is enabled. If unset, `/admin/export` returns 403.
-- `ALLOW_PUBLIC_EXPORT` (non-secret, optional)
-  - Set to `1` to allow `/admin/export` without `ADMIN_KEY` (overrides admin key). Not recommended for public use.
-- `MASTER_SECRET` (**secret**, recommended)
-  - Master secret used to derive per-token signing keys.
-  - Signing key derivation: `derivedKey = HMAC(MASTER_SECRET, "token:" + token)`
-  - Recommended when you want different effective keys per token without storing them.
-- `SIGNING_SECRET` (**secret**, legacy)
-  - Backward-compatible fallback if `MASTER_SECRET` is not set.
-  - If `MASTER_SECRET` is not set, Kanariya will also treat `SIGNING_SECRET` as the master secret for derived signing (ops-friendly), while still accepting legacy signatures created directly with `SIGNING_SECRET`.
-
-Optional:
-
-- `WEBHOOK_URL` (**secret**, optional)
-  - Webhook destination for notifications.
-- `MAIL_FROM` (optional)
-  - Sender email address for MailChannels.
-- `MAIL_TO` (optional)
-  - Comma-separated recipient list for MailChannels.
-- `MAIL_FROM_NAME` (optional)
-  - Sender display name (default: Kanariya).
-- `MAIL_SUBJECT_PREFIX` (optional)
-  - Subject prefix (default: Kanariya alert).
-- `EVENT_TTL_SECONDS` (non-secret, optional)
-  - Default: 2592000 (30 days).
-- `DEDUPE_TTL_SECONDS` (non-secret, optional)
-  - Default: 1800 (30 minutes).
-- `EXPORT_MAX_ITEMS` (non-secret, optional)
-  - Default: 1000 (admin export cap).
-- `RATE_LIMIT_WINDOW_SECONDS` (non-secret, optional)
-  - Default: 60 (per-IP window, set 0 to disable).
-- `RATE_LIMIT_MAX` (non-secret, optional)
-  - Default: 60 (max hits per window, set 0 to disable).
-- `REQUIRE_SIGNATURE` (non-secret, optional)
-  - Default: 0. Set to `1` to require signed canary URLs.
-- `SIGNATURE_WINDOW_SECONDS` (non-secret, optional)
-  - Default: 300 (allowed clock skew for `ts`, set 0 to disable window check).
-- `ALLOW_PUBLIC_SIGN` (non-secret, optional)
-  - Default: 0. If set to `1`, `/admin/sign` can be called without `ADMIN_KEY`.
-
-## Signed canary URLs (optional)
-
-You can require a valid signature on every `/canary/*` request.
-This is useful when you want to reduce random scanning noise (only URLs you generated will be accepted).
-
-1) Enable signature requirement:
-
-- Set `REQUIRE_SIGNATURE=1`
-- Set the master secret key (recommended):
-  - `wrangler secret put MASTER_SECRET`
-  - (Optional legacy) `wrangler secret put SIGNING_SECRET`
-
-> Important: If `REQUIRE_SIGNATURE=1` but neither `MASTER_SECRET` nor `SIGNING_SECRET` is set, the Worker will silently ignore all canary hits (returns `204` but does not store events).
-
-2) Generate signed URLs:
-
-- UI (recommended): call the signing endpoint `/admin/sign` from the Token Studio.
-  - Set `ADMIN_KEY` and keep `ALLOW_PUBLIC_SIGN=0` (recommended).
-  - The UI can pass `Authorization: Bearer <ADMIN_KEY>`.
-- CLI: `python3 scripts/gen_signed_url.py --base-url https://<your-domain>/canary --master-secret <MASTER_SECRET> --src <source_id>`
-
-### Admin signing endpoint
-
-`GET /admin/sign?token=<token>&src=<src>`
-
-- Response: `{ "url": "https://<host>/canary/<token>?ts=...&nonce=...&src=...&sig=..." }`
-- Protection:
-  - Default: requires `Authorization: Bearer <ADMIN_KEY>`
-  - Set `ALLOW_PUBLIC_SIGN=1` to disable auth (not recommended for public exposure)
-
-## Deploy notes (GitHub Actions)
-
-This repo includes a workflow that deploys on every push to `main`.
-It also syncs selected GitHub repo secrets into Worker secrets before deploying.
-
-- Required Worker secrets for signed URLs:
-  - `MASTER_SECRET` (recommended) or `SIGNING_SECRET` (fallback)
-  - `ADMIN_KEY` (to protect `/admin/sign`)
-  - `IP_HMAC_KEY`
-- GitHub Actions repo secrets are not automatically available to the Worker runtime.
-  - This workflow copies selected values into Worker secrets using `wrangler secret put`.
-  - It does not update signing secrets; keep `MASTER_SECRET`/`SIGNING_SECRET` managed on the Cloudflare side.
-
-### 5) Cloudflare security controls (strongly recommended)
-
-- **Rate limiting**
-  - Apply a rate limit for `/canary/*` to mitigate abuse.
-  - Start conservative, e.g. per-IP bursts allowed but sustained floods blocked.
-- **WAF rule**
-  - Block obvious bot floods and suspicious user agents.
-  - Optionally challenge traffic to `/admin/*`.
-- **Bot / Super Bot Fight Mode** (if available)
-  - Useful for public exposure.
-
-### 6) Observability / logs
-
-- Decide what you retain:
-  - Keep only minimal request metadata in KV (as documented).
-  - Avoid logging request bodies.
-- For debugging:
-  - Use Workers logs during development.
-  - Consider sampling or short retention if you enable additional analytics.
-
-### 7) Admin endpoint protection (if enabled)
-
-Minimum (MVP):
-
-- Require `Authorization: Bearer <ADMIN_KEY>` header.
-  - To disable admin export entirely, remove the `/admin/*` route and omit `ADMIN_KEY`.
-
-Recommended (post-MVP):
-
-- Put `/admin/*` behind **Cloudflare Access** (SSO / device posture).
-
-### 8) Suggested `wrangler.toml` skeleton (example)
-
-```toml
-name = "kanariya"
-main = "src/worker.js"
-compatibility_date = "2026-01-12"
-
-# Route binding
-routes = [
-  { pattern = "kanariya.toppymicros.com/canary/*", zone_name = "toppymicros.com" },
-  # Optional admin export
-  { pattern = "kanariya.toppymicros.com/admin/*", zone_name = "toppymicros.com" }
-]
-
-kv_namespaces = [
-  { binding = "KANARI_KV", id = "<KV_NAMESPACE_ID>" }
-]
-
-[vars]
-# Non-secret vars can go here (optional)
-# NOTIFY_DEDUPE_TTL = "1800"
-```
-
-Secrets:
+Install the repository's existing dependencies and run its tests:
 
 ```bash
-wrangler secret put IP_HMAC_KEY
-wrangler secret put ADMIN_KEY   # optional (only if /admin/export enabled)
-wrangler secret put WEBHOOK_URL   # optional
+npm ci
+npm test
+# With Wrangler 4 installed globally:
+npm run test:runtime
 ```
 
-## Quick start (Cloudflare Workers + KV)
+The runtime check bundles locally with `--dry-run`, starts a temporary workerd instance, and intercepts all notification requests with local fixtures. It checks actual SQLite transactions and alarm retries without contacting providers. CI runs it before deployment; `npm run test:runtime -- --report <path>` also saves its result.
 
-### Prerequisites
-
-- Cloudflare account
-- Node.js (LTS)
-- Wrangler CLI
-
-## Local test environment
-
-- Install deps: `npm install`
-- Run unit tests: `npm test`
-
-### Local Worker dev
-
-1) Create a local vars file:
-
-- Copy `.dev.vars.example` to `.dev.vars` and edit values.
-
-2) Start the Worker:
-
-- `npm run dev`
-
-If `REQUIRE_SIGNATURE=1`, generate signed canary URLs via:
-
-- UI: use `public/index.html` (Advanced → Signing key)
-- CLI: `python3 scripts/gen_signed_url.py --base-url http://127.0.0.1:8787/canary --secret "$SIGNING_SECRET"`
-
-### Setup
-
-1. Create a KV namespace (for events) and bind it to your Worker as `KANARI_KV`.
-2. Configure secrets:
-   - `ADMIN_KEY`: export endpoint guard (optional)
-   - `IP_HMAC_KEY`: HMAC secret used to hash IPs (PII minimization)
-   - `WEBHOOK_URL` (optional): Discord/Slack webhook
-3. Deploy the Worker.
-
-### Minimal configuration (example)
-
-Create bindings/secrets via Wrangler (example names):
+Create `.dev.vars` in the repository root. These values are synthetic and for local use only; there is no checked-in `.dev.vars.example`:
 
 ```bash
-wrangler kv namespace create "KANARI_KV"
-wrangler kv namespace list
-wrangler secret put ADMIN_KEY   # optional
-wrangler secret put IP_HMAC_KEY
-wrangler secret put WEBHOOK_URL   # optional
+cat > .dev.vars <<'EOF'
+ADMIN_KEY="local-only-admin-key-replace-for-production"
+IP_HMAC_KEY="local-only-ip-hmac-key-replace-for-production"
+MASTER_SECRET="local-only-legacy-signing-key"
+EOF
 ```
 
-> Note: This repo may include a ready-to-deploy Worker template (planned). If you already have your Worker code elsewhere, the binding names above match the intended defaults.
+Leave notification destinations unset for an offline local session. Configured destinations receive real requests, including when you use the test action. Webhook destinations must use HTTPS. Plaintext HTTP is allowed for local development only on `localhost`, `127.0.0.1` and `[::1]`.
 
-## GitHub Pages UI (optional)
+Start the local Worker with Wrangler 4:
 
-The token generator UI is available at `docs/index.html` so you can host it on GitHub Pages.
-It includes a basic admin export viewer (Authorization header required). If admin export is disabled, it will return 403.
-
-1. GitHub repo settings → Pages
-2. Source: `Deploy from a branch`
-3. Branch: `main`, Folder: `/docs`
-
-Your UI will be served from the GitHub Pages URL, while the API continues to run on Cloudflare Workers.
-
-## Token formats
-
-### 1) URL token (recommended)
-
-```text
-https://<your-domain>/canary/<random_token>?src=form_invoice_2026q1&v=1
+```bash
+npx wrangler@4 dev --local
 ```
 
-- `random_token`: long URL-safe random (recommend ≥ 16 bytes)
-- `src`: location identifier (“where you planted it”)
+In a second terminal, create a registered token:
 
-### 2) File token (opens = fires)
-
-Create an HTML file like `Invoices_2026Q1.html` containing:
-
-```html
-<!doctype html>
-<meta charset="utf-8"/>
-<title>Invoices 2026Q1</title>
-<img src="https://<your-domain>/canary/<token>?src=file_invoices_2026q1" />
+```bash
+curl --fail-with-body http://127.0.0.1:8787/admin/tokens \
+  -H 'Authorization: Bearer local-only-admin-key-replace-for-production' \
+  -H 'Content-Type: application/json' \
+  --data '{"name":"Local note","location":"Local test folder","src":"local-note"}'
 ```
 
-- When someone opens it in a browser, the image request triggers the canary.
+The `201` response includes `token`, `url`, and `expiresAt`. Use the returned token for the test and export endpoints below. A test response with an empty `deliveries` array means no notification destinations are configured.
 
-### 3) Email token (click-detection)
+## Token Studio
 
-Put a token URL in the email body:
+Public API requests require HTTPS. The Worker rejects plaintext requests with `400 HTTPS required` before authentication, storage, signing or notifications, including preflight requests. It does not redirect or trust forwarded-protocol headers. The loopback development hosts above are the only HTTP exception; the signing CLI enforces the same restriction on its base URL. Start with an HTTPS URL: rejecting an HTTP request cannot undo its transmission over plaintext. This policy applies to requests that reach the Worker; deployment and any Cloudflare rules must be verified separately.
 
-```text
-https://<your-domain>/canary/<token>?src=mail_personal_test
+The static UI is in `public/index.html` and `docs/index.html`. It connects to a Worker API; it does not contain the Worker or its database. Set the API base URL and enter the Admin key before selecting **Connect and load**. The default base URL is `https://kanariya.toppymicros.com`; change it explicitly to `http://127.0.0.1:8787` for local work or to your own deployed API. The key stays in page memory and is cleared by disconnecting; it is not saved in browser storage.
+
+The UI provides token creation, inventory, expiry and last-seen information, revocation, notification testing, and event/delivery inspection. Copy the registered URL or download the HTML beacon for a chosen placement. Loading remote images may be blocked or prefetched by the application opening the file, so a file open does not always produce a request, and a request need not represent a human open.
+
+For a local UI, serve the static files separately:
+
+```bash
+python3 -m http.server 8080 --directory public
 ```
 
-**Tip:** Avoid image beacons at first.
-Some clients/gateways prefetch/proxy images and cause false positives.
+Open `http://127.0.0.1:8080`, then connect to the local Worker. GitHub Pages can serve the `docs` directory; the API continues to run on Cloudflare Workers. Review `docs/CNAME` before publishing a fork.
 
-## Event fields (MVP)
+## API
 
-Stored per hit (recommended minimal set):
+After the transport check, all `/admin/*` operations require `Authorization: Bearer <ADMIN_KEY>`. A missing server key or missing/incorrect bearer token returns `403`. The previous `ALLOW_PUBLIC_EXPORT` and `ALLOW_PUBLIC_SIGN` settings are ignored. CORS preflight `OPTIONS` requests expose no administrative data and do not require the key.
 
-- `ts` (ISO8601)
-- `token`
-- `src`
-- `ipHash` (HMAC of IP, not plain IP)
-- `country` (from CDN headers)
-- `asn` (if available)
-- `ua` (User-Agent)
-- `referer` (when present)
+| Method and path | Request | Successful response |
+| --- | --- | --- |
+| `POST /admin/tokens` | JSON: required `name`; optional `location`, `src`, `expiresAt` | `201`, one token record |
+| `GET /admin/tokens` | No body | `200`, `{ "tokens": [...], "notifications": [...] }` |
+| `POST /admin/tokens/<token>/revoke` | No body | `200`, token record with `state: "revoked"` |
+| `POST /admin/tokens/<token>/test` | No body | `200`, `{ "eventId": "...", "test": true, "deliveries": [...] }` |
+| `GET /admin/export?token=<token>` | One token ID | `200`, event array; returned subset sorted newest first |
+| `GET /admin/sign?token=<legacy-token>&src=<source>` | Legacy token, optional `src` and `nonce` | `200`, signed `url`, `token`, Unix-seconds `ts`, and `nonce` |
+| `GET /canary/<token>` | Registered URL, or legacy URL and its query | `204`, no body |
+
+Token creation accepts a nonblank name of at most 120 characters, location up to 240, and source up to 512. Its JSON body is limited to 8 KiB. Omit `expiresAt` for 90 days; use `null` for no scheduled expiry. Invalid creation data returns `400`; a full inventory returns `409`.
+
+Token records contain `token`, `name`, `location`, `src`, `createdAt`, `expiresAt`, `revokedAt`, `lastSeenAt`, `hitCount`, `lastTestAt`, `state`, and `url`. Nullable times are `null`; other times are ISO strings. State is `active`, `expired`, or `revoked`.
+
+Revoke and test return `404` for an unknown registered token. Tests inside the ten-second interval return `429`. Unsupported methods return `405`; storage configuration or access failures on admin operations return `503`. Duplicate query parameters are rejected.
+
+After the transport check, the public canary endpoint deliberately returns `204` for accepted hits as well as invalid, expired, revoked, rate-limited, replayed, or otherwise dropped hits. **A `204` does not confirm storage or notification delivery.** Check the authenticated export. Only `GET` records a hit.
+
+Current events contain `id`, `ts`, `token`, `test`, `src`, `ipHash`, `country`, `asn`, `ua`, and `referer`; registered-token events also contain `name` and `location`. Export adds `deliveries`, with each delivery's `id`, `type`, `state`, `attempts`, `httpStatus`, `error`, `nextAttemptAt`, and `updatedAt`. Historical KV events can lack newer fields.
 
 ## Notifications
 
-Recommended behavior:
+Configure any combination of these destinations:
 
-- Notify only on **first hit** per `(token, ipHash, ua)` within a time window
-- Rate-limit aggressively to prevent spam
+| Setting | Delivery format |
+| --- | --- |
+| `WEBHOOK_URL` | JSON `{ "kind": "kanariya.canary", "event": { ... }, "deliveryId": "..." }` |
+| `SLACK_WEBHOOK_URL` | Native Slack incoming webhook with plain-text blocks and a short notification fallback |
+| `DISCORD_WEBHOOK_URL` | Native Discord webhook with `wait=true`, content limited to 2,000 characters, and mentions disabled |
+| `MAIL_FROM`, `MAIL_TO`, `MAILCHANNELS_API_KEY` | MailChannels text email; `MAIL_TO` is comma-separated |
 
-MailChannels email (optional):
+Slack and Discord use their own payloads; no separate relay adapter is needed. The adapters follow [Slack's text-formatting rules](https://docs.slack.dev/messaging/formatting-message-text/) and [Discord's webhook API](https://discord.com/developers/docs/resources/webhook#execute-webhook). Chat and email text distinguish **TEST** from **DETECTION**; the generic webhook exposes `event.test`. All formats include stable event and delivery IDs. See [the MailChannels guide](howto_MailChannels.md) for email authentication and domain setup.
 
-- Requires sender domain verification with MailChannels (see their docs).
-- Set `MAIL_FROM` and `MAIL_TO` to enable email alerts.
+Public hits notify once per `(token, ipHash, ua)` within the default 30-minute deduplication interval. Repeated accepted hits still create events. Deduplication requires both an IP hash and a User-Agent; admin tests bypass it.
 
-## Admin export (optional)
+Each configured destination gets its own delivery status:
 
-Provide a simple endpoint like:
+- `pending`: saved for a first attempt.
+- `retrying`: an attempt is in progress or another is scheduled.
+- `accepted`: the destination returned an HTTP 2xx response.
+- `failed`: a terminal error, exhausted attempts, expired event, or full queue.
 
-```text
-GET /admin/export?token=<token>
+The default maximum is six attempts total. Network failures, ten-second timeouts, HTTP `408`, `429`, and `5xx` are retried. The backoff starts at 30 seconds and doubles, capped at one hour; a provider's `Retry-After` can extend it up to 24 hours. Other HTTP errors fail without retry. The queue holds at most 10,000 pending/retrying destination deliveries by default; overflow is recorded as `queue_full` while the event is retained.
 
-Authorization: Bearer <ADMIN_KEY>
+Delivery uses at-least-once semantics within these attempt and retention limits. Receivers may use `deliveryId` to recognize duplicates. `accepted` confirms only provider HTTP acceptance, not inbox arrival or that anyone read a message. Inspect the destination when testing.
+
+Only a fingerprint of each destination is stored in the outbox. Removing or changing a destination stops its queued deliveries with `configuration_changed`, preventing old events from being sent to a new recipient. Rotating only the MailChannels API key keeps the same email destination identity. Incomplete email settings produce `configuration_error`. Provider response bodies and raw exception text are not retained. HTTPS is required, URL userinfo is rejected, and redirects are not followed.
+
+## Configuration
+
+Keep production credentials in Cloudflare Worker secrets. `.dev.vars` is ignored by Git and is for local development. Do not put webhook URLs or API keys in `wrangler.toml`.
+
+| Secret | Purpose |
+| --- | --- |
+| `ADMIN_KEY` | Required for token management, testing, signing, and export |
+| `IP_HMAC_KEY` | HMAC key for IP pseudonyms; without it, no raw IP is stored and `ipHash` is empty |
+| `WEBHOOK_URL`, `SLACK_WEBHOOK_URL`, `DISCORD_WEBHOOK_URL` | Optional HTTPS notification destinations |
+| `MAILCHANNELS_API_KEY` | Required when email is configured; sent as `X-Api-Key` |
+| `MASTER_SECRET` | Legacy per-token signing master key; not needed for registered URLs |
+| `SIGNING_SECRET` | Legacy signing key and fallback master when `MASTER_SECRET` is absent |
+
+Configure these non-secret values in `[vars]` in `wrangler.toml`, or the matching deployment environment. Numeric store settings are rounded down and clamped to the documented range; invalid nonnumeric values use the fallback.
+
+| Setting | Code default | Range or behavior |
+| --- | --- | --- |
+| `TOKEN_MAX_ITEMS` | `1000` | `1`–`10000`; includes retained expired/revoked records |
+| `EVENT_TTL_SECONDS` | `2592000` | `60`–`31536000`; event and delivery retention |
+| `DEDUPE_TTL_SECONDS` | `1800` | `1`–`86400` |
+| `EXPORT_MAX_ITEMS` | `1000` | `1`–`1000`; per-token merged export limit |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | `0`–`86400`; `0` disables rate limiting |
+| `RATE_LIMIT_MAX` | `60` | `0`–`100000`; `0` disables rate limiting |
+| `NOTIFY_QUEUE_MAX` | `10000` | `1`–`100000`; pending/retrying deliveries |
+| `NOTIFY_MAX_ATTEMPTS` | `6` | `1`–`10`; includes first attempt |
+| `NOTIFY_RETRY_BASE_SECONDS` | `30` | `1`–`3600` |
+| `REQUIRE_SIGNATURE` | Off if unset | Checked-in config sets `1`; applies only to legacy tokens |
+| `SIGNATURE_WINDOW_SECONDS` | `300` | Checked-in config also sets `300`; a value `<= 0` disables the legacy timestamp window |
+| `MAIL_FROM`, `MAIL_TO` | Unset | Sender and comma-separated recipients |
+| `MAIL_FROM_NAME` | `Kanariya` | Email sender display name |
+| `MAIL_SUBJECT_PREFIX` | `Kanariya alert` | Email subject prefix |
+
+Rate limiting uses `(token, ipHash)` and a fixed time window. Requests without an IP hash share that token's empty-hash bucket. The ten-second admin-test interval, 90-day creation default, ten-second provider timeout, and 24-hour `Retry-After` ceiling are fixed in code.
+
+## Deployment and migration
+
+This update introduces a new SQLite-backed Durable Object. The checked-in `wrangler.toml` declares:
+
+```toml
+[[durable_objects.bindings]]
+name = "KANARI_STORE"
+class_name = "KanariyaStore"
+
+[[migrations]]
+tag = "v1-kanariya-store"
+new_sqlite_classes = ["KanariyaStore"]
 ```
 
-Return JSON array of events for the token.
-If you do not need admin export, remove the `/admin/*` route and omit `ADMIN_KEY`.
+Before deploying, verify that the target Cloudflare account and deployment token can create/use the required Durable Object, and review current [Durable Objects pricing and limits](https://developers.cloudflare.com/durable-objects/platform/pricing/). SQLite Durable Objects are available on Free and Paid plans, with different allowances and failure/billing behavior. The repository's older [Cloudflare permission notes](docs/cloudflare_token_permissions.md) do not by themselves verify this new capability for your account.
 
-## Signed canary URLs (recommended for public MVP)
+The configuration uses Cloudflare's supported `migrations` flow; see [class lifecycle configuration](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/). Deploying this migration provisions the SQLite class namespace. It does not convert existing Workers KV data into SQLite. Keep the existing `KANARI_KV` binding if its historical exports and nonce compatibility are needed. A fresh installation can omit it.
 
-To reduce spoofed alerts, you can require signatures on canary URLs.
-
-Signed query parameters:
-
-- `ts`: UNIX timestamp (seconds)
-- `nonce`: optional random nonce for replay protection
-- `sig`: HMAC-SHA256 over `ts|path|query` (query excludes `sig`)
-
-Environment:
-
-- Set `REQUIRE_SIGNATURE=1`
-- Set `SIGNING_SECRET` (secret)
-- Optionally set `SIGNATURE_WINDOW_SECONDS` (default 300s)
-
-Generate a signed URL:
+For your own installation, update the Worker name, routes, zone, and any retained KV namespace ID. Configure both `/canary/*` and `/admin/*` routes on your API hostname, then set credentials through Cloudflare or Wrangler:
 
 ```bash
-SIGNING_SECRET="..." python3 scripts/gen_signed_url.py \
-  --base-url "https://kanariya.toppymicros.com/canary" \
-  --token "<token>" \
-  --src "doc_invoices_2026q1"
+npx wrangler@4 secret put ADMIN_KEY
+npx wrangler@4 secret put IP_HMAC_KEY
+# Configure only the notification services you use:
+npx wrangler@4 secret put SLACK_WEBHOOK_URL
+npx wrangler@4 secret put DISCORD_WEBHOOK_URL
+npx wrangler@4 secret put WEBHOOK_URL
+npx wrangler@4 secret put MAILCHANNELS_API_KEY
 ```
 
-## Security & privacy
+When the target account, routes, configuration, and costs have been reviewed, deploy with `npx wrangler@4 deploy`. Verify the deployed service by creating a registered token, using its test action, inspecting export status, and checking the intended destination. Those are live checks and can send messages.
 
-- **PII minimization**: store `ipHash` (HMAC) instead of plain IP.
-- Do not store request bodies.
-- Prefer `204 No Content` responses to reveal nothing.
-- If publishing publicly:
-  - add per-IP rate limits
-  - add abuse protections (WAF / bot fight mode)
+The GitHub Actions workflow deploys on pushes to `main` and manual dispatch. It uses repository secrets `CF_API_TOKEN` and `CF_ACCOUNT_ID` for deployment and syncs nonempty `ADMIN_KEY`, `IP_HMAC_KEY`, `WEBHOOK_URL`, `SLACK_WEBHOOK_URL`, `DISCORD_WEBHOOK_URL`, and `MAILCHANNELS_API_KEY` into Worker secrets. An unset optional GitHub secret does not delete an existing Worker secret. Configure `MAIL_FROM`, `MAIL_TO`, and other mail variables separately in the deployment configuration. Manage legacy signing secrets directly in Cloudflare; the workflow does not sync them.
 
-## Minimal abuse policy (MVP)
+### Existing planted URLs
 
-Kanariya is for **defensive, consent-based** monitoring only. Do not use it to:
+Legacy tokens remain available with their existing signature and timestamp rules. With the checked-in settings, a signed URL has a 300-second timestamp window. A nonce is consumed by an accepted request and retained through the signature validity interval, including allowed future clock skew. When the timestamp window is disabled, nonce retention remains five minutes. The legacy signer and `scripts/gen_signed_url.py` remain for compatibility; they do not create registry records or long-lived registered URLs.
 
-- Monitor systems or data you do not own or have explicit permission to test.
-- Send canary links to targets without authorization.
-- Collect or store sensitive payloads or personal data beyond the documented minimal fields.
+Token IDs must now be 1–512 URL-safe characters from `A–Z`, `a–z`, `0–9`, `_`, and `-`. Only IDs matching `^kr_[a-f0-9]{64}$` are treated as registered tokens. Other URL-safe IDs, including `kr_invoice`, remain legacy tokens. Extra path segments, percent-encoded aliases, and duplicate query parameters are rejected. Legacy URLs using those forms need replacement.
 
-If you deploy publicly, publish a contact channel for abuse reports and respond promptly.
+An old signed URL cannot be turned into a registered URL or given a new stored expiry. Create a registered token and replace the URL in each document or file. Keep existing signing secrets and signature settings while still supporting valid legacy placements. The old smoke-test script exercises a public hit, not the separate admin test action; use the new test endpoint for a notification check that must not increase a registered token's hit count.
 
-## Limitations
+## Privacy and limits
 
-- DNS/HTTP telemetry can’t tell you “what data” was leaked—only that a token was accessed.
-- Email environments may trigger false positives (prefetch/proxy).
-- If an attacker exfiltrates files but never opens them, file tokens may not fire.
+Kanariya stores an HMAC of the request IP when `IP_HMAC_KEY` is configured, plus country/ASN and bounded User-Agent and Referer strings. It does not store request bodies or the full request query. User-Agent, Referer, and placement labels can still contain sensitive information, and configured notification services receive the event metadata.
 
-## Roadmap
+Use tokens only in systems and data you own or are authorized to monitor. Link scanners, previews, and email proxies can trigger requests. Files that are never opened, or clients that block remote resources, may produce no event. This is an HTTP access signal, not a high-interaction honeypot or proof of exfiltration.
 
-- [ ] Public MVP hardening: rate limits, dedupe defaults, and a minimal abuse policy
-- [ ] Worker template + `wrangler.toml` scaffolding
-- [ ] Token generator UI (static)
-- [ ] CSV bulk token generation
-- [ ] Simple dashboard
-- [ ] Evidence report (ASN/country/time clustering, proxy-like labeling)
-
-## Contributing
-
-PRs are welcome. Keep the project focused on **detection + evidence**.
+One Durable Object serves the installation. Inventory and delivery limits bound parts of its workload; they are not a guarantee against all public-endpoint abuse. Rate limits, storage availability, and provider limits can cause dropped events or failed deliveries. Local unit tests do not establish production capacity, migration success, or live provider delivery.
 
 ## License
 
-Apache License 2.0 (Apache-2.0)
+Apache License 2.0 (Apache-2.0). Copyright (c) 2026 ToppyMicroServices OÜ.
 
-Copyright (c) 2026 ToppyMicroServices OÜ
-
-> Add a `LICENSE` file in the repo root with the full Apache-2.0 text.
+See `LICENSE` for the full text.

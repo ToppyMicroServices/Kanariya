@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:runtime": "node scripts/check_runtime.mjs"
   },
   "devDependencies": {
     "vitest": "^4.0.17"

@@ -4,362 +4,524 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Kanariya Token Studio</title>
-    <link
-      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
-      rel="stylesheet"
-    />
     <style>
       :root {
-        --bg-1: #f7f5f0;
-        --bg-2: #e7f2f4;
-        --ink: #1b2429;
-        --muted: #5a6a72;
-        --accent: #ed6a3a;
-        --panel: #ffffff;
-        --stroke: rgba(27, 36, 41, 0.12);
-        --shadow: 0 12px 30px rgba(27, 36, 41, 0.12);
+        --bg-1: #f7f5f0; --bg-2: #e7f2f4; --ink: #1b2429; --muted: #5a6a72;
+        --accent: #ed6a3a; --stroke: rgba(27, 36, 41, 0.12); --shadow: 0 12px 30px rgba(27, 36, 41, 0.12);
       }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        margin: 0;
-        min-height: 100vh;
-        font-family: "DM Sans", sans-serif;
-        color: var(--ink);
-        background: linear-gradient(135deg, var(--bg-1), var(--bg-2));
-      }
-
-      main {
-        max-width: 920px;
-        margin: 0 auto;
-        padding: 48px 20px 72px;
-        display: grid;
-        gap: 20px;
-      }
-
-      header {
-        display: grid;
-        gap: 10px;
-      }
-
-      h1 {
-        margin: 0;
-        font-size: clamp(2rem, 3vw, 2.6rem);
-        letter-spacing: -0.02em;
-      }
-
-      p {
-        margin: 0;
-        color: var(--muted);
-      }
-
-      .card {
-        background: var(--panel);
-        border: 1px solid var(--stroke);
-        border-radius: 16px;
-        padding: 20px;
-        box-shadow: var(--shadow);
-      }
-
-      .stack {
-        display: grid;
-        gap: 14px;
-      }
-
-      label {
-        font-weight: 600;
-        font-size: 0.95rem;
-      }
-
-      input,
-      textarea {
-        width: 100%;
-        margin-top: 8px;
-        padding: 10px 12px;
-        border-radius: 10px;
-        border: 1px solid var(--stroke);
-        background: #fbfbfb;
-        font-family: "JetBrains Mono", monospace;
-        font-size: 0.92rem;
-        color: var(--ink);
-      }
-
-      textarea {
-        min-height: 140px;
-        resize: vertical;
-      }
-
-      .token-output {
-        min-height: 70px;
-      }
-
-      .row {
-        display: grid;
-        gap: 12px;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      }
-
-      .actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-      }
-
-      button {
-        border: none;
-        padding: 10px 16px;
-        border-radius: 999px;
-        font-weight: 600;
-        cursor: pointer;
-      }
-
-      .primary {
-        background: var(--accent);
-        color: white;
-      }
-
-      .ghost {
-        background: #f1f4f5;
-        color: var(--ink);
-      }
-
-      .hint {
-        color: var(--muted);
-        font-size: 0.85rem;
-      }
-
-      .footer {
-        margin-top: 4px;
-        font-size: 0.85rem;
-        color: var(--muted);
-      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; font-family: "DM Sans", system-ui, sans-serif; color: var(--ink); background: linear-gradient(135deg, var(--bg-1), var(--bg-2)); }
+      main { max-width: 1120px; margin: 0 auto; padding: 42px 20px 72px; display: grid; gap: 20px; }
+      header, .stack { display: grid; gap: 14px; }
+      h1 { margin: 0; font-size: clamp(2rem, 3vw, 2.6rem); letter-spacing: -0.02em; }
+      h2 { margin: 0; font-size: 1.2rem; }
+      h3 { margin: 0; font-size: 1rem; }
+      p { margin: 0; color: var(--muted); line-height: 1.5; }
+      .card { background: #fff; border: 1px solid var(--stroke); border-radius: 16px; padding: 22px; box-shadow: var(--shadow); min-width: 0; }
+      label { display: block; font-weight: 600; font-size: 0.95rem; }
+      input, textarea, select { width: 100%; margin-top: 8px; padding: 10px 12px; border-radius: 10px; border: 1px solid #b9c2c7; background: #fbfbfb; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.92rem; color: var(--ink); }
+      textarea { min-height: 140px; resize: vertical; }
+      .token-output { min-height: 78px; }
+      .row { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); }
+      .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+      button { border: none; padding: 10px 16px; border-radius: 999px; font: inherit; font-weight: 600; cursor: pointer; }
+      .primary { background: var(--accent); color: #172025; }
+      .ghost { background: #edf2f3; color: var(--ink); }
+      .danger { background: #fff0ed; color: #a52c14; }
+      button:disabled { opacity: 0.48; cursor: not-allowed; }
+      button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 3px solid #167385; outline-offset: 3px; }
+      .hint, .footer { color: var(--muted); font-size: 0.85rem; line-height: 1.5; }
+      .hint { margin-top: 5px; }
+      .status { min-height: 1.5em; overflow-wrap: anywhere; }
+      .status.error { color: #a52c14; }
+      .badge { display: inline-block; padding: 3px 8px; border-radius: 6px; background: #eef3f4; font-size: 0.8rem; font-weight: 600; }
+      .badge.active, .badge.accepted { color: #215c41; background: #e7f5ed; }
+      .badge.expired, .badge.pending, .badge.retrying { color: #805300; background: #fff4d8; }
+      .badge.revoked, .badge.failed { color: #a52c14; background: #fff0ed; }
+      .table-wrap { overflow-x: auto; }
+      table { border-collapse: collapse; width: 100%; text-align: left; font-size: 0.88rem; }
+      caption { text-align: left; padding-bottom: 10px; color: var(--muted); }
+      th, td { border-bottom: 1px solid var(--stroke); padding: 12px 9px; vertical-align: top; overflow-wrap: anywhere; }
+      th { font-size: 0.8rem; color: var(--muted); }
+      th:first-child, td:first-child { padding-left: 0; }
+      tr.selected { background: #f0f7f8; }
+      td button { max-width: 230px; padding: 7px 11px; text-align: left; overflow-wrap: anywhere; border-radius: 8px; }
+      .inventory { min-width: 760px; }
+      .inventory td:nth-child(2) { max-width: 210px; }
+      .details-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 175px), 1fr)); gap: 12px; margin: 0; }
+      dt { color: var(--muted); font-size: 0.8rem; }
+      dd { margin: 4px 0 0; overflow-wrap: anywhere; font-size: 0.9rem; }
+      .delivery-list { display: grid; gap: 9px; padding: 0; margin: 0; list-style: none; }
+      .delivery-list li { border: 1px solid var(--stroke); border-radius: 10px; padding: 12px; overflow-wrap: anywhere; line-height: 1.6; }
+      summary { cursor: pointer; font-weight: 600; }
+      details > .stack { margin-top: 14px; }
+      [hidden] { display: none !important; }
+      @media (max-width: 540px) { main { padding: 26px 12px 48px; } .card { padding: 17px; } .actions button { flex-grow: 1; } }
     </style>
   </head>
   <body>
     <main>
       <header>
         <h1>Kanariya Token Studio</h1>
-        <p>Generate a token URL and a simple HTML beacon.</p>
+        <p>Create a canary URL for each placement, track visits, and inspect private notification history.</p>
         <p class="footer">© 2026 ToppyMicroServices OÜ. Licensed under Apache-2.0.</p>
       </header>
-
-      <section class="card stack">
-        <div class="hint">Base URL is fixed to https://kanariya.toppymicros.com/canary</div>
-        <div class="actions">
-          <button class="primary" id="generate">Generate</button>
-        </div>
-        <details class="advanced">
-          <summary>Advanced</summary>
+      <section class="card stack" aria-labelledby="connectionHeading">
+        <h2 id="connectionHeading">Connect to your worker</h2>
+        <form id="connectionForm" class="stack">
           <div class="row">
             <div>
-              <label>Source id (src)</label>
-              <input id="sourceId" placeholder="form_invoice_2026q1" />
-              <div class="hint">Optional. Helps identify where the token was planted.</div>
+              <label for="apiBase">API base URL</label>
+              <input id="apiBase" type="url" value="https://kanariya.toppymicros.com" required spellcheck="false" autocomplete="off" aria-describedby="baseHint" />
+              <p id="baseHint" class="hint">Use your worker origin, or http://localhost:8787 for local development.</p>
             </div>
             <div>
-              <label>Admin key (optional)</label>
-              <input id="adminKey" type="password" placeholder="ADMIN_KEY (for /admin/sign)" />
-              <div class="hint">Used only to request signed URLs from the server.</div>
+              <label for="adminKey">Admin key</label>
+              <input id="adminKey" type="password" required autocomplete="off" spellcheck="false" aria-describedby="keyHint" />
+              <p id="keyHint" class="hint">Required for all management requests. Held only in this page's memory; never saved or added to a URL.</p>
             </div>
           </div>
-          <div class="hint">When signatures are required, this UI requests a signed URL from <code>/admin/sign</code>.</div>
+          <div class="actions">
+            <button class="primary" id="connect" type="submit">Connect and load</button>
+            <button class="ghost" id="disconnect" type="button" disabled>Disconnect and clear key</button>
+          </div>
+        </form>
+        <p class="hint status" id="connectionStatus" role="status" aria-live="polite">Enter the key, then connect. No management requests are sent before you connect.</p>
+        <p class="hint" id="channelStatus">Configured notification channels will appear after connecting.</p>
+      </section>
+      <section class="card stack" aria-labelledby="createHeading">
+        <h2 id="createHeading">Create a placement</h2>
+        <form id="createForm" class="stack">
+          <div class="row">
+            <div><label for="placementName">Name</label><input id="placementName" maxlength="120" required placeholder="Quarterly invoice" data-connected disabled /></div>
+            <div><label for="placementLocation">Location</label><input id="placementLocation" maxlength="240" placeholder="Shared folder / finance / invoice.html" data-connected disabled /></div>
+          </div>
+          <div class="row">
+            <div>
+              <label for="sourceId">Source ID (optional)</label>
+              <input id="sourceId" maxlength="512" placeholder="invoice_2026q3" data-connected disabled aria-describedby="sourceHint" />
+              <p class="hint" id="sourceHint">Identifies this placement in events and notifications. Avoid sensitive information.</p>
+            </div>
+            <div>
+              <label for="lifetime">Lifetime</label>
+              <select id="lifetime" data-connected disabled>
+                <option value="7">7 days</option><option value="30">30 days</option><option value="90" selected>90 days</option><option value="365">365 days</option><option value="never">No expiry</option>
+              </select>
+              <p class="hint">Starts when created. No-expiry placements remain active until revoked.</p>
+            </div>
+          </div>
+          <div class="actions"><button class="primary" id="generate" type="submit" data-connected disabled>Create placement</button></div>
+        </form>
+      </section>
+      <section class="card stack" aria-labelledby="inventoryHeading">
+        <div class="actions"><h2 id="inventoryHeading">Placement inventory</h2><button class="ghost" id="refresh" type="button" data-connected disabled>Refresh inventory</button></div>
+        <p class="hint status" id="inventoryStatus" role="status" aria-live="polite">Connect to load placements.</p>
+        <div class="table-wrap">
+          <table class="inventory">
+            <caption>Select a name to view its URL and manage the placement. Dates use your local time.</caption>
+            <thead><tr><th scope="col">Name</th><th scope="col">Location</th><th scope="col">Expiry</th><th scope="col">Last seen</th><th scope="col">Hits</th><th scope="col">State</th></tr></thead>
+            <tbody id="inventoryRows"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="card stack" aria-labelledby="selectedHeading">
+        <h2 id="selectedHeading">Selected placement</h2>
+        <p class="hint" id="selectionEmpty">Select a placement from the inventory, or create one.</p>
+        <dl class="details-grid" id="placementDetails" hidden></dl>
+        <div><label for="tokenUrl">Token URL</label><textarea id="tokenUrl" class="token-output" readonly spellcheck="false"></textarea></div>
+        <div class="actions">
+          <button class="ghost" id="copyUrl" data-copy="tokenUrl" type="button" disabled>Copy URL</button>
+          <button class="ghost" id="testToken" type="button" disabled>Send test notification</button>
+          <button class="danger" id="revokeToken" type="button" disabled>Revoke placement</button>
+        </div>
+        <p class="hint">A test sends real notifications through the configured channels, marked TEST. It does not visit the canary URL or change its hits, last-seen time, expiry, or revocation.</p>
+        <p class="hint status" id="tokenStatus" role="status" aria-live="polite"></p>
+        <details>
+          <summary>HTML file beacon</summary>
+          <div class="stack">
+            <div><label for="htmlBeacon">HTML source</label><textarea id="htmlBeacon" readonly spellcheck="false"></textarea></div>
+            <div class="actions"><button class="ghost" id="copyHtml" data-copy="htmlBeacon" type="button" disabled>Copy HTML</button><button class="primary" id="downloadHtml" type="button" disabled>Download HTML</button></div>
+            <p class="hint">Opening the downloaded file can contact the canary URL and record a real hit. Use one token per location.</p>
+          </div>
         </details>
       </section>
-
-      <section class="card stack">
-        <div>
-          <label>Token URL</label>
-          <textarea id="tokenUrl" class="token-output" readonly></textarea>
+      <section class="card stack" aria-labelledby="historyHeading">
+        <h2 id="historyHeading">Private event history</h2>
+        <div><label for="adminToken">Token for export</label><input id="adminToken" placeholder="Select a placement, or enter a legacy token" data-connected disabled spellcheck="false" /></div>
+        <div class="actions"><button class="primary" id="fetchExport" type="button" disabled>Fetch private history</button><button class="ghost" id="downloadExport" type="button" disabled>Download JSON</button><button class="ghost" id="clearExport" type="button" disabled>Clear history</button></div>
+        <p class="hint status" id="exportStatus" role="status" aria-live="polite"></p>
+        <h3>Latest notification status</h3>
+        <p class="hint" id="latestEvent">Fetch history to inspect notification delivery and retries.</p>
+        <ul class="delivery-list" id="deliveryRows"></ul>
+        <p class="hint">Pending and retrying notifications may change after a scheduled retry. Fetch history again to update. Accepted means the provider accepted the request; it does not confirm that a recipient read it.</p>
+        <div class="table-wrap" id="historyTableWrap" hidden>
+          <table><caption>Returned events, newest first. Older events may have no delivery records.</caption><thead><tr><th scope="col">Time</th><th scope="col">Event</th><th scope="col">Notification status</th></tr></thead><tbody id="historyRows"></tbody></table>
         </div>
-        <div class="actions">
-          <button class="ghost" data-copy="tokenUrl">Copy URL</button>
-          <button class="ghost" id="testToken">Test token</button>
-        </div>
-        <div class="hint" id="tokenStatus"></div>
-        <div>
-          <label>HTML file beacon</label>
-          <textarea id="htmlBeacon" readonly></textarea>
-        </div>
-        <div class="actions">
-          <button class="ghost" data-copy="htmlBeacon">Copy HTML</button>
-          <button class="primary" id="downloadHtml">Download HTML</button>
-        </div>
-        <div class="hint">Use one token per location.</div>
-      </section>
-
-      <section class="card stack">
-        <div>
-          <label>Token</label>
-          <input id="adminToken" placeholder="token" />
-        </div>
-        <div class="actions">
-          <button class="primary" id="fetchExport">Fetch export</button>
-          <button class="ghost" id="clearExport">Clear</button>
-        </div>
-        <div class="hint" id="exportStatus"></div>
-        <textarea id="exportOutput" readonly></textarea>
-        <div class="hint">Admin export is available when public export is enabled.</div>
+        <div><label for="exportOutput">History JSON</label><textarea id="exportOutput" readonly spellcheck="false"></textarea></div>
       </section>
     </main>
-
     <script>
-      const BASE_URL = "https://kanariya.toppymicros.com/canary";
-      const ADMIN_BASE_URL = "https://kanariya.toppymicros.com";
-      const tokenUrlOutput = document.getElementById("tokenUrl");
-      const htmlBeaconOutput = document.getElementById("htmlBeacon");
-      const tokenStatus = document.getElementById("tokenStatus");
-      const sourceIdInput = document.getElementById("sourceId");
-      const adminKeyInput = document.getElementById("adminKey");
-      const adminTokenInput = document.getElementById("adminToken");
-      const exportStatus = document.getElementById("exportStatus");
-      const exportOutput = document.getElementById("exportOutput");
+      const byId = (id) => document.getElementById(id);
+      const ui = Object.fromEntries([
+        "apiBase", "adminKey", "connect", "disconnect", "connectionStatus", "channelStatus",
+        "placementName", "placementLocation", "sourceId", "lifetime", "inventoryRows", "inventoryStatus",
+        "selectionEmpty", "placementDetails", "tokenUrl", "htmlBeacon", "tokenStatus", "testToken", "revokeToken",
+        "copyUrl", "copyHtml", "downloadHtml", "adminToken", "fetchExport", "downloadExport", "clearExport",
+        "exportStatus", "exportOutput", "latestEvent", "deliveryRows", "historyRows", "historyTableWrap"
+      ].map((id) => [id, byId(id)]));
+      let connection = null;
+      let revision = 0;
+      let busy = false;
+      let placements = [];
+      let selected = null;
+      const requests = new Set();
 
-      function toBase64Url(bytes) {
-        const chars = Array.from(bytes).map((b) => String.fromCharCode(b)).join("");
-        return btoa(chars).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      function status(element, message, error = false) {
+        element.textContent = message;
+        element.classList.toggle("error", error);
       }
-
-      function generateToken(bytesLength) {
-        const bytes = new Uint8Array(bytesLength);
-        crypto.getRandomValues(bytes);
-        return toBase64Url(bytes);
+      function dateLabel(value, empty = "Never") {
+        if (!value) return empty;
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? "Unknown date" : date.toLocaleString();
       }
-
-      function canonicalQuery(params) {
-        const entries = [];
-        for (const [key, value] of params.entries()) {
-          if (key === "sig") continue;
-          entries.push([key, value]);
-        }
-        entries.sort((a, b) =>
-          a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])
-        );
-        return entries
-          .map(
-            ([key, value]) =>
-              `${encodeURIComponent(key)}=${encodeURIComponent(value)}`
-          )
-          .join("&");
+      function badge(value) {
+        const span = document.createElement("span");
+        const known = ["active", "expired", "revoked", "pending", "retrying", "accepted", "failed"];
+        span.className = `badge${known.includes(value) ? ` ${value}` : ""}`;
+        span.textContent = value || "unknown";
+        return span;
       }
-
-      async function fetchSignedUrl({ token, src }) {
-        const params = new URLSearchParams();
-        params.set("token", token);
-        if (src) params.set("src", src);
-        const url = `${ADMIN_BASE_URL}/admin/sign?${params.toString()}`;
-
-        const headers = {};
-        const adminKey = (adminKeyInput.value || "").trim();
-        if (adminKey) headers.authorization = `Bearer ${adminKey}`;
-
-        const response = await fetch(url, { method: "GET", headers });
-        const bodyText = await response.text();
-        if (!response.ok) {
-          throw new Error(`${response.status}: ${bodyText}`);
-        }
-        const parsed = JSON.parse(bodyText);
-        if (!parsed || !parsed.url) {
-          throw new Error("Invalid /admin/sign response");
-        }
-        return parsed.url;
+      function appendCell(row, value) {
+        const cell = document.createElement("td");
+        if (value instanceof Node) cell.append(value);
+        else cell.textContent = String(value ?? "—");
+        row.append(cell);
+        return cell;
       }
-
-      async function buildOutputs() {
-        const tokenBytes = 16;
-        const token = generateToken(tokenBytes);
-        const src = (sourceIdInput.value || "").trim();
-        const params = new URLSearchParams();
-        if (src) params.set("src", src);
-
-        let url = `${BASE_URL}/${token}`;
+      function updateControls() {
+        document.querySelectorAll("[data-connected]").forEach((element) => { element.disabled = !connection || busy; });
+        ui.connect.disabled = busy;
+        ui.disconnect.disabled = !connection && !ui.adminKey.value;
+        const canUse = Boolean(connection && selected && !busy);
+        const canPlace = canUse && selected.state === "active";
+        [ui.copyUrl, ui.copyHtml, ui.downloadHtml].forEach((button) => { button.disabled = !canPlace; });
+        ui.testToken.disabled = !canUse;
+        ui.revokeToken.disabled = !canUse || selected.state === "revoked";
+        ui.fetchExport.disabled = !connection || busy || !ui.adminToken.value.trim();
+        ui.downloadExport.disabled = busy || !ui.exportOutput.value;
+        ui.clearExport.disabled = busy || (!ui.exportOutput.value && !ui.exportStatus.textContent && !ui.deliveryRows.childElementCount);
+        ui.inventoryRows.querySelectorAll("button").forEach((button) => { button.disabled = busy; });
+      }
+      function clearHistory() {
+        ui.exportOutput.value = "";
+        status(ui.exportStatus, "");
+        ui.latestEvent.textContent = "Fetch history to inspect notification delivery and retries.";
+        ui.deliveryRows.replaceChildren();
+        ui.historyRows.replaceChildren();
+        ui.historyTableWrap.hidden = true;
+      }
+      function clearSelection() {
+        selected = null;
+        ui.selectionEmpty.hidden = false;
+        ui.placementDetails.hidden = true;
+        ui.placementDetails.replaceChildren();
+        ui.tokenUrl.value = "";
+        ui.htmlBeacon.value = "";
+        ui.adminToken.value = "";
+        status(ui.tokenStatus, "");
+        clearHistory();
+      }
+      function invalidateConnection(message, clearKey = false, error = false) {
+        revision += 1;
+        for (const controller of requests) controller.abort();
+        requests.clear();
+        connection = null;
+        busy = false;
+        placements = [];
+        ui.inventoryRows.replaceChildren();
+        clearSelection();
+        if (clearKey) ui.adminKey.value = "";
+        status(ui.connectionStatus, message, error);
+        status(ui.inventoryStatus, "Connect to load placements.");
+        ui.channelStatus.textContent = "Configured notification channels will appear after connecting.";
+        updateControls();
+      }
+      function readConnection() {
+        const key = ui.adminKey.value.trim();
+        if (!key) throw new Error("Enter an Admin key.");
+        let url;
+        try { url = new URL(ui.apiBase.value.trim()); }
+        catch { throw new Error("Enter a valid API base URL."); }
+        const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+        if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) throw new Error("Use HTTPS, or HTTP on localhost for local development.");
+        if (url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("Enter only the worker origin, without a path, credentials, query, or fragment.");
+        return { base: url.origin, key, revision };
+      }
+      function isCurrent(session) { return connection === session && revision === session.revision; }
+      async function api(session, path, options = {}, responseInfo) {
+        const controller = new AbortController();
+        requests.add(controller);
+        const timer = setTimeout(() => controller.abort(), 20000);
         try {
-          url = await fetchSignedUrl({ token, src });
-        } catch (err) {
-          // Fallback to unsigned URL (may not be accepted when signatures are required).
-          if ([...params.keys()].length) {
-            url = `${BASE_URL}/${token}?${canonicalQuery(params)}`;
+          const response = await fetch(`${session.base}${path}`, {
+            ...options,
+            headers: { "Authorization": `Bearer ${session.key}`, ...(options.body ? { "Content-Type": "application/json" } : {}) },
+            signal: controller.signal, credentials: "omit", cache: "no-store", redirect: "error",
+          });
+          if (!isCurrent(session)) throw new Error("Connection changed.");
+          if (!response.ok) {
+            const explanation = {
+              400: "The server rejected the request. Check the placement details.",
+              401: "The Admin key was not accepted.",
+              403: "This key is not allowed to perform the request.",
+              404: "The endpoint or placement was not found. Check the worker version and API base URL.",
+              409: "The request conflicts with the current placement state.",
+              429: "The server is limiting requests. Wait before reconnecting.",
+            }[response.status] || "The server could not complete the request.";
+            throw new Error(`HTTP ${response.status}: ${explanation}`);
           }
-          tokenStatus.textContent = `Signed URL failed: ${err?.message || "unknown error"}`;
+          const value = await response.json();
+          if (!isCurrent(session)) throw new Error("Connection changed.");
+          if (responseInfo) responseInfo.legacyTruncated = response.headers.get("x-kanariya-legacy-truncated") === "true";
+          return value;
+        } finally {
+          clearTimeout(timer);
+          requests.delete(controller);
         }
-
-        tokenUrlOutput.value = url;
-        htmlBeaconOutput.value = `<!doctype html>
-<meta charset="utf-8"/>
-<title>Kanariya Canary</title>
-<img src="${url}" style="display:none" alt="" />`;
-        adminTokenInput.value = token;
       }
-
-      async function testToken() {
-        const url = tokenUrlOutput.value.trim();
-        if (!url) {
-          tokenStatus.textContent = "Generate a token first.";
+      async function runOperation(action) {
+        if (!connection || busy) return;
+        const session = connection;
+        busy = true;
+        updateControls();
+        try { await action(session); }
+        catch (error) {
+          if (isCurrent(session)) {
+            const message = error.name === "AbortError" ? "The request timed out." : error.message || "The request failed.";
+            invalidateConnection(`${message} Outputs cleared. Check the connection and reconnect.`, false, true);
+          }
+        } finally {
+          if (isCurrent(session)) { busy = false; updateControls(); }
+        }
+      }
+      function verifyPlacement(item, session) {
+        if (!item || typeof item.token !== "string" || !item.token || typeof item.url !== "string" || !["active", "expired", "revoked"].includes(item.state)) throw new Error("The server returned an invalid placement.");
+        let url;
+        try { url = new URL(item.url); }
+        catch { throw new Error("The server returned an invalid token URL."); }
+        if (url.origin !== session.base || url.username || url.password || !url.pathname.startsWith("/canary/")) throw new Error("The server returned a token URL outside this worker.");
+        return item;
+      }
+      function renderInventory() {
+        ui.inventoryRows.replaceChildren();
+        for (const item of placements) {
+          const row = document.createElement("tr");
+          row.classList.toggle("selected", selected?.token === item.token);
+          const button = document.createElement("button");
+          button.className = "ghost";
+          button.type = "button";
+          button.textContent = item.name || item.token;
+          button.setAttribute("aria-pressed", String(selected?.token === item.token));
+          button.addEventListener("click", () => { selectPlacement(item); renderInventory(); updateControls(); });
+          appendCell(row, button);
+          appendCell(row, item.location || "—");
+          appendCell(row, dateLabel(item.expiresAt, "No expiry"));
+          appendCell(row, dateLabel(item.lastSeenAt));
+          appendCell(row, item.hitCount ?? 0);
+          appendCell(row, badge(item.state));
+          ui.inventoryRows.append(row);
+        }
+        status(ui.inventoryStatus, placements.length ? `${placements.length} placement${placements.length === 1 ? "" : "s"}. Updated ${new Date().toLocaleTimeString()}.` : "No placements yet. Create your first placement above.");
+      }
+      function escapeAttribute(value) { return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+      function selectPlacement(item) {
+        clearHistory();
+        selected = item;
+        ui.selectionEmpty.hidden = true;
+        ui.placementDetails.hidden = false;
+        ui.placementDetails.replaceChildren();
+        const details = [
+          ["Name", item.name], ["Location", item.location || "—"], ["Source ID", item.src || "—"],
+          ["State", item.state], ["Created", dateLabel(item.createdAt, "Unknown")],
+          ["Expiry", dateLabel(item.expiresAt, "No expiry")], ["Last seen", dateLabel(item.lastSeenAt)],
+          ["Hits", item.hitCount ?? 0], ["Last test", dateLabel(item.lastTestAt)], ["Revoked", dateLabel(item.revokedAt, "No")],
+        ];
+        for (const [label, value] of details) {
+          const group = document.createElement("div");
+          const term = document.createElement("dt");
+          term.textContent = label;
+          const description = document.createElement("dd");
+          description.textContent = String(value ?? "—");
+          group.append(term, description);
+          ui.placementDetails.append(group);
+        }
+        ui.tokenUrl.value = item.url;
+        ui.htmlBeacon.value = `<!doctype html>\n<meta charset="utf-8" />\n<title>Kanariya Canary</title>\n<img src="${escapeAttribute(item.url)}" style="display:none" alt="" />\n`;
+        ui.adminToken.value = item.token;
+        status(ui.tokenStatus, item.state === "active" ? "Ready to place. Copy the URL or download the HTML file." : `This placement is ${item.state}. Create a new placement to obtain an active URL.`);
+      }
+      async function loadInventory(session, preferredToken) {
+        const data = await api(session, "/admin/tokens");
+        if (!Array.isArray(data?.tokens) || !Array.isArray(data.notifications)) throw new Error("The server returned an invalid inventory.");
+        const items = data.tokens.map((item) => verifyPlacement(item, session));
+        if (!isCurrent(session)) return;
+        placements = items;
+        ui.channelStatus.textContent = data.notifications.length ? `Configured notification channels: ${data.notifications.join(", ")}.` : "No notification channels are configured. Events can still be recorded in private history.";
+        const next = placements.find((item) => item.token === preferredToken);
+        if (next) selectPlacement(next);
+        else clearSelection();
+        renderInventory();
+      }
+      function deliveryText(delivery) {
+        let text = `${delivery.type || "unknown channel"}: ${delivery.state || "unknown"} · attempts: ${delivery.attempts ?? "unknown"}`;
+        if (delivery.httpStatus != null) text += ` · HTTP ${delivery.httpStatus}`;
+        if (delivery.nextAttemptAt) text += ` · next retry: ${dateLabel(delivery.nextAttemptAt)}`;
+        if (delivery.error) text += ` · ${delivery.error}`;
+        return text;
+      }
+      function showDeliveries(event, heading) {
+        ui.latestEvent.textContent = heading;
+        ui.deliveryRows.replaceChildren();
+        if (!Array.isArray(event.deliveries) || !event.deliveries.length) {
+          const item = document.createElement("li");
+          item.textContent = Array.isArray(event.deliveries) ? "No notification deliveries recorded for this event." : "Delivery status is unavailable for this legacy event.";
+          ui.deliveryRows.append(item);
           return;
         }
-
-        tokenStatus.textContent = "Testing...";
-        try {
-          const response = await fetch(url, { method: "GET" });
-          tokenStatus.textContent = `Status: ${response.status} (request sent)`;
-        } catch (err) {
-          tokenStatus.textContent = "Failed to reach token URL.";
+        for (const delivery of event.deliveries) {
+          const item = document.createElement("li");
+          item.append(badge(delivery.state), document.createTextNode(` ${deliveryText(delivery)}`));
+          ui.deliveryRows.append(item);
         }
       }
-
-      async function fetchExport() {
-        const token = adminTokenInput.value.trim();
-
-        exportStatus.textContent = "";
-        exportOutput.value = "";
-
-        if (!token) {
-          exportStatus.textContent = "Token is required.";
-          return;
+      function renderHistory(events, legacyTruncated = false) {
+        ui.exportOutput.value = JSON.stringify(events, null, 2);
+        const ordered = [...events].sort((a, b) => (Date.parse(b.ts) || 0) - (Date.parse(a.ts) || 0));
+        ui.historyRows.replaceChildren();
+        ui.historyTableWrap.hidden = !ordered.length;
+        for (const event of ordered) {
+          const row = document.createElement("tr");
+          appendCell(row, dateLabel(event.ts, "Unknown"));
+          appendCell(row, event.test ? "TEST" : "Hit");
+          appendCell(row, Array.isArray(event.deliveries) ? (event.deliveries.map(deliveryText).join("; ") || "No deliveries recorded") : "Legacy event: delivery status unavailable");
+          ui.historyRows.append(row);
         }
-
-        const url = `${ADMIN_BASE_URL}/admin/export?token=${encodeURIComponent(token)}`;
-        try {
-          const response = await fetch(url);
-          const body = await response.text();
-          exportStatus.textContent = `Status: ${response.status}`;
-          exportOutput.value = body;
-        } catch (err) {
-          exportStatus.textContent = "Failed to fetch export.";
-        }
+        if (ordered.length) {
+          const latest = ordered[0];
+          showDeliveries(latest, `Latest returned event: ${latest.test ? "TEST" : "hit"} · ${dateLabel(latest.ts, "Unknown time")}`);
+        } else { ui.latestEvent.textContent = "No events returned for this token."; ui.deliveryRows.replaceChildren(); }
+        const count = `${events.length} event${events.length === 1 ? "" : "s"} returned.`;
+        status(ui.exportStatus, legacyTruncated
+          ? `${count} Warning: Legacy history is truncated; this may omit more recent legacy events. Registered-token history is unaffected.`
+          : `${count} The server may return only its newest retained events.`, legacyTruncated);
       }
-
-      document.getElementById("generate").addEventListener("click", () => {
-        void buildOutputs();
-      });
-      document.getElementById("testToken").addEventListener("click", testToken);
-      document.getElementById("downloadHtml").addEventListener("click", () => {
-        const blob = new Blob([htmlBeaconOutput.value], { type: "text/html" });
-        const link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = "kanariya_canary.html";
-        link.click();
-        URL.revokeObjectURL(link.href);
-      });
-
-      document.getElementById("fetchExport").addEventListener("click", fetchExport);
-      document.getElementById("clearExport").addEventListener("click", () => {
-        exportStatus.textContent = "";
-        exportOutput.value = "";
-      });
-
-      document.querySelectorAll("[data-copy]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const target = document.getElementById(btn.dataset.copy);
-          await navigator.clipboard.writeText(target.value);
-          btn.textContent = "Copied";
-          setTimeout(() => (btn.textContent = "Copy"), 1200);
+      byId("connectionForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (busy) return;
+        invalidateConnection("Connecting…");
+        try { connection = readConnection(); }
+        catch (error) { status(ui.connectionStatus, error.message, true); updateControls(); return; }
+        void runOperation(async (session) => {
+          await loadInventory(session);
+          if (isCurrent(session)) status(ui.connectionStatus, `Connected to ${session.base}. Refresh inventory or history when you need current status.`);
         });
       });
-
-      buildOutputs();
+      [ui.apiBase, ui.adminKey].forEach((input) => input.addEventListener("input", () => { invalidateConnection("Connection details changed. Connect to load this worker's private data."); }));
+      ui.disconnect.addEventListener("click", () => invalidateConnection("Disconnected. The Admin key and loaded private data have been cleared.", true));
+      byId("refresh").addEventListener("click", () => {
+        const token = selected?.token;
+        status(ui.inventoryStatus, "Refreshing inventory…");
+        void runOperation((session) => loadInventory(session, token));
+      });
+      byId("createForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const name = ui.placementName.value.trim();
+        if (!name) { ui.placementName.setCustomValidity("Enter a placement name."); ui.placementName.reportValidity(); return; }
+        const payload = { name, location: ui.placementLocation.value.trim(), src: ui.sourceId.value.trim() };
+        payload.expiresAt = ui.lifetime.value === "never" ? null : new Date(Date.now() + Number(ui.lifetime.value) * 86400000).toISOString();
+        void runOperation(async (session) => {
+          clearSelection();
+          status(ui.tokenStatus, "Creating placement…");
+          const item = verifyPlacement(await api(session, "/admin/tokens", { method: "POST", body: JSON.stringify(payload) }), session);
+          if (!isCurrent(session)) return;
+          placements.unshift(item);
+          selectPlacement(item);
+          renderInventory();
+          status(ui.tokenStatus, "Placement created. Copy the URL or download the HTML file.");
+        });
+      });
+      ui.placementName.addEventListener("input", () => ui.placementName.setCustomValidity(""));
+      ui.testToken.addEventListener("click", () => {
+        if (!selected) return;
+        const token = selected.token;
+        void runOperation(async (session) => {
+          clearHistory();
+          status(ui.tokenStatus, "Sending a TEST notification request…");
+          const result = await api(session, `/admin/tokens/${encodeURIComponent(token)}/test`, { method: "POST" });
+          if (!result || result.test !== true || !Array.isArray(result.deliveries)) throw new Error("The server returned an invalid test response.");
+          await loadInventory(session, token);
+          if (!isCurrent(session)) return;
+          showDeliveries(result, "Latest test request: initial delivery status");
+          status(ui.tokenStatus, result.deliveries.length ? "TEST notification queued. The canary URL was not visited." : "Test event recorded. No notification deliveries were queued.");
+          status(ui.exportStatus, "Fetch private history to see the stored test event and updated delivery or retry status.");
+        });
+      });
+      ui.revokeToken.addEventListener("click", () => {
+        if (!selected || !window.confirm(`Revoke “${selected.name || selected.token}”? Its current URL will stop recording hits. This cannot be undone.`)) return;
+        const token = selected.token;
+        void runOperation(async (session) => {
+          clearHistory();
+          status(ui.tokenStatus, "Revoking placement…");
+          const item = verifyPlacement(await api(session, `/admin/tokens/${encodeURIComponent(token)}/revoke`, { method: "POST" }), session);
+          if (!isCurrent(session)) return;
+          placements = placements.map((previous) => previous.token === token ? item : previous);
+          selectPlacement(item);
+          renderInventory();
+          status(ui.tokenStatus, "Placement revoked. Its URL is inactive; private history remains available.");
+        });
+      });
+      ui.adminToken.addEventListener("input", () => { clearHistory(); updateControls(); });
+      ui.fetchExport.addEventListener("click", () => {
+        const token = ui.adminToken.value.trim();
+        if (!token) return;
+        void runOperation(async (session) => {
+          clearHistory();
+          status(ui.exportStatus, "Fetching private history…");
+          const responseInfo = {};
+          const events = await api(session, `/admin/export?token=${encodeURIComponent(token)}`, {}, responseInfo);
+          if (!Array.isArray(events) || events.some((item) => !item || typeof item !== "object")) throw new Error("The server returned an invalid event history.");
+          if (isCurrent(session)) renderHistory(events, responseInfo.legacyTruncated);
+        });
+      });
+      ui.clearExport.addEventListener("click", () => { clearHistory(); updateControls(); });
+      function download(content, type, filename) {
+        const url = URL.createObjectURL(new Blob([content], { type }));
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.append(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      ui.downloadHtml.addEventListener("click", () => { if (selected && !ui.downloadHtml.disabled) download(ui.htmlBeacon.value, "text/html;charset=utf-8", "kanariya_canary.html"); });
+      ui.downloadExport.addEventListener("click", () => { if (ui.exportOutput.value) download(ui.exportOutput.value, "application/json", "kanariya_private_history.json"); });
+      document.querySelectorAll("[data-copy]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const currentRevision = revision;
+          const token = selected?.token;
+          const target = byId(button.dataset.copy);
+          if (!target.value || button.disabled) return;
+          try {
+            await navigator.clipboard.writeText(target.value);
+            if (revision === currentRevision && selected?.token === token) status(ui.tokenStatus, button.dataset.copy === "tokenUrl" ? "Token URL copied." : "HTML copied.");
+          } catch {
+            if (revision === currentRevision && selected?.token === token) status(ui.tokenStatus, "Clipboard access failed. Select and copy the text above.", true);
+          }
+        });
+      });
+      updateControls();
     </script>
   </body>
 </html>

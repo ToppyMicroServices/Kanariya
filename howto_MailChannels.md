@@ -1,85 +1,60 @@
-# MailChannels DNS setup (Cloudflare + Workers)
+# MailChannels email notifications
 
-This project uses the MailChannels HTTPS send API. To send mail successfully, your sender domain must be verified.
+Kanariya sends text email through `https://api.mailchannels.net/tx/v1/send`, with `MAILCHANNELS_API_KEY` in the `X-Api-Key` header. Email uses the same durable outbox and delivery-status handling as webhook notifications. The adapter is implemented; a successful local test does not establish that your account or domain can deliver mail.
 
-## Where each step happens
+## Account and domain setup
 
-- DNS records: Cloudflare Dashboard -> your zone -> DNS
-- Worker secrets/vars: Wrangler CLI or Cloudflare Dashboard -> Workers -> your Worker -> Variables
-- CI updates (optional): GitHub -> Settings -> Secrets and variables -> Actions
+The current MailChannels Email API requires an account, an API key with the `api` scope, and Domain Lockdown for the sending domain. Create the key in the MailChannels Console, then follow its account-specific instructions for the `_mailchannels.<sending-domain>` TXT record. That record must authorize your MailChannels account or sender; a bare `v=mc1` value is not a complete configuration. See [Authentication](https://docs.mailchannels.com/email-api/authentication) and [Domain Lockdown](https://docs.mailchannels.com/email-api/domain-lockdown).
 
-## 1) Decide the sender domain
+Before a payment method is added, recipients are limited to verified Users in the MailChannels account. Check this condition for the intended test recipient; configuring Gmail as `MAIL_TO` does not create a sending credential. See the [current quickstart](https://docs.mailchannels.com/email-api/curl/quickstart).
 
-Choose the domain you will use in `MAIL_FROM`, e.g.
+Review MailChannels' current SPF, DKIM, and DMARC guidance for your sender domain. If updating SPF, merge the required authorization into the existing SPF record instead of creating a second one. Kanariya's current adapter does not provide DKIM signing fields. These DNS settings and the API key solve different parts of email authentication; DNS setup alone does not authenticate an API request.
 
-- `alerts@toppymicros.com`
+## Worker configuration
 
-All DNS records below must be set on that domain (or subdomain) in Cloudflare DNS.
-
-## 2) SPF record
-
-Add (or update) an SPF TXT record so it includes MailChannels:
-
-- **Type**: TXT
-- **Name**: `@` (root) or the specific subdomain
-- **Value** (example):
-
-```
-v=spf1 include:spf.mailchannels.net -all
-```
-
-If you already have SPF, **merge** the include into your existing record (do not create multiple SPF records).
-
-## 3) MailChannels domain verification (Domain Lockdown)
-
-Add the MailChannels verification TXT record:
-
-- **Type**: TXT
-- **Name**: `_mailchannels`
-- **Value**:
-
-```
-v=mc1
-```
-
-This allows MailChannels to send on behalf of your domain.
-
-## 4) Wait for DNS propagation
-
-It can take a few minutes for DNS changes to propagate.
-
-## 5) Configure Worker variables
-
-Set the sender/recipient variables on the Worker:
-
-- `MAIL_FROM` (e.g. `alerts@toppymicros.com`)
-- `MAIL_TO` (comma-separated list)
-- optional: `MAIL_FROM_NAME`, `MAIL_SUBJECT_PREFIX`
-
-Set them with Wrangler:
+Store the API key as a Worker secret:
 
 ```bash
-wrangler secret put MAIL_FROM
-wrangler secret put MAIL_TO
-wrangler secret put MAIL_FROM_NAME       # optional
-wrangler secret put MAIL_SUBJECT_PREFIX  # optional
+npx wrangler@4 secret put MAILCHANNELS_API_KEY
 ```
 
-## 6) Test
+Set the sender and recipients in the `[vars]` section of `wrangler.toml`, or in the matching deployment environment. Replace these example addresses with addresses for the verified sender domain and intended recipients:
 
-Trigger a canary hit and verify delivery:
-
-```bash
-BASE_URL="https://kanariya.toppymicros.com" ./scripts/smoke_test.sh
+```toml
+MAIL_FROM = "alerts@example.com"
+MAIL_TO = "operator@example.com,backup@example.com"
+MAIL_FROM_NAME = "Kanariya"
+MAIL_SUBJECT_PREFIX = "Kanariya alert"
 ```
 
-## References
+`MAIL_FROM` and `MAIL_TO` are required for sending; `MAIL_TO` is a comma-separated list. The display name and subject prefix are optional and have the defaults shown above. Treat recipient configuration according to your repository's privacy needs; Cloudflare-managed values may be preferable to committing personal addresses. Keep the deployment configuration consistent with whichever location owns those settings.
 
-MailChannels documentation may update. If sending fails, verify the latest DNS requirements in their docs.
+The GitHub deployment workflow syncs a nonempty repository secret named `MAILCHANNELS_API_KEY` to Cloudflare. It does not configure `MAIL_FROM`, `MAIL_TO`, `MAIL_FROM_NAME`, or `MAIL_SUBJECT_PREFIX`. Leaving the GitHub secret empty does not remove an existing Worker secret.
 
-## Do I need a MailChannels account?
+For local work, put only synthetic credentials in `.dev.vars` unless you intend to contact the provider. A configured local email target sends real requests when a hit or admin test queues a delivery.
 
-For the Cloudflare Workers send API (`https://api.mailchannels.net/tx/v1/send`),
-no separate MailChannels account is required. DNS verification (SPF + `_mailchannels`)
-is the key requirement. If you use MailChannels SMTP or marketing features, that
-may require a separate account.
+## Test and inspect delivery
+
+After deploying the configured Worker, create a registered token in Token Studio and use **Send test notification**. This action sends real **TEST** messages, records a test event, and leaves the token's detection count unchanged. It can also be called with the authenticated API:
+
+```text
+POST /admin/tokens/<registered-token>/test
+Authorization: Bearer <ADMIN_KEY>
+```
+
+The response contains an `eventId` and the initial delivery records. Inspect the token's event export after the alarm has run:
+
+```text
+GET /admin/export?token=<registered-token>
+Authorization: Bearer <ADMIN_KEY>
+```
+
+For the delivery with `type: "email"`, `accepted` means the API returned HTTP 2xx. Check the recipient's mailbox and the provider's delivery information separately; API acceptance does not confirm inbox arrival. The subject and body distinguish **TEST** from **DETECTION**, and the body includes the stable event and delivery IDs.
+
+## Failure handling
+
+If either sender or recipient configuration is present, Kanariya creates an email delivery record. Missing sender, recipients, or API key causes `configuration_error` without an outbound request. Check the record's fixed error code and HTTP status; provider response bodies and raw exceptions are not saved.
+
+Network errors, ten-second timeouts, HTTP `408`, `429`, and `5xx` are retried, with six total attempts by default. Other HTTP failures are terminal. A provider's `Retry-After` is honored up to 24 hours. See [Notifications in the README](README.md#notifications) for queue limits, backoff, and retention.
+
+Changing `MAIL_FROM` or `MAIL_TO` stops old queued email deliveries with `configuration_changed`. Rotating only `MAILCHANNELS_API_KEY` preserves the destination identity, so pending retries can use the new key. A delivery already marked `failed` is not automatically restarted; fix the settings and create a new test event. Interrupted sends can be duplicated, so use the event and delivery IDs to recognize repeated notifications.

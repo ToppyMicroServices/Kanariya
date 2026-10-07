@@ -1,0 +1,9 @@
+node_modules/
+.dev.vars*
+.wrangler/
+reports/
+*.cvenc
+*.pdf
+*.sealed.json
+src/pdfjs-assets.generated.js
+src/pdfjs-assets.generated.js.*.tmp

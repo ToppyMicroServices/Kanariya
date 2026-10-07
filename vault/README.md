@@ -1,0 +1,153 @@
+# Kanariya Vault
+
+An Access-authenticated document service that decrypts on the server, commits an encrypted audit record and notification job, then returns the document bytes. There is no client key endpoint. This is a separate Worker; the existing public canary endpoint is not an authorization or acknowledgement mechanism.
+
+**Status (2026-10-07):** the native Cloudflare notification candidate is active as private version `f9921a18-5a91-4af1-a97a-99a31b3208a6`, with source SHA-256 `dc71446d70cd91969e57b478d94b79f9dd184080ba01bbfb354e3919f02568ec` verified by readback. The owner confirmed both local dummy-test notifications in Proton's Spam folder. Inbox placement remains unverified. Activation preserved the original nine bindings, keys, runtime/settings, disabled public endpoints and root Proton mail DNS. Origin, Access, owner subject and dummy pins remain unconfigured, so production document viewing is inactive. No real CV access, Proton mailbox access, paid upgrade or additional notification send occurred during activation.
+
+**Previous deployment (2026-10-06):** the local canvas viewer displayed the reviewed dummy PDF in the browser that previously showed an empty native PDF frame. The exact tested bundle was deployed to the private Vault as version `49f347bc-7397-499f-9a80-3e6135ce4657`, with source hash `af59ef55d3164040909bca7a9c250b46d2d9df5aa3e8bd37ef2383bbf1bdd773` verified by readback. Two new independent 256-bit dummy-service keys were backed up separately in macOS Keychain, verified there, then added as `VAULT_WRAP_KEY` and `VAULT_AUDIT_KEY` secrets. Source deployment inherited all nine existing bindings and preserved the runtime, migration tag, settings and disabled public endpoints. Notification settings and the owner subject were absent. Origin, Access and dummy-pin values were invalid placeholders. Existing Drive archives and CV keys were unchanged.
+
+**Dummy-only rollout:** the service admits only one explicitly reviewed synthetic encrypted record. `DUMMY_DOCUMENT_ID` pins its UUID and `DUMMY_RECORD_SHA256` pins the SHA-256 of its exact uploaded bytes. Missing or malformed pins disable requests. A different document ID or changed object is rejected before any document key is imported, policy is decrypted, audit entry is written, or notification is queued. There is no unrestricted live-mode switch and no automatic activation of real CVs. Set pins only after checking the source fixture hash and its dummy-content QA report: a digest does not classify a document's contents. An administrator who changes the pins can select another record; this guard prevents accidental admission and object replacement, not administrator compromise.
+
+## Request flow
+
+```mermaid
+flowchart LR
+  Reader[Reader] --> Access[Cloudflare Access]
+  Access --> Vault[Vault Worker / per-document Durable Object]
+  Storage[Private encrypted R2 objects] --> Vault
+  Keys[Worker secret bindings] --> Vault
+  Vault --> Journal[Encrypted audit and notification jobs]
+  Journal --> Notify[Kanariya notification adapters]
+  Vault -->|PDF bytes after durable success commit| Reader
+```
+
+The Worker first limits document routes to the pinned dummy UUID, then verifies the Access JWT signature, issuer, audience, expiry and subject using `jose`. It ignores the unsigned email header. On each open, the exact R2 bytes must match the pinned digest before keys are imported or the encrypted policy is read. Document policies grant explicit Access subjects and an expiry time; a valid Access login alone does not grant document access. The browser uses a same-origin POST with a fresh request UUID, so an ordinary link preview does not decrypt the document.
+
+Before document decryption, the Durable Object commits an encrypted attempt, replay guard and delayed notification job. After successful decryption it commits the success outcome before returning PDF bytes. If this second commit fails, no PDF is returned; the attempt remains and its job can report `unknown`. A decryption failure reports `failed`. A lost HTTP response after the success commit does not prove the recipient received or read the document.
+
+Each distinct accepted open has its own server-generated event ID. Reusing a request UUID is rejected, including after an object restart. The ordinary canary's IP/UA deduplication does not apply. Notifications contain only a random event ID and fixed outcome, without document IDs, names, CV content, keys, user subjects, IPs or referers. Delivery adapters are shared with Kanariya; email, Slack, Discord and generic HTTPS webhooks are supported.
+
+## Notification guarantees
+
+`200` means the service decrypted the document and committed the audit + job. It does **not** mean an email reached an inbox or was read. A missing or malformed notification configuration, storage failure, full audit/queue capacity, or an unresolved terminal notification failure prevents new content releases.
+
+The viewer reports queue registration, not notification delivery. Email preflight rejects obvious address-format errors before document storage or keys are accessed. It does not verify DNS, provider credentials or inbox delivery.
+
+Alarms retry transient provider failures. A 2xx provider response records `accepted`; this is not a delivery receipt. After a terminal failure, the owner must explicitly repair/retry the notification before new opens. Alarms are at least once, so a crash after provider acceptance can cause duplicate messages. A 10-second unresolved attempt reports `unknown`, never a fabricated success.
+
+## Privacy and keys
+
+- Documents use an independent random AES-256-GCM data key. The data key and access policy are encrypted under `VAULT_WRAP_KEY` with separate authenticated contexts. Only the encrypted record is stored in R2.
+- Audit records, access subjects, request history and outbox details are encrypted with a separate `VAULT_AUDIT_KEY` before every Durable Object write. The wrapping and audit key values must differ. Only ciphertext, object IDs and alarm scheduling metadata persist outside that envelope.
+- Server keys and notification credentials belong in Worker secret bindings, not Wrangler vars, source control, uploaded objects or browser JavaScript. Sender and recipient addresses also belong in secret bindings. Binding separation is not an HSM or protection against a compromised Cloudflare administrator/Worker.
+- No code path returns a decryption key. There is no public provisioning API. Responses set `no-store`; the viewer passes the PDF bytes in memory to a same-origin PDF.js worker and renders pages on canvases. Closing, leaving the page or changing the link cancels rendering, destroys the loading task and clears canvas dimensions/references. There is no localStorage, sessionStorage, IndexedDB or service worker. Destroying browser objects is not a guarantee of immediate physical memory erasure.
+- Closing the viewer, leaving the page or changing the document link invalidates pending responses, so a late response cannot redisplay the old document. Canceling the browser request cannot undo a server-side decryption or notification job already committed.
+- The viewer intentionally displays plaintext to an authorized reader. These cache instructions do not prevent screenshots, downloads, OS swap, browser crash recovery, malicious extensions or retention by a permitted recipient. Browser disk-cache behavior has not been independently verified. A saved plaintext copy can be read again without this service.
+- Worker observability is disabled in the template; application errors use fixed codes. Cloudflare Access, account audit, billing, backup and infrastructure logs are a separate boundary. Review their actual retention and content before importing personal data. This change does not claim provider-wide absence of identity metadata.
+
+The wrapping key authorizes server-side decryption of the document key. The encrypted access policy must be read to check the grant; the PDF is not decrypted until authorization and the durable attempt commit succeed. The trusted service/operator can decrypt, so service compromise remains a material risk.
+
+## Configuration and rollout
+
+`wrangler.toml` deliberately has no production route and disables `workers.dev` and preview URLs. `wrangler.production.toml` identifies the provisioned account and private bucket, but keeps public endpoints disabled and invalid origin, Access and dummy-pin placeholders. Neither configuration activates document viewing. The deployment was built with Wrangler 4.136.3. Remote observability status was not established by the settings readback; the local configuration disables it.
+
+1. Select the target account, Access-protected HTTPS origin and private R2 bucket. Confirm the deployment scope and current provider costs. Keep the existing canary Worker and its routes separate.
+2. Set `PUBLIC_ORIGIN`, `ACCESS_ISSUER` and `ACCESS_AUDIENCE` to the actual Access application. Pin the same issuer/audience in the deployed Worker. Set the owner subject as secret `VAULT_OWNER_SUB` and review each reader's subject-based grant.
+3. Provision independent 256-bit base64 values for `VAULT_WRAP_KEY` and `VAULT_AUDIT_KEY` in the service's secret bindings. Keep recoverable protected backups outside the bucket. Do not rotate these by simply replacing the current values: existing encrypted objects/journals would become unreadable without a migration.
+4. Configure the notification provider after verifying the sender domain and recipient. Cloudflare uses `MAIL_PROVIDER=cloudflare`, `MAIL_FROM` and `MAIL_TO` secrets, and a `NOTIFY_EMAIL` send binding restricted to the verified recipient. It needs no MailChannels API key. MailChannels remains the default when `MAIL_PROVIDER` is absent; that path needs `MAILCHANNELS_API_KEY`, `MAIL_FROM`, `MAIL_TO` and optionally `MAIL_FROM_NAME`. No real recipient or API key is in the template.
+5. Prepare only the reviewed dummy PDF using fresh service test keys. Set `DUMMY_DOCUMENT_ID` to the sealed record UUID and `DUMMY_RECORD_SHA256` to the SHA-256 of the exact encrypted file uploaded to the private bucket. Hash the encrypted record, not the original PDF. Do not reformat JSON after hashing; whitespace changes also invalidate the pin. Invalid placeholder defaults deny all requests.
+6. Deploy and verify with that dummy: signature rejection, unauthorized document rejection, changed-record rejection, encrypted persistence, actual alert delivery, revocation, provider outage/recovery and viewer cache behavior. A replacement dummy requires an explicit pin update; there is no acceptance of arbitrary bucket contents.
+7. Keep real CVs and their Mac keys outside this deployment. Passing the dummy checks does not activate or migrate them. Any later real-CV rollout requires a separate explicit decision and revised admission policy after target/permissions/logging/recovery checks; this version provides no live-mode bypass.
+
+Drive remains an encrypted archive. This service uses a private R2 working copy to avoid embedding a personal Drive session or long-lived Google bearer token. Both copies remain ciphertext. The current `CVVAULT1` archive is deliberately not treated as a server record: version 2 uses a fresh data key, an encrypted access policy, and a wrapped key. No real archive has been converted in this change.
+
+`scripts/seal-document.mjs` is an owner-side preparation tool. Its bounded stdin JSON contains `sourcePath`, `outputDirectory`, `subjects`, `expiresAt` (epoch milliseconds), and `wrappingKey`. It opens the source without following a final symlink, writes only a new encrypted `UUID.sealed.json` with mode 0600, and prints only the new ID/ciphertext digest. Feed this through a trusted secret-store bridge, not pasted shell arguments, recorded terminal input, or a plaintext config file. It does not upload, send mail or update production state.
+
+## API and owner operations
+
+| Path | Method | Authorization and effect |
+| --- | --- | --- |
+| `/` and viewer assets | GET | Valid Access identity; no document decryption |
+| `/v1/documents/<uuid>/open` | POST | Pinned dummy ID and exact ciphertext digest, same-origin JSON `{"requestId":"<fresh-v4-uuid>"}`, document grant and expiry; audited decryption |
+| `/v1/documents/<uuid>/status` | GET | Owner only; counts/outcomes, no personal audit details |
+| `/v1/documents/<uuid>/revoke` | POST | Owner only, same-origin empty JSON `{}`; durable revocation |
+| `/v1/documents/<uuid>/retry-notifications` | POST | Owner only, same-origin `{}`; explicit rebinding of failed jobs to corrected configured destinations |
+
+Viewer links use the document UUID in the URL fragment (`/#<uuid>`), with no identity, filename, token or key in the URL. The subsequent API path contains an opaque document ID. Revocation blocks future requests; it cannot retract an in-flight response or an already saved copy. Revocation is currently irreversible through the API; publish a separately reviewed new object if needed.
+
+All document routes, including owner operations, are restricted to the configured dummy UUID. Replacing the encrypted object without updating its configured digest blocks subsequent opens.
+
+Limits: PDF only, up to 1 MiB; at most 50 grant subjects; 10 accepted requests per subject/document/minute; 100 pending jobs/document; 500 attempts and 1,000 jobs retained within a rolling 30-day window. Expired accepted entries are pruned on activity. Capacity exhaustion fails closed rather than deleting recent audit entries to keep serving. Pending/failed jobs are retained for owner handling. These are deliberate bounds, not a production throughput guarantee.
+
+## Verification
+
+```sh
+npm ci --ignore-scripts
+npm test
+node scripts/check-runtime.mjs /absolute/path/runtime-report.json
+```
+
+The runtime check requires globally installed Wrangler 4 and its bundled Miniflare, and permission to listen on loopback. It bundles with `--dry-run`, uses generated identities/keys and PDF-like synthetic bytes, intercepts outbound requests, and deletes its test state. It never sends a real notification or loads a real CV. The report starts at `running_not_verified`; unhandled runtime termination must not be interpreted as a pass.
+
+An optional third CLI argument may point to the reviewed `dummy-cv.pdf`. The checker accepts only the exact synthetic PDF SHA-256 `abe2ac634b12a6d7558ffe419f7cc311a262afc4fe8ef47b1b747faf7de05429`, records that hash in its report, and refuses other bytes before provisioning the runtime. Do not supply real CV paths.
+
+Local checks: authentication, expiry, object grants, origin/method constraints, cryptographic binding, storage/alarm failure, replay after restart, distinct notifications, metadata minimization, provider retries, terminal-failure handling and owner revocation. These are not a formal security audit, production Access verification, email inbox receipt or real-browser privacy certification.
+
+`npm test` also covers delayed viewer responses: close/page hide, a changed document fragment, body-reading cancellation and stale requests cannot recreate page canvases or overwrite a newer request's controls. These simulated browser checks do not establish standalone PDF-open notification behavior. The downloadable PDF has no automatic notification mechanism; detection occurs when the reader uses the authenticated service to decrypt it.
+
+The 2026-10-04 local web check displayed an empty native PDF frame even without the HTML CSP header; the underlying browser cause remains unknown. On 2026-10-06, the canvas renderer displayed all pages of the exact approved one-page dummy in that browser. The check used generated Access identities, encrypted synthetic storage and a mock notification provider. Cancellation kept a delayed response hidden. Production Access and email inbox delivery remain unverified.
+
+## Cloudflare email setup
+
+The Cloudflare adapter uses the native structured `send()` API; it does not add a MIME library or a provider API key. Its binding must be named `NOTIFY_EMAIL`. Restrict the binding to the intended recipient in the private deployment configuration:
+
+```toml
+[[send_email]]
+name = "NOTIFY_EMAIL"
+destination_address = "verified-recipient@example.invalid"
+```
+
+The address above is a placeholder, not a deployable configuration. Keep the actual sender and recipient out of the repository and terminal logs. Sender domain onboarding and recipient verification are separate from this local code change. `MAIL_FROM` and `MAIL_TO` use secret bindings, but the native binding's fixed sender and recipient restrictions remain Cloudflare account metadata.
+
+Vault messages contain only an opaque event ID and the decryption outcome. They include no document bytes, keys, reader identity or document URL. Cloudflare's returned message ID means the send was accepted; inbox delivery still needs a separate check. A native send cannot be cancelled by the adapter's deadline. If that deadline expires, the job remains failed with `email_timeout_unknown` for explicit owner retry; it may already have been accepted. Retrying can duplicate a message. Durable Object alarms can also repeat a send after a crash.
+
+On 2026-10-07, public DNS showed Proton Mail root MX records, Proton SPF and DMARC `p=reject` for `toppymicros.com`. The account dashboard showed Workers Free; Email Sending required Workers Paid, displaying USD 5/month plus usage.
+
+A later read of Email Routing showed that the zone was already Enabled, with `dmarc4all.toppymicros.com` Enabled and its Cloudflare MX/SPF records Locked. Root DNS was marked Misconfigured because the root receiving records use Proton Mail. Preserve this existing configuration; do not use Add missing records or remove Proton records to prepare notifications. Cloudflare documents free sending from Routing domains to verified destination addresses on every plan. A dedicated `notify.toppymicros.com` Routing subdomain and one verified owner recipient were selected as the first option. Sender examples are `kanariya@notify.example.invalid` for a subdomain and `kanariya@example.invalid` for a root domain; the actual addresses remain in private bindings. Review the new subdomain's actual DNS changes and verify a dummy notification's arrival before treating it as ready. The existing child does not prove that a root-domain sender can send successfully.
+
+After owner approval on 2026-10-07, `notify.toppymicros.com` was added to Email Routing. Its dashboard status is Enabled with DNS Locked. Authoritative DNS confirms three Cloudflare MX records and the child SPF record. The root Proton MX/SPF, strict DMARC policy and existing `dmarc4all` MX records match the earlier snapshot. The owner completed destination verification, and the dashboard now shows the connected owner Gmail address as Verified. No upgrade or real CV access was performed.
+
+The native adapter and fixed sender/recipient binding were uploaded as private version `8dec4909-e069-43e0-8b88-d09c8709feff`. Readback confirmed the exact candidate, inherited nine bindings and keys, runtime settings, private endpoints, and unchanged root mail DNS. At that stage, this version was inactive and `49f347bc-7397-499f-9a80-3e6135ce4657` remained active. A local run of the exact candidate decrypted the approved dummy through generated test identities and keys, but its live Cloudflare native notification failed. The matching Cloudflare lifecycle records Gmail's permanent `550 5.7.26` DMARC rejection; the corresponding Gmail event search found no receipt. The actual outgoing SPF and DKIM identities were not exposed by this evidence. The owner subsequently requested Proton Mail as the notification destination. Its receipt required a separate test; changing the recipient does not establish that sender authentication succeeds. Native delivery, inbox receipt and activation were pending at that stage. This test did not exercise production Access or production Vault decryption.
+
+The exact candidate passed 12 local workerd checks with Miniflare's native email simulator, plus seven separate mocked contract checks for provider changes and timeout handling. These checks do not establish Cloudflare delivery or inbox receipt. Email Sending remains an alternative; if it is later selected, disable Email preview before sending so the provider does not retain message-body previews. Delivery metadata and envelope addresses still pass through the provider.
+
+The selected Proton Mail destination was then verified in Cloudflare. One separate approved dummy decryption produced a Cloudflare lifecycle entry marked `Forwarded` to that destination at 02:34:12 JST on 2026-10-07. Its local test aborted a five-second owner-status request while the same Durable Object could still be awaiting the ten-second notification deadline. That timeout does not establish provider rejection, and the local job's acceptance was not observed. Inbox confirmation belongs to the owner; Proton mailbox access is outside this test's scope. Preserve the original unknown result and check delivery before any retry. The private active version was unchanged at that stage.
+
+The recipient-only configuration was uploaded as private version `f9921a18-5a91-4af1-a97a-99a31b3208a6`, initially inactive. Readback verified the candidate source, original nine bindings inherited without reading their secret values, runtime/migration settings, disabled public endpoints and unchanged root mail DNS. Only `NOTIFY_EMAIL` and `MAIL_TO` were replaced; the existing sender and provider were inherited. A separate local regression reproduced the five-second status timeout and observed one accepted simulated native send after 6.546 seconds with the revised status-only wait. Automatic approval review initially blocked one additional real notification because its explicit authorization was absent. After the owner approved that additional message, the revised test decrypted the approved dummy once and observed one accepted live Cloudflare native notification, with no status-observation timeout or manual retry. Cloudflare marked that second message `Forwarded` at 02:47:18 JST. The owner confirmed both exact test event IDs in Proton's Spam folder. This establishes mailbox receipt for these two messages; Inbox placement and the reason for Spam classification remain unverified. The first local acceptance observation remains unknown. Neither test exercised production Access or production decryption, and no Proton account or mailbox was accessed by the agent.
+
+The `notify` label is an optional domain choice, used here to separate notification routing from the existing Proton receiving records. Cloudflare documents free native sending from Routing domains to verified destinations; its documentation does not establish whether the current root domain's Enabled/DNS Misconfigured state permits that sending. The actual outgoing authentication identities were not observed, so replacing the sender with a root-domain address is an untested alternative, not a confirmed fix for Spam. The owner may allow the exact notification sender in Proton; no provider, sender or root mail DNS change has been made in response to the Spam result. See [Cloudflare's limits](https://developers.cloudflare.com/email-service/platform/limits/) and [Proton's sender lists](https://proton.me/support/spam-filtering).
+
+A follow-up authoritative DNS read found the child SPF record, no child DMARC record, and no TXT or CNAME at `cf2024-1._domainkey.notify.toppymicros.com`. A TXT record exists at the same selector under the root domain. The root policy specifies `sp=reject`, `adkim=s` and `aspf=s`. If the actual validated DKIM signature uses the root domain, it does not strictly align with the child's From domain; an independently passing aligned SPF result could still satisfy DMARC. This is a candidate explanation for Spam, not a diagnosis: the message's actual signing domain, selector and recipient authentication results remain unobserved. Mailbox receipt does not validate sender authentication. No DNS or sender change was made during this review. See [DMARC alignment](https://www.rfc-editor.org/rfc/rfc9989.html#section-4.4).
+
+After both owner-reported receipts were linked to their exact events, the notification candidate was activated at 100% and read back as `f9921a18-5a91-4af1-a97a-99a31b3208a6`. The activation validator records mailbox receipt with an explicit Spam folder; it does not claim Inbox placement. All original source, native acceptance, same-event, private endpoint, binding and root mail DNS checks remained in place. Activation sent no additional notification. Production Access, owner subject and dummy pins remain unconfigured, so this is a private configuration deployment rather than a working production document-sharing service.
+
+See the current [binding API](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/), [binding restrictions](https://developers.cloudflare.com/email-service/configuration/send-bindings/), [domain configuration](https://developers.cloudflare.com/email-service/configuration/domains/) and [plan conditions](https://developers.cloudflare.com/email-service/platform/pricing/).
+
+## Canvas viewer
+
+The display module, worker module and standard fonts are pinned to PDF.js 6.4.299. `scripts/prepare-viewer-assets.mjs` verifies the installed version and exact upstream file hashes, then generates an ignored asset map. Both Wrangler builds run this preparation. `npm test` prepares it too; run `npm run prepare:viewer` before importing the Worker directly in another local tool. The lockfile and preparation script must be updated together when reviewing a dependency upgrade. Upstream licenses are served unchanged.
+
+Six exact renderer/font/license paths under `/pdfjs/` require the same Access and dummy-pin checks as the viewer. Assets come from this Worker, with no CDN. CSP permits a same-origin worker while retaining the existing script/connect restrictions; it does not enable inline scripts or dynamic evaluation. The viewer uses glyph outlines, disables XFA and WASM, and does not install PDF scripting, link, attachment, form or annotation UI.
+
+The current asset set supports the reviewed dummy's Helvetica and Helvetica-Bold text/vector content. Other fonts, CMaps, scanned images and general CV PDFs are not certified by this check. Canvas pages have no selectable/searchable text or screen-reader text layer. Real-CV admission remains disabled independently of this viewer change.
+
+The browser accepts at most 1 MiB, 20 pages, 4 million pixels per page and 12 million retained page pixels. Fetch/loading/rendering has a 30-second deadline. These bounds limit retained canvases and ordinary work; they do not establish an absolute PDF parser memory limit. A failure after the server's successful response is reported as a display failure with decryption/notification registration already completed.
+
+Implementation references: [PDF.js rendering example](https://mozilla.github.io/pdf.js/examples/) and [pinned release](https://github.com/mozilla/pdf.js/releases/tag/v6.4.299).
+
+## References
+
+- [Cloudflare Access JWT verification](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/)
+- [Durable Object storage](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
+- [Durable Object alarms](https://developers.cloudflare.com/durable-objects/api/alarms/)
+- [OWASP logging guidance](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html)

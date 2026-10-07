@@ -1,0 +1,17 @@
+{
+  "name": "kanariya-vault",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare:viewer": "node scripts/prepare-viewer-assets.mjs",
+    "test": "npm run prepare:viewer && node --test tests/*.node.mjs",
+    "test:runtime": "node scripts/check-runtime.mjs"
+  },
+  "dependencies": {
+    "jose": "6.2.12",
+    "pdfjs-dist": "6.4.299"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

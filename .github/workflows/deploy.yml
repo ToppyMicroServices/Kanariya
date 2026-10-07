@@ -23,7 +23,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Install dependencies
@@ -33,7 +33,10 @@ jobs:
         run: npm test
 
       - name: Install Wrangler
-        run: npm install -g wrangler@3
+        run: npm install -g wrangler@4
+
+      - name: Run local runtime checks
+        run: npm run test:runtime
 
       - name: Validate Cloudflare secrets
         env:
@@ -59,6 +62,9 @@ jobs:
           IP_HMAC_KEY: ${{ secrets.IP_HMAC_KEY }}
           ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MAILCHANNELS_API_KEY: ${{ secrets.MAILCHANNELS_API_KEY }}
         run: |
           set -euo pipefail
           if [ -n "${IP_HMAC_KEY}" ]; then
@@ -67,9 +73,11 @@ jobs:
           if [ -n "${ADMIN_KEY}" ]; then
             printf '%s' "${ADMIN_KEY}" | wrangler secret put ADMIN_KEY
           fi
-          if [ -n "${WEBHOOK_URL}" ]; then
-            printf '%s' "${WEBHOOK_URL}" | wrangler secret put WEBHOOK_URL
-          fi
+          for secret_name in WEBHOOK_URL SLACK_WEBHOOK_URL DISCORD_WEBHOOK_URL MAILCHANNELS_API_KEY; do
+            if [ -n "${!secret_name}" ]; then
+              printf '%s' "${!secret_name}" | wrangler secret put "${secret_name}"
+            fi
+          done
 
       - name: Deploy Worker
         env:
