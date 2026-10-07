@@ -47,11 +47,11 @@ Install the repository's existing dependencies and run its tests:
 ```bash
 npm ci
 npm test
-# With Wrangler 4 installed globally:
+# With Wrangler 4.58.0 installed globally:
 npm run test:runtime
 ```
 
-The runtime check bundles locally with `--dry-run`, starts a temporary workerd instance, and intercepts all notification requests with local fixtures. It checks actual SQLite transactions and alarm retries without contacting providers. CI runs it before deployment; `npm run test:runtime -- --report <path>` also saves its result.
+The runtime check bundles locally with `--dry-run`, starts a temporary workerd instance, and intercepts all notification requests with local fixtures. It checks actual SQLite transactions and alarm retries without contacting providers. CI pins the locally verified Wrangler 4.58.0 and runs this check before deployment; `npm run test:runtime -- --report <path>` also saves its result. The checker uses Miniflare 4's API. Wrangler 4.148.0 bundles Miniflare 5 and requires a separate harness update before it can be used here.
 
 Create `.dev.vars` in the repository root. These values are synthetic and for local use only; there is no checked-in `.dev.vars.example`:
 

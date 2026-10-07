@@ -33,7 +33,7 @@ jobs:
         run: npm test
 
       - name: Install Wrangler
-        run: npm install -g wrangler@4
+        run: npm install -g wrangler@4.58.0
 
       - name: Run local runtime checks
         run: npm run test:runtime

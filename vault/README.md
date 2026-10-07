@@ -87,7 +87,7 @@ npm test
 node scripts/check-runtime.mjs /absolute/path/runtime-report.json
 ```
 
-The runtime check requires globally installed Wrangler 4 and its bundled Miniflare, and permission to listen on loopback. It bundles with `--dry-run`, uses generated identities/keys and PDF-like synthetic bytes, intercepts outbound requests, and deletes its test state. It never sends a real notification or loads a real CV. The report starts at `running_not_verified`; unhandled runtime termination must not be interpreted as a pass.
+The runtime check requires globally installed Wrangler with Miniflare 4, and permission to listen on loopback. It passed with Wrangler 4.58.0; Wrangler 4.148.0 bundles Miniflare 5 and is incompatible with this checker. It bundles with `--dry-run`, uses generated identities/keys and PDF-like synthetic bytes, intercepts outbound requests, and deletes its test state. It never sends a real notification or loads a real CV. The report starts at `running_not_verified`; unhandled runtime termination must not be interpreted as a pass.
 
 An optional third CLI argument may point to the reviewed `dummy-cv.pdf`. The checker accepts only the exact synthetic PDF SHA-256 `abe2ac634b12a6d7558ffe419f7cc311a262afc4fe8ef47b1b747faf7de05429`, records that hash in its report, and refuses other bytes before provisioning the runtime. Do not supply real CV paths.
 
