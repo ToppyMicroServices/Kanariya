@@ -17,7 +17,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 function viewer(options = {}) {
-  const elements = Object.fromEntries(["open", "close", "download", "status", "document", "unlock-form", "password", "unlock", "logout"].map(id => [id, {
+  const elements = Object.fromEntries(["open", "close", "download", "status", "deadline", "document", "unlock-form", "password", "unlock", "logout"].map(id => [id, {
     hidden: id === "close" || id === "document", disabled: false, textContent: "", value: "",
     clientWidth: options.clientWidth ?? 1000, children: [], listeners: new Map(),
     addEventListener(name, fn) { this.listeners.set(name, fn); },
@@ -159,13 +159,13 @@ test("open uses an uncached same-origin POST and distinguishes queued from rende
   assert.match(JSON.parse(options.body).requestId, /^[0-9a-f-]{36}$/);
   assert.equal(v.globalWorkerOptions.workerSrc, "/pdfjs/pdf.worker.min.mjs");
   response.resolve(v.response()); await v.wait("render");
-  assert.match(v.status.textContent, /所有者への通知を受け付けました。文書を表示しています/);
+  assert.match(v.status.textContent, /文書提供者への通知を受け付けました。文書を表示しています/);
   assert.equal(v.document.children.length, 0); assert.equal(v.document.hidden, true);
   rendering.resolve(); await opening;
   assert.equal(v.document.children.length, 1); assert.equal(v.document.hidden, false); assert.equal(v.open.disabled, false);
   assert.equal(v.canvases[0].attributes.get("aria-label"), "1 / 1 ページ");
   assert.equal(v.pdfPages[0].cleanupCalls, 1);
-  assert.equal(v.status.textContent, "文書を表示しました（1ページ）。閲覧を記録し、所有者への通知を受け付けました。");
+  assert.equal(v.status.textContent, "文書を表示しました（1ページ）。閲覧を記録し、文書提供者への通知を受け付けました。");
   assert.equal(v.timers.size, 1); // Policy expiry remains armed while displayed.
 });
 for (const event of ["close", "pagehide", "hashchange", "popstate", "visibilitychange"]) {
@@ -339,14 +339,14 @@ test("an old queued timeout callback cannot close a newer open", async () => {
 });
 
 test("both pages state copy limitations and keep Access and shared-password entry points distinct", () => {
-  assert.match(html, /Cloudflare Access/); assert.doesNotMatch(html, /unlock-form/);
-  assert.match(passwordHtml, /共有用パスワード/); assert.match(passwordHtml, /id="unlock-form"/);
+  assert.match(html, /認証済みアカウント/); assert.doesNotMatch(html, /unlock-form/);
+  assert.match(passwordHtml, /閲覧用パスワード/); assert.match(passwordHtml, /id="unlock-form"/);
   assert.match(passwordHtml, /type="password" autocomplete="off"/);
   assert.match(passwordHtml, /id="open" type="button" disabled/);
   assert.match(passwordHtml, /src="\/p\/assets\/viewer.js"/);
   assert.match(passwordHtml, /href="\/p\/assets\/viewer.css"/);
   for (const source of [html, passwordHtml]) {
-    assert.match(source, /保存したPDFやスクリーンショットは取り消せません/);
+    assert.match(source, /保存済みのPDFやスクリーンショットには閲覧期限は適用されず、回収もできません/);
     assert.doesNotMatch(source, /PDF暗号化パスワード|type="file"|download=|window.print/);
   }
   for (const source of [js, passwordJs]) assert.doesNotMatch(source, /localStorage|sessionStorage|indexedDB|document.cookie|console\./);
@@ -365,7 +365,7 @@ test("password unlock erases the input immediately and does not open or audit a 
   first.resolve(v.sessionResponse()); await unlocking;
   assert.equal(v.requests.length, 1); assert.equal(v.loadingTasks.length, 0); assert.equal(v.open.disabled, false);
   assert.equal(v["unlock-form"].hidden, true); assert.equal(v.logout.hidden, false); assert.equal(v.password.value, "");
-  assert.match(v.status.textContent, /ロックを解除しました/); assert.equal(v.globalWorkerOptions.workerSrc, "/p/assets/pdfjs/pdf.worker.min.mjs");
+  assert.match(v.status.textContent, /認証が完了しました/); assert.equal(v.globalWorkerOptions.workerSrc, "/p/assets/pdfjs/pdf.worker.min.mjs");
 });
 
 test("password Open requires explicit unlock, then uses a fresh same-origin audited POST", async () => {
@@ -420,7 +420,7 @@ for (const settings of [
     const v = viewer({ passwordMode: true, fetchResult: (_n, _response, sessionResponse) => Promise.resolve(sessionResponse(settings)) });
     await v.unlockDocument(); assertClosed(v, true); assert.equal(v.password.value, "");
     assert.equal(v.unlock.disabled, false); assert.equal(v.logout.hidden, true); assert.equal(v.timers.size, 0);
-    assert.match(v.status.textContent, /ロックを解除できませんでした/);
+    assert.match(v.status.textContent, /認証できませんでした/);
   });
 }
 
@@ -641,3 +641,43 @@ for (const failure of ['unauthorized', 'renamed', 'expired', 'oversized', 'wrong
     assert.equal(v.objectURLs.size, 0);
   });
 }
+
+
+test("document deadline is displayed in Japan time, independently of a shorter login session", async () => {
+  const v = viewer({ passwordMode: true, now: Date.UTC(2026, 9, 9, 12) });
+  assert.equal(v.deadline.textContent, "閲覧期限：認証後に表示します。");
+  await v.unlockDocument();
+  assert.equal(v.deadline.textContent, "閲覧期限：2026/10/09 21:10:00（日本時間）");
+  await v.openDocument();
+  assert.equal(v.deadline.textContent, "閲覧期限：2026/10/09 21:10:00（日本時間）");
+  v.advance(300000); await v.fireTimer(300000);
+  assertClosed(v, true); assert.equal(v.deadline.textContent, "閲覧期限：認証後に表示します。");
+});
+
+test("Access displays the server document deadline and clears it on close", async () => {
+  const v = viewer({ now: Date.UTC(2026, 9, 9, 12) });
+  assert.equal(v.deadline.textContent, "閲覧期限：文書を開く際に表示します。");
+  await v.openDocument();
+  assert.equal(v.deadline.textContent, "閲覧期限：2026/10/09 21:10:00（日本時間）");
+  v.closeDocument(); assert.equal(v.deadline.textContent, "閲覧期限：文書を開く際に表示します。");
+});
+
+test("late unlock cannot restore a deadline after navigation", async () => {
+  const result = deferred(), v = viewer({ passwordMode: true, fetchResult: () => result.promise });
+  const unlocking = v.unlockDocument(); v.event("pagehide");
+  result.resolve(v.sessionResponse()); await unlocking;
+  assert.equal(v.deadline.textContent, "閲覧期限：認証後に表示します。"); assertClosed(v, true);
+});
+
+test("unrepresentable calendar dates do not interrupt valid session controls", async () => {
+  const v = viewer({ passwordMode: true, fetchResult: (_n, _response, sessionResponse) => Promise.resolve(sessionResponse({ value: { expiresAt: Number.MAX_SAFE_INTEGER, sessionExpiresAt: 1800000300000 } })) });
+  await v.unlockDocument();
+  assert.equal(v.open.disabled, false); assert.equal(v.deadline.textContent, "閲覧期限：日時を表示できません。");
+});
+
+test("status updates show a shortened document deadline and logout clears it", async () => {
+  const v = viewer({ passwordMode: true, now: Date.UTC(2026, 9, 9, 12), fetchResult: (_n, response, sessionResponse, url, request) => Promise.resolve(url.endsWith("/open") ? response() : url.endsWith("/status") ? sessionResponse({ value: { expiresAt: Date.UTC(2026, 9, 9, 12, 2), sessionExpiresAt: Date.UTC(2026, 9, 9, 12, 5) } }) : sessionResponse()) });
+  await v.unlockDocument(); await v.openDocument(); await v.fireTimer(15000);
+  assert.equal(v.deadline.textContent, "閲覧期限：2026/10/09 21:02:00（日本時間）");
+  await v.logOutDocument(); assert.equal(v.deadline.textContent, "閲覧期限：認証後に表示します。");
+});
