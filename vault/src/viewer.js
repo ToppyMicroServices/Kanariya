@@ -8,7 +8,7 @@ function page(password) {
 <body>
 <header class="site-header"><div class="header-inner"><a class="brand" href="https://www.toppymicros.com/" target="_blank" rel="noopener noreferrer" aria-label="ToppyMicroServicesのサイト（新しいタブ）"><img src="${assets}/brand.png" width="32" height="32" alt=""><span>ToppyMicroServices</span></a><span class="service-name">Kanariya</span></div></header>
 <main id="main"><div class="intro"><p class="eyebrow">KANARIYA · DOCUMENT SHARING</p><h1>文書の閲覧</h1><p class="intro-copy">共有された文書を、こちらからご確認いただけます。</p></div>
-<section class="viewer-card" aria-label="文書へのアクセス">${login}<div class="actions"><button id="open" type="button"${password ? " disabled" : ""} class="primary">文書を開く<span aria-hidden="true"> →</span></button><button id="close" type="button" hidden>閉じる</button>${password ? '<button id="logout" type="button" class="quiet" hidden>ログアウト</button>' : ""}</div><p id="status" role="status" aria-live="polite" aria-atomic="true"></p><div class="viewing-notice"><p>文書を開くと、閲覧を記録し、所有者への通知を受け付けます。</p><details><summary>保存した文書について</summary><p>保存したPDFやスクリーンショットは取り消せません。保存したコピーの再閲覧は検知できません。</p></details></div></section>
+<section class="viewer-card" aria-label="文書へのアクセス">${login}<div class="actions"><button id="open" type="button"${password ? " disabled" : ""} class="primary">文書を開く<span aria-hidden="true"> →</span></button><button id="download" type="button" hidden>PDFを保存</button><button id="close" type="button" hidden>閉じる</button>${password ? '<button id="logout" type="button" class="quiet" hidden>ログアウト</button>' : ""}</div><p id="status" role="status" aria-live="polite" aria-atomic="true"></p><div class="viewing-notice"><p>文書を開く・保存する操作を記録し、所有者への通知を受け付けます。</p><details><summary>保存した文書について</summary><p>開示先が設定された文書は、宛名入りのPDFとして保存できます。保存したPDFやスクリーンショットは取り消せません。保存したコピーの再閲覧は検知できません。</p></details></div></section>
 <div id="document" aria-label="保護文書のページ" hidden></div><noscript><p class="noscript">文書の表示にはJavaScriptが必要です。</p></noscript></main>
 <footer class="site-footer"><span>ToppyMicroServices OÜ</span><span>Document sharing · Kanariya</span></footer><script src="${assets}/viewer.js" type="module"></script></body></html>`;
 }
@@ -50,15 +50,23 @@ function script(password) {
 "use strict";
 GlobalWorkerOptions.workerSrc="${assets}/pdfjs/pdf.worker.min.mjs";
 const passwordMode=${password},fontPath="${assets}/pdfjs/standard_fonts/";
-const openButton=document.getElementById("open"),closeButton=document.getElementById("close"),status=document.getElementById("status"),pages=document.getElementById("document");
+const openButton=document.getElementById("open"),closeButton=document.getElementById("close"),downloadButton=document.getElementById("download"),status=document.getElementById("status"),pages=document.getElementById("document");
 const form=document.getElementById("unlock-form"),passwordInput=document.getElementById("password"),unlockButton=document.getElementById("unlock"),logoutButton=document.getElementById("logout");
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_BYTES=1048576,MAX_PAGES=20,MAX_PAGE_PIXELS=4000000,MAX_TOTAL_PIXELS=12000000,MAX_TIMER=2147483647;
 let active=null,pending=null,auth=null,authTimer=null,generation=0;
+const downloadURLs=new Set();
+function revokeDownload(url){URL.revokeObjectURL(url);downloadURLs.delete(url);}
+function downloadName(response){
+ try{const encoded=response.headers.get("x-vault-download-filename");if(!encoded||encoded.length>1024)return null;
+ const name=decodeURIComponent(encoded);if(name.length>200||!name.startsWith("CV_")||!name.endsWith(".pdf")||/[\\\\/:*?"<>|\\x00-\\x1f\\x7f-\\x9f\\u061c\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069]/.test(name))return null;return name;
+ }catch{return null;}
+}
 function route(){return location.pathname+location.search+location.hash;}
 function documentId(){const id=passwordMode?(location.pathname.match(/^\\/p\\/([^/]+)$/)?.[1]||""):location.hash.slice(1);return UUID.test(id)?id:null;}
 function controls(){
  openButton.disabled=Boolean(pending||(active&&active.busy)||(passwordMode&&!auth));closeButton.hidden=!active;
+ downloadButton.hidden=!active?.downloadFilename;downloadButton.disabled=Boolean(pending||active?.busy);
  if(passwordMode){form.hidden=Boolean(auth);unlockButton.disabled=Boolean(pending);passwordInput.disabled=Boolean(pending);logoutButton.hidden=!auth&&pending?.kind!=="logout";logoutButton.disabled=Boolean(pending);}
 }
 function release(session){
@@ -72,6 +80,7 @@ function reset(lock=false){
  generation++;release(active);active=null;
  if(pending){pending.controller.abort();clearTimeout(pending.timer);pending=null;}
  pages.replaceChildren();pages.hidden=true;
+ for(const url of downloadURLs)revokeDownload(url);
  if(lock){clearTimeout(authTimer);authTimer=null;auth=null;}
  if(passwordInput)passwordInput.value="";
  controls();
@@ -114,6 +123,30 @@ async function checkStatus(session){
  finally{clearTimeout(session.statusTimer);}
 }
 closeButton.addEventListener("click",()=>{reset();status.textContent="表示を閉じました。";});
+downloadButton.addEventListener("click",async()=>{
+ const session=active;if(pending||!session||session.busy||!session.downloadFilename||!current(session))return;
+ const request={kind:"download",id:session.id,route:route(),controller:new AbortController(),generation,expiresAt:session.expiresAt,timer:null};
+ pending=request;controls();status.textContent="権限を確認してPDFを準備しています…";
+ request.timer=setTimeout(()=>{if(current(request,true)){reset(true);status.textContent="PDFの保存が時間内に開始できませんでした。";}},30000);
+ let bytes=null,url=null,link=null;
+ try{
+  const path=passwordMode?"/p/"+request.id+"/open":"/v1/documents/"+request.id+"/open";
+  const response=await fetch(path,requestOptions(request,"POST",JSON.stringify({requestId:crypto.randomUUID()})));
+  if(!current(request,true)||!current(session))return;
+  if(!response.ok||!response.headers.get("content-type")?.startsWith("application/pdf")||downloadName(response)!==session.downloadFilename)throw new Error();
+  const expiresAt=timestamp(response.headers.get("x-vault-expires-at"));
+  request.expiresAt=Math.min(request.expiresAt,passwordMode?applyTimes({expiresAt,sessionExpiresAt:response.headers.get("x-vault-session-expires-at")}):expiresAt);
+  session.expiresAt=Math.min(session.expiresAt,request.expiresAt);armExpiry(session);
+  const declared=response.headers.get("content-length");if(declared&&(!/^\\d+$/.test(declared)||Number(declared)>MAX_BYTES))throw new Error();
+  bytes=new Uint8Array(await response.arrayBuffer());
+  if(!current(request,true)||!current(session))return;if(!bytes.length||bytes.length>MAX_BYTES)throw new Error();
+  url=URL.createObjectURL(new Blob([bytes],{type:"application/pdf"}));downloadURLs.add(url);
+  link=document.createElement("a");link.href=url;link.download=session.downloadFilename;link.hidden=true;document.body.append(link);link.click();link.remove();link=null;
+  const savedURL=url;setTimeout(()=>revokeDownload(savedURL),1000);url=null;
+  pending=null;controls();status.textContent="宛名入りPDFの保存を開始しました。所有者への通知を受け付けました。";
+ }catch{if(current(request,true)){reset(true);status.textContent="PDFを保存できませんでした。もう一度文書を開いてください。";}}
+ finally{bytes?.fill(0);link?.remove();if(url)revokeDownload(url);clearTimeout(request.timer);}
+});
 addEventListener("pagehide",()=>reset(true));
 addEventListener("pageshow",event=>{if(event.persisted)reset(true);});
 addEventListener("hashchange",changed);addEventListener("popstate",changed);
@@ -190,6 +223,7 @@ openButton.addEventListener("click",async()=>{
    pages.append(canvas);pages.hidden=false;page.cleanup();
    if(passwordMode&&number===1)pollLater(session);
   }
+  session.downloadFilename=downloadName(response);
   status.textContent="文書を表示しました（"+pdf.numPages+"ページ）。閲覧を記録し、所有者への通知を受け付けました。";
  }catch{if(current(session)){reset(passwordMode);status.textContent=registered?"閲覧の記録と通知の受付は完了しましたが、文書を表示できませんでした。":"文書を開けませんでした。権限、期限、サービスの状態をご確認ください。";}}
  finally{clearTimeout(session.timer);if(current(session)){session.busy=false;controls();}else release(session);}

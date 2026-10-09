@@ -9,9 +9,9 @@ import { fileURLToPath } from "node:url";
 import { MAX_PDF_BYTES, newKey, importKey, readPolicy, decryptDocument, utf8 } from "../src/crypto.js";
 import { verifyPassword } from "../src/password.js";
 const script = fileURLToPath(new URL("../scripts/seal-document.mjs", import.meta.url));
-function run(input) {
+function run(input, env = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [script], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [script], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...env } });
     let stdout = "", stderr = "";
     child.stdout.on("data", x => { stdout += x; }); child.stderr.on("data", x => { stderr += x; });
     child.on("error", reject); child.on("close", code => resolve({ code, stdout, stderr }));
@@ -39,6 +39,67 @@ test("provisioning writes only authenticated ciphertext and redacts errors", asy
     const denied = await run({ ...request, sourcePath: join(root, "symlink.pdf") });
     assert.equal(denied.code, 1); assert.equal(denied.stdout, ""); assert.deepEqual(JSON.parse(denied.stderr), { status: "failed", code: "provisioning_failed" });
     assert.equal((await readdir(outputDirectory)).length, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("named provisioning watermarks in memory before encryption without passing credentials to the subprocess", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vault-synthetic-recipient-provision-"));
+  try {
+    const outputDirectory = join(root, "sealed"); await mkdir(outputDirectory);
+    const sourcePath = join(root, "synthetic-private-source.pdf"), source = utf8("%PDF-1.4\nSYNTHETIC-UNMARKED\n");
+    const recipientName = "株式会社テスト 採用担当", stamped = utf8("%PDF-1.4\nSYNTHETIC-WATERMARKED\n");
+    await writeFile(sourcePath, source);
+    const runtime = join(root, "synthetic-watermark-runtime");
+    await writeFile(runtime, `#!${process.execPath}\n(async()=>{let input="";process.stdin.setEncoding("utf8");for await(const chunk of process.stdin)input+=chunk;
+const value=JSON.parse(input);
+if(Object.keys(value).sort().join(",")!=="fontPath,pdfBase64,recipientName"||value.recipientName!==${JSON.stringify(recipientName)}||value.fontPath!=="synthetic-font"||Buffer.from(value.pdfBase64,"base64").toString()!==${JSON.stringify(Buffer.from(source).toString())}||process.env.KANARIYA_SYNTHETIC_SECRET)process.exit(1);
+process.stdout.write(Buffer.from(${JSON.stringify(Buffer.from(stamped).toString())}));})();\n`, { mode: 0o700 });
+    const request = { outputDirectory, sourcePath, subjects: [], authMode: "password", password: "synthetic-password-only",
+      expiresAt: Date.now() + 60000, wrappingKey: newKey(), recipientName: ` ${recipientName} `, watermarkFontPath: "synthetic-font" };
+    const result = await run(request, { KANARIYA_WATERMARK_PYTHON: runtime, KANARIYA_SYNTHETIC_SECRET: "must-not-reach-watermark-process" });
+    assert.equal(result.code, 0); assert.equal(result.stderr, "");
+    const output = JSON.parse(result.stdout), stored = await readFile(join(outputDirectory, `${output.id}.sealed.json`), "utf8");
+    assert.deepEqual(Object.keys(output).sort(), ["ciphertextSha256", "id", "status"]);
+    for (const secret of [recipientName, request.password, request.wrappingKey, sourcePath, "SYNTHETIC-WATERMARKED", "synthetic-font"]) {
+      assert.ok(!stored.includes(secret)); assert.ok(!result.stdout.includes(secret));
+    }
+    const record = JSON.parse(stored), key = await importKey(request.wrappingKey), policy = await readPolicy(record, output.id, key);
+    assert.equal(policy.recipientName, recipientName); assert.equal(policy.size, stamped.length);
+    assert.deepEqual(await decryptDocument(record, key, policy), stamped);
+    assert.deepEqual(new Uint8Array(await readFile(sourcePath)), source);
+    assert.deepEqual((await readdir(root)).sort(), ["sealed", "synthetic-private-source.pdf", "synthetic-watermark-runtime"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("watermark failures, oversized output, and invalid recipients cannot fall back to an unmarked record", async () => {
+  const root = await mkdtemp(join(tmpdir(), "vault-synthetic-watermark-failure-"));
+  try {
+    const outputDirectory = join(root, "sealed"); await mkdir(outputDirectory);
+    const sourcePath = join(root, "synthetic-private-source.pdf"); await writeFile(sourcePath, "%PDF-synthetic-unmarked");
+    const runtime = join(root, "synthetic-watermark-runtime");
+    const request = { outputDirectory, sourcePath, subjects: ["synthetic-subject"], expiresAt: Date.now() + 60000,
+      wrappingKey: newKey(), recipientName: "株式会社テスト", watermarkFontPath: "synthetic-font" };
+    for (const body of [
+      'process.stderr.write("sensitive child error");process.exit(1);',
+      'process.stdin.resume();process.stdout.write("not-a-pdf");',
+      `process.stdin.resume();process.stdout.write(Buffer.alloc(${MAX_PDF_BYTES + 1},65));`,
+    ]) {
+      await writeFile(runtime, `#!${process.execPath}\n${body}\n`, { mode: 0o700 });
+      const result = await run(request, { KANARIYA_WATERMARK_PYTHON: runtime });
+      assert.equal(result.code, 1); assert.equal(result.stdout, "");
+      assert.deepEqual(JSON.parse(result.stderr), { status: "failed", code: "provisioning_failed" });
+      assert.deepEqual(await readdir(outputDirectory), []);
+    }
+    for (const change of [{ recipientName: "../forged" }, { recipientName: "界".repeat(61) }, { recipientName: null },
+      { watermarkFontPath: 1 }, { watermarkFontPath: "" }]) {
+      const result = await run({ ...request, ...change }, { KANARIYA_WATERMARK_PYTHON: join(root, "missing-runtime") });
+      assert.equal(result.code, 1); assert.equal(result.stdout, "");
+      assert.deepEqual(JSON.parse(result.stderr), { status: "failed", code: "provisioning_failed" });
+      assert.deepEqual(await readdir(outputDirectory), []);
+    }
+    delete request.recipientName;
+    const fontWithoutName = await run(request);
+    assert.equal(fontWithoutName.code, 1); assert.deepEqual(await readdir(outputDirectory), []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

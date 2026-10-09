@@ -132,3 +132,18 @@ test("document sealing accepts the exact PDF size cap and rejects larger plainte
   const oversized = new Uint8Array(MAX_PDF_BYTES + 1); oversized.set(bytes);
   await assert.rejects(() => sealDocument({ ...options, bytes: oversized }, key), /invalid_policy/);
 });
+test("recipient metadata is canonical inside encrypted policy and absent in legacy records", async () => {
+  const options = { id: crypto.randomUUID(), bytes: utf8("%PDF-already-watermarked-synthetic"), subjects: ["synthetic-subject"], expiresAt: Date.now() + 60000 };
+  const key = await importKey(newKey()), recipientName = "株式会社テスト 採用担当";
+  const record = await sealDocument({ ...options, recipientName: `  ${recipientName}  ` }, key);
+  const policy = await readPolicy(record, options.id, key);
+  assert.equal(policy.recipientName, recipientName);
+  assert.ok(!JSON.stringify(record).includes(recipientName));
+  assert.deepEqual(await decryptDocument(record, key, policy), options.bytes);
+  assert.equal(Object.hasOwn(await readPolicy(await sealDocument(options, key), options.id, key), "recipientName"), false);
+  for (const name of [null, "", "  ", "bad\r\nheader", "../other", "a".repeat(181), "界".repeat(61), "name\u202e", "\ud800"]) {
+    await assert.rejects(() => sealDocument({ ...options, recipientName: name }, key), /invalid_recipient/);
+    assert.throws(() => validatePolicy({ ...policy, recipientName: name }), /invalid_policy/);
+  }
+  for (const name of ["  padded  ", "Cafe\u0301"]) assert.throws(() => validatePolicy({ ...policy, recipientName: name }), /invalid_policy/);
+});

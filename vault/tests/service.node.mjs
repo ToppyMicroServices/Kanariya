@@ -24,13 +24,13 @@ class Storage {
     this.map = draft; this.alarmAt = alarm; return result;
   }
 }
-async function fixture() {
+async function fixture(options = {}) {
   const id = crypto.randomUUID(), subject = "fixture-subject-private", pdf = utf8("%PDF-1.4\nSYNTHETIC_PRIVATE_BODY\n");
   const env = { PUBLIC_ORIGIN: "https://vault.example.test", ACCESS_ISSUER: `https://fixture-${++fixtureNumber}.cloudflareaccess.com`,
     ACCESS_AUDIENCE: "fixture-audience", VAULT_WRAP_KEY: newKey(), VAULT_AUDIT_KEY: newKey(), VAULT_OWNER_SUB: "fixture-owner-private",
     WEBHOOK_URL: "https://notify.example.test/secret-path" };
   const wrappingKey = await importKey(env.VAULT_WRAP_KEY);
-  let record = await sealDocument({ id, bytes: pdf, subjects: [subject], expiresAt: Date.now() + 600000 }, wrappingKey);
+  let record = await sealDocument({ id, bytes: pdf, subjects: [subject], expiresAt: Date.now() + 600000, ...options }, wrappingKey);
   const pinRecord = () => { env.DUMMY_DOCUMENT_ID = id; env.DUMMY_RECORD_SHA256 = createHash("sha256").update(JSON.stringify(record)).digest("hex"); };
   pinRecord();
   const calls = []; let reads = 0, providerStatus = 202;
@@ -74,10 +74,25 @@ test("approved pinned dummy returns exact bytes after encrypted journal commits,
   assert.equal(response.status, 200); assert.deepEqual(new Uint8Array(await response.arrayBuffer()), f.pdf);
   assert.match(response.headers.get("cache-control"), /no-store/);
   assert.equal(response.headers.get("content-disposition"), 'inline; filename="protected-document.pdf"');
+  assert.equal(response.headers.get("x-vault-download-filename"), null);
   const persisted = JSON.stringify([...f.storage.map]);
   for (const secret of [f.subject, f.env.VAULT_WRAP_KEY, f.env.VAULT_AUDIT_KEY, "SYNTHETIC_PRIVATE_BODY", "application/pdf"]) assert.ok(!persisted.includes(secret));
   const state = await f.state(); assert.equal(state.events[0].outcome, "decrypted"); assert.equal(state.jobs[0].outcome, "decrypted");
   assert.ok(f.storage.alarmAt); assert.equal(f.calls.length, 0);
+});
+test("Access PDF responses expose only the encrypted owner-selected recipient filename after authorization", async () => {
+  const recipientName = "株式会社テスト 採用担当", f = await fixture({ recipientName });
+  const denied = await f.request("open", { claims: { sub: "other-private-subject" } });
+  assert.equal(denied.status, 403); assert.equal(denied.headers.get("x-vault-download-filename"), null);
+  const response = await f.request(), filename = `CV_${recipientName}.pdf`;
+  assert.equal(response.status, 200); assert.deepEqual(new Uint8Array(await response.arrayBuffer()), f.pdf);
+  assert.equal(decodeURIComponent(response.headers.get("x-vault-download-filename")), filename);
+  assert.equal(decodeURIComponent(response.headers.get("content-disposition").split("filename*=UTF-8''")[1]), filename);
+  assert.ok(!JSON.stringify(f.record).includes(recipientName));
+  assert.ok(!JSON.stringify(await f.state()).includes(recipientName));
+  await f.alarm(); assert.ok(!JSON.stringify(f.calls).includes(recipientName));
+  const forged = await f.request("open", { body: JSON.stringify({ requestId: crypto.randomUUID(), recipientName: "Other recipient" }) });
+  assert.equal(forged.status, 400);
 });
 function observeKeyReads(env) {
   let reads = 0;

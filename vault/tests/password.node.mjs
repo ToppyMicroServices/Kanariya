@@ -29,14 +29,15 @@ class Storage {
     return result;
   }
 }
-async function fixture({ authMode = "password", expiresAt = Date.now() + 600000 } = {}) {
+async function fixture({ authMode = "password", expiresAt = Date.now() + 600000, recipientName } = {}) {
   const id = crypto.randomUUID(), subject = "synthetic-access-reader", pdf = utf8("%PDF-1.4\nSYNTHETIC_PASSWORD_BODY\n");
   const env = { PUBLIC_ORIGIN: "https://vault.example.test", ACCESS_ISSUER: `https://password-fixture-${++fixtureNumber}.cloudflareaccess.com`,
     ACCESS_AUDIENCE: "synthetic-audience", VAULT_WRAP_KEY: newKey(), VAULT_AUDIT_KEY: newKey(), VAULT_OWNER_SUB: "synthetic-owner",
     PASSWORD_READER_ENABLED: "1", WEBHOOK_URL: "https://notify.example.test/synthetic-path" };
   const wrappingKey = await importKey(env.VAULT_WRAP_KEY), auditKey = await importKey(env.VAULT_AUDIT_KEY);
   let record = await sealDocument({ id, bytes: pdf, expiresAt, subjects: authMode === "password" ? [] : [subject],
-    ...(authMode === undefined ? {} : { authMode }), ...(authMode === "password" ? { password: PASSWORD } : {}) }, wrappingKey);
+    ...(authMode === undefined ? {} : { authMode }), ...(authMode === "password" ? { password: PASSWORD } : {}),
+    ...(recipientName === undefined ? {} : { recipientName }) }, wrappingKey);
   const pinRecord = () => { env.DUMMY_DOCUMENT_ID = id; env.DUMMY_RECORD_SHA256 = createHash("sha256").update(JSON.stringify(record)).digest("hex"); };
   pinRecord();
   let reads = 0, jwksReads = 0, providerStatus = 202, providerHandler;
@@ -107,6 +108,23 @@ async function within(promise, ms = 1000) {
   finally { clearTimeout(timer); }
 }
 
+test("password PDF naming is owner-bound, private until authentication, and denied after revocation", async () => {
+  const recipientName = "株式会社テスト 採用担当", f = await fixture({ recipientName });
+  const anonymous = await f.request("open");
+  assert.equal(anonymous.status, 401); assert.equal(anonymous.headers.get("x-vault-download-filename"), null);
+  const session = await f.login(); assert.ok(!JSON.stringify(session.body).includes(recipientName));
+  const response = await f.request("open", { cookie: session.cookie });
+  assert.equal(response.status, 200); assert.deepEqual(new Uint8Array(await response.arrayBuffer()), f.pdf);
+  assert.equal(decodeURIComponent(response.headers.get("x-vault-download-filename")), `CV_${recipientName}.pdf`);
+  assert.equal(decodeURIComponent(response.headers.get("content-disposition").split("filename*=UTF-8''")[1]), `CV_${recipientName}.pdf`);
+  assert.ok(!JSON.stringify(f.record).includes(recipientName)); assert.ok(!JSON.stringify(await f.state()).includes(recipientName));
+  const forged = await f.request("open", { cookie: session.cookie, body: JSON.stringify({ requestId: crypto.randomUUID(), recipientName: "Other recipient" }) });
+  assert.equal(forged.status, 400);
+  assert.equal((await f.request("revoke", { access: true, subject: f.env.VAULT_OWNER_SUB })).status, 200);
+  const revoked = await f.request("open", { cookie: session.cookie });
+  assert.equal(revoked.status, 403); assert.equal(revoked.headers.get("x-vault-download-filename"), null);
+});
+
 test("password session and PDF open work without any reader JWT and set bounded secure cookies", async () => {
   const f = await fixture(), startedAt = Date.now(), session = await f.login();
   assert.match(session.setCookie, new RegExp(`^__Secure-vault-${f.id}=[^;]+;`));
@@ -121,6 +139,7 @@ test("password session and PDF open work without any reader JWT and set bounded 
   const response = await f.request("open", { cookie: session.cookie });
   assert.equal(response.status, 200); assert.deepEqual(new Uint8Array(await response.arrayBuffer()), f.pdf);
   assert.equal(response.headers.get("content-type"), "application/pdf");
+  assert.equal(response.headers.get("x-vault-download-filename"), null);
   assert.equal(Number(response.headers.get("x-vault-expires-at")), f.expiresAt);
   assert.equal(Number(response.headers.get("x-vault-session-expires-at")), session.body.sessionExpiresAt);
   privateResponse(session.response); privateResponse(response); assert.equal(f.jwksReads, 0);

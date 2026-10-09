@@ -1,4 +1,5 @@
 import { createPasswordVerifier, passwordVerifierValid } from "./password.js";
+import { normalizeRecipientName } from "./recipient.js";
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const MAX_PDF_BYTES = 1024 * 1024;
@@ -45,6 +46,10 @@ export function validatePolicy(policy) {
       !Number.isSafeInteger(policy.expiresAt) || !Array.isArray(policy.subjects) || policy.subjects.length > 50 ||
       policy.subjects.some(s => typeof s !== "string" || s.length < 1 || s.length > 256) ||
       typeof policy.revoked !== "boolean" || Object.hasOwn(policy, "password")) throw new Error("invalid_policy");
+  if (Object.hasOwn(policy, "recipientName")) {
+    try { if (normalizeRecipientName(policy.recipientName) !== policy.recipientName) throw new Error(); }
+    catch { throw new Error("invalid_policy"); }
+  }
   const mode = Object.hasOwn(policy, "authMode") ? policy.authMode : "access";
   if (mode === "access") {
     if (!policy.subjects.length || Object.hasOwn(policy, "passwordVerifier")) throw new Error("invalid_policy");
@@ -54,12 +59,15 @@ export function validatePolicy(policy) {
   return policy;
 }
 // Provisioning is an offline operation. This function is never a public upload API.
+// Trusted callers supplying recipientName must provide the final watermarked PDF
+// and complete their PDF checks. The seal-document CLI stamps before encryption.
 export async function sealDocument(options, wrappingKey) {
   const { id, bytes, subjects, expiresAt } = options;
   if (!UUID.test(id) || !(bytes instanceof Uint8Array) || decoder.decode(bytes.subarray(0, 5)) !== "%PDF-") throw new Error("invalid_document");
   const authMode = Object.hasOwn(options, "authMode") ? options.authMode : "access";
   if (Object.hasOwn(options, "passwordVerifier") || (authMode !== "password" && Object.hasOwn(options, "password"))) throw new Error("invalid_policy");
   const policy = { mime: "application/pdf", size: bytes.length, subjects, expiresAt, revoked: false, authMode };
+  if (Object.hasOwn(options, "recipientName")) policy.recipientName = normalizeRecipientName(options.recipientName);
   if (authMode === "password") {
     if (!Array.isArray(subjects) || subjects.length) throw new Error("invalid_policy");
     policy.passwordVerifier = createPasswordVerifier(options.password);

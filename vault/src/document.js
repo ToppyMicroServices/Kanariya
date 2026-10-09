@@ -4,6 +4,7 @@ import { requireNotificationTargets, deliverNotification } from '../../src/notif
 import { ACCESS_ROUTE, PASSWORD_ROUTE, HEADERS, json, Denied, failure, origin, dummyPin, passwordEnabled, requestBody } from './http.js';
 import { passwordValid, verifyPassword, randomToken, hashToken, readSession, sessionCookie,
   SESSION_MS, ATTEMPT_WINDOW_MS, MAX_ATTEMPTS, MAX_SESSIONS } from './password.js';
+import { recipientHeaders } from './recipient.js';
 const DAY = 86400000;
 
 export class VaultDocument {
@@ -191,7 +192,7 @@ export class VaultDocument {
       this.live(policy, state, session);
     } catch (error) { bytes.fill(0); throw error; }
     return new Response(bytes, { headers: { ...HEADERS, 'content-type': 'application/pdf',
-      'content-disposition': 'inline; filename="protected-document.pdf"', 'x-vault-event': eventId,
+      ...recipientHeaders(policy), 'x-vault-event': eventId,
       'x-vault-expires-at': String(policy.expiresAt),
       ...(session ? { 'x-vault-session-expires-at': String(session.expiresAt) } : {}) } });
   }

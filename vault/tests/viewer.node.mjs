@@ -17,7 +17,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 function viewer(options = {}) {
-  const elements = Object.fromEntries(["open", "close", "status", "document", "unlock-form", "password", "unlock", "logout"].map(id => [id, {
+  const elements = Object.fromEntries(["open", "close", "download", "status", "document", "unlock-form", "password", "unlock", "logout"].map(id => [id, {
     hidden: id === "close" || id === "document", disabled: false, textContent: "", value: "",
     clientWidth: options.clientWidth ?? 1000, children: [], listeners: new Map(),
     addEventListener(name, fn) { this.listeners.set(name, fn); },
@@ -25,6 +25,7 @@ function viewer(options = {}) {
     append(child) { this.children.push(child); },
   }]));
   const events = new Map(), requests = [], loadingTasks = [], renderTasks = [], canvases = [], pdfPages = [];
+  const downloads = [], objectURLs = new Map();
   const stageStarts = new Map(), timers = new Map(), scheduledTimers = [];
   const id = randomUUID(), now = options.now ?? 1800000000000;
   const location = { hash: options.passwordMode ? "" : "#" + id, pathname: options.passwordMode ? "/p/" + id : "/", search: "" }, globalWorkerOptions = {};
@@ -34,7 +35,10 @@ function viewer(options = {}) {
     const next = new URL(url, "https://viewer.example" + location.pathname + location.search + location.hash);
     location.pathname = next.pathname; location.search = next.search; location.hash = next.hash;
   }]));
-  const browserDocument = { hidden: false, getElementById: id => elements[id], createElement: kind => { assert.equal(kind, "canvas"); return canvas(); }, addEventListener: (name, fn) => events.set(name, fn) };
+  const browserDocument = { hidden: false, body: { append() {} }, getElementById: id => elements[id], createElement: kind => {
+    if (kind === "a") return { href: "", download: "", remove() {}, click() { downloads.push({ href: this.href, filename: this.download, blob: objectURLs.get(this.href) }); } };
+    assert.equal(kind, "canvas"); return canvas();
+  }, addEventListener: (name, fn) => events.set(name, fn) };
   function sessionResponse(settings = {}) {
     return { ok: settings.ok ?? true, headers: new Headers({ "content-type": "application/json", ...settings.headers }), json: () => Promise.resolve(settings.value ?? { expiresAt: clock.now + 600000, sessionExpiresAt: clock.now + 300000 }) };
   }
@@ -99,7 +103,10 @@ function viewer(options = {}) {
   }
   vm.runInNewContext(options.passwordMode ? passwordScript : script, {
     document: browserDocument, Date: { now: () => clock.now },
-    location, history, AbortController, Uint8Array, devicePixelRatio: options.devicePixelRatio ?? 1,
+    location, history, AbortController, Uint8Array, Blob, URL: {
+      createObjectURL(blob) { const url = "blob:https://viewer.example/" + randomUUID(); objectURLs.set(url, blob); return url; },
+      revokeObjectURL(url) { objectURLs.delete(url); },
+    }, devicePixelRatio: options.devicePixelRatio ?? 1,
     getDocument, GlobalWorkerOptions: globalWorkerOptions, crypto: { randomUUID },
     addEventListener: (name, fn) => events.set(name, fn),
     fetch: (url, requestOptions) => {
@@ -113,7 +120,7 @@ function viewer(options = {}) {
     clearTimeout: id => timers.delete(id),
   });
   return {
-    ...elements, location, requests, loadingTasks, renderTasks, canvases, pdfPages, timers, scheduledTimers,
+    ...elements, location, requests, loadingTasks, renderTasks, canvases, pdfPages, timers, scheduledTimers, downloads, objectURLs,
     globalWorkerOptions, response, sessionResponse, browserDocument, clock, id, history,
     wait: name => {
       if (!stageStarts.has(name)) stageStarts.set(name, deferred());
@@ -121,6 +128,7 @@ function viewer(options = {}) {
     },
     openDocument: () => elements.open.listeners.get("click")(),
     closeDocument: () => elements.close.listeners.get("click")(),
+    downloadDocument: () => elements.download.listeners.get("click")(),
     event: (name, value = {}) => events.get(name)(value),
     unlockDocument: (password = "synthetic-shared-password") => { elements.password.value = password; return elements["unlock-form"].listeners.get("submit")({ preventDefault() {} }); },
     logOutDocument: () => elements.logout.listeners.get("click")(),
@@ -562,3 +570,74 @@ test("logout failure reports uncertainty while keeping the reader locked", async
   await v.unlockDocument(); await v.openDocument(); await v.logOutDocument(); assertClosed(v, true);
   assert.equal(v.status.textContent, "表示は閉じましたが、ログアウトを確認できませんでした。"); assert.equal(v.timers.size, 0);
 });
+
+const recipientFilename = 'CV_株式会社テスト 御中.pdf';
+const filenameHeader = { 'x-vault-download-filename': encodeURIComponent(recipientFilename) };
+for (const passwordMode of [false, true]) {
+  test(`named PDF download reauthorizes and releases a named file (${passwordMode ? 'password' : 'Access'})`, async () => {
+    const v = viewer({ passwordMode, fetchResult: (_n, response, sessionResponse, url) => Promise.resolve(
+      url.endsWith('/open') ? response({ headers: filenameHeader }) : sessionResponse()) });
+    assert.equal(v.download.hidden, true); await v.downloadDocument(); assert.equal(v.requests.length, 0);
+    if (passwordMode) await v.unlockDocument();
+    await v.openDocument(); assert.equal(v.download.hidden, false);
+    const before = v.requests.length;
+    await v.downloadDocument();
+    assert.equal(v.requests.length, before + 1);
+    const first = v.requests[before - 1], last = v.requests[before];
+    assert.equal(last.url, first.url); assert.equal(last.options.method, 'POST');
+    assert.equal(last.options.credentials, 'same-origin'); assert.equal(last.options.cache, 'no-store'); assert.equal(last.options.redirect, 'error');
+    assert.notEqual(JSON.parse(first.options.body).requestId, JSON.parse(last.options.body).requestId);
+    assert.equal(v.downloads.length, 1); assert.equal(v.downloads[0].filename, recipientFilename);
+    assert.equal(v.downloads[0].blob.type, 'application/pdf');
+    assert.deepEqual([...new Uint8Array(await v.downloads[0].blob.arrayBuffer())], [37, 80, 68, 70]);
+    assert.match(v.status.textContent, /保存を開始/); assert.equal(v.objectURLs.size, 1);
+    await v.fireTimer(1000); assert.equal(v.objectURLs.size, 0);
+  });
+}
+
+test('unnamed and unsafe filenames never expose a download action', async () => {
+  for (const filename of [null, '%GG', encodeURIComponent('CV_../test.pdf'), encodeURIComponent('CV_\\evil.pdf'),
+    encodeURIComponent('CV_\r\nname.pdf'), encodeURIComponent('CV_\u202ename.pdf'), encodeURIComponent('wrong.pdf'),
+    encodeURIComponent('CV_' + 'x'.repeat(200) + '.pdf')]) {
+    const v = viewer({ fetchResult: (_n, response) => Promise.resolve(response({ headers: filename === null ? {} : { 'x-vault-download-filename': filename } })) });
+    await v.openDocument(); assert.equal(v.download.hidden, true); await v.downloadDocument();
+    assert.equal(v.requests.length, 1); assert.equal(v.downloads.length, 0);
+  }
+});
+
+for (const change of ['close', 'pagehide', 'hashchange', 'visibilitychange', 'expiry']) {
+  test(`${change} prevents a delayed download response from saving a PDF`, async () => {
+    const late = deferred();
+    const v = viewer({ fetchResult: (n, response) => n === 1 ? Promise.resolve(response({ headers: filenameHeader })) : late.promise });
+    await v.openDocument(); const downloading = v.downloadDocument();
+    if (change === 'expiry') v.advance(600001); else close(v, change);
+    late.resolve(v.response({ headers: filenameHeader })); await downloading;
+    assert.equal(v.downloads.length, 0); assert.equal(v.objectURLs.size, 0); assert.equal(v.download.hidden, true);
+  });
+}
+
+test('logout cancels an in-flight password download even when transport ignores abort', async () => {
+  const late = deferred();
+  const v = viewer({ passwordMode: true, fetchResult: (n, response, sessionResponse, url) => n === 3 ? late.promise : Promise.resolve(
+    url.endsWith('/open') ? response({ headers: filenameHeader }) : sessionResponse()) });
+  await v.unlockDocument(); await v.openDocument(); const downloading = v.downloadDocument();
+  // Close always cancels in-flight work; the now-available logout ends the session.
+  v.closeDocument(); await v.logOutDocument(); late.resolve(v.response({ headers: filenameHeader })); await downloading;
+  assert.equal(v.downloads.length, 0); assert.equal(v.download.hidden, true); assert.equal(v.objectURLs.size, 0);
+});
+
+for (const failure of ['unauthorized', 'renamed', 'expired', 'oversized', 'wrong-type']) {
+  test(`download rejects ${failure} responses and clears the viewer`, async () => {
+    const v = viewer({ fetchResult: (n, response) => Promise.resolve(n === 1 ? response({ headers: filenameHeader }) : response({
+      ok: failure !== 'unauthorized', headers: { ...filenameHeader,
+        ...(failure === 'renamed' ? { 'x-vault-download-filename': encodeURIComponent('CV_other.pdf') } : {}),
+        ...(failure === 'expired' ? { 'x-vault-expires-at': '1' } : {}),
+        ...(failure === 'oversized' ? { 'content-length': String(maxBytes + 1) } : {}),
+        ...(failure === 'wrong-type' ? { 'content-type': 'text/html' } : {}),
+      },
+    })) });
+    await v.openDocument(); await v.downloadDocument();
+    assert.equal(v.downloads.length, 0); assert.equal(v.download.hidden, true); assert.equal(v.document.hidden, true);
+    assert.equal(v.objectURLs.size, 0);
+  });
+}

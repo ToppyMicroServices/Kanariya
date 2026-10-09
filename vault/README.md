@@ -82,6 +82,52 @@ Alarms retry transient provider failures. A 2xx provider response records `accep
 
 The wrapping key authorizes server-side decryption of the document key. The encrypted access policy must be read to check the grant; the PDF is not decrypted until authorization and the durable attempt commit succeed. The trusted service/operator can decrypt, so service compromise remains a material risk.
 
+## Recipient names and saved copies
+
+The owner can prepare a separate PDF for each disclosure recipient. Supply
+`recipientName` and `watermarkFontPath` to the owner-side `seal-document.mjs`
+input. The tool adds `開示先: <name>` in translucent gray on every page before
+encryption. Original text remains selectable. It passes only PDF bytes, the
+recipient name and font path to the local Python helper; keys and passwords are
+not passed to that process. Intermediate plaintext PDFs are kept in memory.
+
+The helper needs Python with `pypdf` and `reportlab`, plus a locally licensed
+TrueType font covering the recipient's characters. Set
+`KANARIYA_WATERMARK_PYTHON` to choose the Python executable. Missing fonts,
+unsupported characters, signed/encrypted PDFs and unsupported interactive
+content fail preparation instead of silently producing an unmarked copy.
+Check the final PDF's structure and render every page before changing the
+production dummy pin. No existing stored document is automatically replaced.
+
+The tested Python versions are pinned in `requirements-watermark.txt`; these
+are owner-side dependencies and are not included in the Worker. Run their
+separate regression checks with a Japanese-capable font:
+
+```sh
+python3 -m pip install -r requirements-watermark.txt
+KANARIYA_TEST_FONT=/absolute/path/to/font.ttf python3 -B -m unittest discover -s tests -p watermark_pdf_test.py
+```
+
+The preparation limit is 20 pages and 1 MiB after stamping. Inspect the actual
+final PDF with qpdf and Ghostscript, and render every page with independent PDF
+engines; passing the unit tests alone does not establish final-document quality.
+
+The name is stored inside the encrypted policy. The authenticated response
+suggests `CV_<recipientName>.pdf`; the viewer shows **PDFを保存** only after a
+named document has opened. Saving makes a fresh authenticated `POST /open`,
+with the same expiry, revocation, replay, audit and notification checks as
+viewing. Closing or hiding the page cancels a pending browser save. Legacy
+unnamed records remain viewable and do not expose this save button.
+
+`sealDocument()` is a low-level trusted preparation function: its caller must
+provide the already marked PDF. The owner CLI performs the marking itself.
+The service returns those exact encrypted-at-rest document bytes after
+decryption; it does not add a browser-only watermark or alter PDFs on the Worker.
+
+A name identifies the intended recipient of that copy. Shared passwords do not
+verify an individual reader's identity. Names and watermarks can be removed,
+and saved copies can be redistributed or opened without notifying this service.
+
 ## Configuration and rollout
 
 `wrangler.toml` deliberately has no production route and disables `workers.dev` and preview URLs. `wrangler.production.toml` identifies the provisioned account and private bucket, but keeps public endpoints disabled and invalid origin, Access and dummy-pin placeholders. Neither configuration activates document viewing. The deployment was built with Wrangler 4.136.3. Remote observability status was not established by the settings readback; the local configuration disables it.
