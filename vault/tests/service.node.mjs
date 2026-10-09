@@ -240,6 +240,59 @@ test("viewer contains no identity or document bytes and uses no persistent brows
   assert.doesNotMatch(await js.text(), /localStorage|sessionStorage|indexedDB|console\./);
 });
 
+async function assertBrandResponse(response) {
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "image/png");
+  assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0");
+  assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+  assert.equal(response.headers.get("cross-origin-resource-policy"), "same-origin");
+  const csp = response.headers.get("content-security-policy");
+  assert.match(csp, /(?:^|; )img-src 'self';/);
+  assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval|https:|data:|blob:/);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  assert.deepEqual([...bytes.slice(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.equal(createHash("sha256").update(bytes).digest("hex"), "00d83bad154078750b5c2b3efa0ce2586905dfab3142a93cda9e7164e68ed7c5");
+}
+
+test("official brand image requires verified Access identity outside the password reader", async () => {
+  const f = await fixture(), keyReads = observeKeyReads(f.env);
+  for (const headers of [{}, { "cf-access-jwt-assertion": "invalid" }, { "cf-access-authenticated-user-email": "synthetic@example.test" }]) {
+    assert.equal((await worker.fetch(new Request(f.env.PUBLIC_ORIGIN + "/brand.png", { headers }), f.env)).status, 401);
+  }
+  await assertBrandResponse(await worker.fetch(new Request(f.env.PUBLIC_ORIGIN + "/brand.png", {
+    headers: { "cf-access-jwt-assertion": await f.token() },
+  }), f.env));
+  assert.equal(keyReads(), 0); assert.equal(f.reads, 0); assert.equal(f.storage.map.size, 0); assert.equal(f.calls.length, 0);
+});
+
+test("password reader serves only the exact local brand asset without accessing document data", async () => {
+  const f = await fixture(), keyReads = observeKeyReads(f.env);
+  f.env.PASSWORD_READER_ENABLED = "1";
+  await assertBrandResponse(await worker.fetch(new Request(f.env.PUBLIC_ORIGIN + "/p/assets/brand.png"), f.env));
+  for (const path of ["/p/brand.png", `/p/${f.id}/brand.png`, `/p/${crypto.randomUUID()}/brand.png`, "/p/assets/brand.svg", "/p/assets/brand.png/private"]) {
+    assert.equal((await worker.fetch(new Request(f.env.PUBLIC_ORIGIN + path), f.env)).status, 403);
+  }
+  assert.equal(keyReads(), 0); assert.equal(f.reads, 0); assert.equal(f.storage.map.size, 0); assert.equal(f.calls.length, 0);
+});
+
+test("brand asset retains origin, query, method, password flag and configuration gates", async () => {
+  const f = await fixture(), keyReads = observeKeyReads(f.env), path = "/p/assets/brand.png";
+  assert.equal((await worker.fetch(new Request(f.env.PUBLIC_ORIGIN + path), f.env)).status, 403);
+  f.env.PASSWORD_READER_ENABLED = "0";
+  assert.equal((await worker.fetch(new Request(f.env.PUBLIC_ORIGIN + path), f.env)).status, 403);
+  f.env.PASSWORD_READER_ENABLED = "1";
+  assert.equal((await worker.fetch(new Request("https://elsewhere.example.test" + path), f.env)).status, 403);
+  assert.equal((await worker.fetch(new Request(f.env.PUBLIC_ORIGIN + path + "?external=1"), f.env)).status, 403);
+  assert.equal((await worker.fetch(new Request(f.env.PUBLIC_ORIGIN + path, { method: "POST" }), f.env)).status, 405);
+  const issuer = f.env.ACCESS_ISSUER;
+  delete f.env.ACCESS_ISSUER;
+  assert.equal((await worker.fetch(new Request(f.env.PUBLIC_ORIGIN + path), f.env)).status, 503);
+  f.env.ACCESS_ISSUER = issuer;
+  delete f.env.DUMMY_RECORD_SHA256;
+  assert.equal((await worker.fetch(new Request(f.env.PUBLIC_ORIGIN + path), f.env)).status, 503);
+  assert.equal(keyReads(), 0); assert.equal(f.reads, 0); assert.equal(f.storage.map.size, 0); assert.equal(f.calls.length, 0);
+});
+
 const rendererPaths = [
   ["/pdfjs/pdf.min.mjs", "text/javascript; charset=utf-8"],
   ["/pdfjs/pdf.worker.min.mjs", "text/javascript; charset=utf-8"],

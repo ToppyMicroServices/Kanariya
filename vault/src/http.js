@@ -5,7 +5,7 @@ export const HEADERS = {
   'cloudflare-cdn-cache-control': 'no-store', 'surrogate-control': 'no-store', pragma: 'no-cache', expires: '0',
   'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff', 'x-frame-options': 'SAMEORIGIN',
   'cross-origin-resource-policy': 'same-origin',
-  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; worker-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
+  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
   'permissions-policy': 'camera=(), microphone=(), geolocation=()',
 };
 export function json(value, status = 200, headers = {}) {

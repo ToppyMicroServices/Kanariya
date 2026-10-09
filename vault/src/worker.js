@@ -3,6 +3,7 @@ import { UUID } from './crypto.js';
 import { ACCESS_ROUTE, PASSWORD_ROUTE, HEADERS, json, Denied, failure, origin, dummyPin, passwordEnabled } from './http.js';
 import * as viewer from './viewer.js';
 import { pdfjsAssets } from './pdfjs-assets.generated.js';
+import { brandAsset } from './brand.js';
 export { VaultDocument } from './document.js';
 
 export default {
@@ -20,7 +21,7 @@ export default {
       }
       const page = passwordPath && url.pathname === `/p/${pin.id}`;
       const path = passwordPath && url.pathname.startsWith('/p/assets/') ? url.pathname.slice('/p/assets'.length) : url.pathname;
-      const asset = Object.hasOwn(pdfjsAssets, path) ? pdfjsAssets[path] : null;
+      const asset = path === '/brand.png' ? brandAsset : Object.hasOwn(pdfjsAssets, path) ? pdfjsAssets[path] : null;
       if (passwordPath) {
         if (!page && (!url.pathname.startsWith('/p/assets/') || (!asset && !['/viewer.js', '/viewer.css'].includes(path)))) throw new Denied();
         if (request.method !== 'GET') throw new Denied(405, 'method_not_allowed');

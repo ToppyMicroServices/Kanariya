@@ -151,13 +151,13 @@ test("open uses an uncached same-origin POST and distinguishes queued from rende
   assert.match(JSON.parse(options.body).requestId, /^[0-9a-f-]{36}$/);
   assert.equal(v.globalWorkerOptions.workerSrc, "/pdfjs/pdf.worker.min.mjs");
   response.resolve(v.response()); await v.wait("render");
-  assert.match(v.status.textContent, /通知を待機列に登録しました。文書を表示しています/);
+  assert.match(v.status.textContent, /所有者への通知を受け付けました。文書を表示しています/);
   assert.equal(v.document.children.length, 0); assert.equal(v.document.hidden, true);
   rendering.resolve(); await opening;
   assert.equal(v.document.children.length, 1); assert.equal(v.document.hidden, false); assert.equal(v.open.disabled, false);
   assert.equal(v.canvases[0].attributes.get("aria-label"), "1 / 1 ページ");
   assert.equal(v.pdfPages[0].cleanupCalls, 1);
-  assert.equal(v.status.textContent, "文書を表示しました（1ページ）。復号操作を記録し、通知を待機列に登録しました。");
+  assert.equal(v.status.textContent, "文書を表示しました（1ページ）。閲覧を記録し、所有者への通知を受け付けました。");
   assert.equal(v.timers.size, 1); // Policy expiry remains armed while displayed.
 });
 for (const event of ["close", "pagehide", "hashchange", "popstate", "visibilitychange"]) {
@@ -248,14 +248,14 @@ for (const phase of ["loading", "page", "render"]) {
     const hook = phase === "loading" ? "loadingResult" : phase === "page" ? "pageResult" : "renderResult";
     const v = viewer({ [hook]: () => Promise.reject(new Error("synthetic display failure")) });
     await v.openDocument(); assertClosed(v);
-    assert.equal(v.status.textContent, "復号操作と通知登録は完了しましたが、文書を表示できませんでした。");
+    assert.equal(v.status.textContent, "閲覧の記録と通知の受付は完了しましたが、文書を表示できませんでした。");
     assert.ok(v.loadingTasks[0].destroyCalls >= 1);
   });
 }
 for (const numPages of [0, 21, 1.5, NaN]) {
   test(`invalid PDF page count ${numPages} is rejected before page rendering`, async () => {
     const v = viewer({ numPages }); await v.openDocument(); assertClosed(v);
-    assert.equal(v.pdfPages.length, 0); assert.equal(v.status.textContent, "復号操作と通知登録は完了しましたが、文書を表示できませんでした。");
+    assert.equal(v.pdfPages.length, 0); assert.equal(v.status.textContent, "閲覧の記録と通知の受付は完了しましたが、文書を表示できませんでした。");
   });
 }
 for (const length of [0, maxBytes + 1]) {
@@ -295,7 +295,7 @@ for (const registered of [false, true]) {
     const opening = v.openDocument(); await v.wait(registered ? "loading" : "fetch");
     assert.equal(v.scheduledTimers.length, registered ? 2 : 1); assert.equal(v.scheduledTimers[0].milliseconds, 30000);
     v.scheduledTimers[0].callback(); assertClosed(v); assert.equal(v.timers.size, 0);
-    const expected = registered ? "復号操作と通知登録は完了しましたが、表示が時間内に完了しませんでした。" : "処理が時間内に完了しませんでした。サービスの状態をご確認ください。";
+    const expected = registered ? "閲覧の記録と通知の受付は完了しましたが、表示が時間内に完了しませんでした。" : "処理が時間内に完了しませんでした。サービスの状態をご確認ください。";
     assert.equal(v.status.textContent, expected);
     paused.resolve(registered ? complete : v.response()); await opening;
     assertClosed(v); assert.equal(v.status.textContent, expected);
@@ -313,7 +313,7 @@ test("a render timeout cancels the task and clears a previously displayed page",
   assert.equal(v.renderTasks.length, 2);
   assert.equal(v.document.children.length, 1);
   v.scheduledTimers[0].callback(); assertClosed(v); assert.ok(v.renderTasks[1].cancelCalls >= 1);
-  const expected = "復号操作と通知登録は完了しましたが、表示が時間内に完了しませんでした。";
+  const expected = "閲覧の記録と通知の受付は完了しましたが、表示が時間内に完了しませんでした。";
   assert.equal(v.status.textContent, expected);
   paused.resolve(); await opening; assertClosed(v); assert.equal(v.status.textContent, expected);
 });
@@ -378,7 +378,7 @@ for (const value of [null, "", "wrong", "1.5", "Infinity", "1800000000000", "900
   test(`invalid Access expiry header ${value} fails closed before PDF parsing`, async () => {
     const v = viewer({ fetchResult: (_n, response) => Promise.resolve(response({ headers: { "x-vault-expires-at": value } })) });
     await v.openDocument(); assertClosed(v); assert.equal(v.loadingTasks.length, 0);
-    assert.match(v.status.textContent, /復号操作と通知登録は完了/);
+    assert.match(v.status.textContent, /閲覧の記録と通知の受付は完了/);
   });
 }
 
