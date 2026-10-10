@@ -1,5 +1,6 @@
 import { css as viewerCss } from './viewer.js';
 import * as extensions from './admin-extensions.js';
+import * as canary from './canary-admin.js';
 
 export const html = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#02213b"><title>文書の管理 | ToppyMicroServices</title><link rel="stylesheet" href="/v1/admin/assets/admin.css"></head>
@@ -11,8 +12,8 @@ export const html = `<!doctype html>
 <div class="actions"><button id="copy-link" type="button" disabled>共有リンクをコピー</button><a id="preview" class="button-link" target="_blank" rel="noopener noreferrer" aria-label="閲覧ページを開く（新しいタブ）" aria-disabled="true">閲覧ページを開く</a></div>
 <form id="expiry-form" class="expiry-form"><label for="expires-at">閲覧期限を変更</label><p id="expiry-help" class="form-help">日本時間で指定してください。</p><div class="expiry-controls"><input id="expires-at" type="datetime-local" step="60" required disabled aria-describedby="expiry-help expiry-limit"><button id="save-expiry" type="submit" class="primary" disabled>期限を保存</button></div><p id="expiry-limit" class="form-help"></p></form>
 <div class="sharing-end"><button id="stop-sharing" type="button" class="quiet" disabled>共有を終了</button><div id="stop-confirmation" class="confirmation" hidden><p>共有を終了すると、この文書を新たに開いたり保存したりできなくなります。元に戻すことはできません。</p><div class="actions"><button id="confirm-stop" type="button" class="danger">共有を終了する</button><button id="cancel-stop" type="button">キャンセル</button></div></div></div>
-<details class="management-notes"><summary>ご案内</summary><p>現在はダミーPDFを共有しています。新しいPDFは、非公開の登録候補として保存できます。</p><p>閲覧期限や共有の終了は、すでに表示・保存された内容を回収するものではありません。</p></details></section>${extensions.html}<noscript><p class="noscript">文書の管理にはJavaScriptが必要です。</p></noscript></main>
-<footer class="site-footer"><span>ToppyMicroServices OÜ</span><span>Document sharing · Kanariya</span></footer><script src="/v1/admin/assets/admin.js" type="module"></script><script src="/v1/admin/assets/management.js" type="module"></script></body></html>`;
+<details class="management-notes"><summary>ご案内</summary><p>現在はダミーPDFを共有しています。新しいPDFは、非公開の登録候補として保存できます。</p><p>閲覧期限や共有の終了は、すでに表示・保存された内容を回収するものではありません。</p></details></section>${extensions.html}${canary.html}<noscript><p class="noscript">文書の管理にはJavaScriptが必要です。</p></noscript></main>
+<footer class="site-footer"><span>ToppyMicroServices OÜ</span><span>Document sharing · Kanariya</span></footer><script src="/v1/admin/assets/admin.js" type="module"></script><script src="/v1/admin/assets/management.js" type="module"></script><script src="/v1/admin/assets/canary.js" type="module"></script></body></html>`;
 
 export const css = viewerCss + extensions.css + `
 .management-card{margin-top:24px}.document-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}.document-heading h2{margin:0;font-size:19px}.state-label{color:var(--accent);font-size:13px;white-space:nowrap}.document-info{margin:20px 0}.document-info>div{display:grid;grid-template-columns:90px minmax(0,1fr);gap:12px;margin-top:8px}.document-info dt{color:var(--muted);font-size:14px}.document-info dd{margin:0;overflow-wrap:anywhere;font-size:14px;font-variant-numeric:tabular-nums}
@@ -22,6 +23,7 @@ export const css = viewerCss + extensions.css + `
 `;
 
 export const managementJs = extensions.js;
+export const canaryJs = canary.js;
 
 export const js = `"use strict";
 const ids=["status","error","reload","owner-page","management","sharing-state","recipient-row","recipient","deadline","copy-link","preview","expiry-form","expires-at","save-expiry","expiry-limit","stop-sharing","stop-confirmation","confirm-stop","cancel-stop"];

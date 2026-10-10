@@ -6,7 +6,7 @@ workers_dev = false
 preview_urls = false
 
 [build]
-command = "node scripts/prepare-viewer-assets.mjs"
+command = "npm run prepare:viewer"
 
 # Set the actual Access-protected hostname before deployment.
 # No deployment route, personal address, or production secret is checked in.

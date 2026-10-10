@@ -4,6 +4,8 @@ import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 import worker from '../src/worker.js';
 import * as admin from '../src/admin.js';
 import { HEADERS } from '../src/http.js';
+import * as registrationPreview from '../src/registration-preview.js';
+import { pdfPreparationAssets } from '../src/pdf-preparation-assets.generated.js';
 
 const originalFetch = globalThis.fetch;
 after(() => { globalThis.fetch = originalFetch; });
@@ -31,7 +33,13 @@ async function request(path, subject, options = {}) {
   return worker.fetch(new Request(env.PUBLIC_ORIGIN + path, { method: options.method ?? 'GET',
     headers: { ...headers, ...options.headers } }), env);
 }
-const surfaces = ['/v1/admin', '/v1/admin/assets/admin.js', '/v1/admin/assets/admin.css', '/v1/admin/assets/management.js', '/v1/management'];
+const extraAssets = [
+  ['/v1/admin/assets/canary.js', admin.canaryJs, 'text/javascript; charset=utf-8'],
+  ['/v1/admin/assets/registration-preview.js', registrationPreview.js, 'text/javascript; charset=utf-8'],
+  ['/v1/admin/assets/pdf-preparation-worker.js', registrationPreview.workerJs, 'text/javascript; charset=utf-8'],
+  ...Object.entries(pdfPreparationAssets).map(([path, asset]) => [path, asset.data, asset.mime]),
+];
+const surfaces = [...extraAssets.map(([path]) => path),'/v1/admin', '/v1/admin/assets/admin.js', '/v1/admin/assets/admin.css', '/v1/admin/assets/management.js', '/v1/management'];
 
 test('owner administration surfaces reject anonymous, password-cookie and non-owner identities', async () => {
   for (const path of [...surfaces, '/v1/registrations']) {
@@ -48,6 +56,7 @@ test('owner page and assets return exact UI with private headers and no document
     ['/v1/admin/assets/admin.js', admin.js, 'text/javascript; charset=utf-8'],
     ['/v1/admin/assets/admin.css', admin.css, 'text/css; charset=utf-8'],
     ['/v1/admin/assets/management.js', admin.managementJs, 'text/javascript; charset=utf-8'],
+    ...extraAssets,
   ]) {
     const response = await request(path, env.VAULT_OWNER_SUB);
     assert.equal(response.status, 200); assert.equal(await response.text(), expected);
@@ -70,4 +79,21 @@ test('owner page routes reject mutation methods, query strings and lookalike pat
   for (const path of ['/v1/admin/', '/v1/admin/assets/missing.js', '/v1/management/']) {
     assert.equal((await request(path, env.VAULT_OWNER_SUB)).status, 404);
   }
+});
+
+test('unconnected Canary surfaces remain owner-only and inactive without PDF, keys or notification access', async () => {
+  for (const action of ['canary', 'canary-logs']) {
+    const path = `/v1/documents/${env.DUMMY_DOCUMENT_ID}/${action}`;
+    assert.equal((await request(path)).status, 401);
+    assert.equal((await request(path, 'synthetic-reader')).status, 403);
+    const response = await request(path, env.VAULT_OWNER_SUB);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).configured, false);
+    assert.equal((await request(path.replace(env.DUMMY_DOCUMENT_ID, crypto.randomUUID()), env.VAULT_OWNER_SUB)).status, 403);
+  }
+  const response = await request(`/v1/documents/${env.DUMMY_DOCUMENT_ID}/canary`, env.VAULT_OWNER_SUB, {
+    method: 'POST', headers: { origin: env.PUBLIC_ORIGIN, 'content-type': 'application/json' },
+  });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'canary_not_configured' });
 });

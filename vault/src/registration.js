@@ -2,12 +2,17 @@ import { identity } from './auth.js';
 import { UUID, MAX_PDF_BYTES, MAX_RECORD_BYTES, importKey, sealDocument, sealJSON, openJSON,
   unb64, utf8, parseJSON, boundedBody } from './crypto.js';
 import { Denied, failure, json, origin, dummyPin } from './http.js';
+import { normalizeRecipientName } from './recipient.js';
 
 export const MAX_REGISTRATIONS = 20;
 export const MAX_REGISTRATION_BODY = 1536 * 1024;
 const STATE_KEY = 'encrypted-registration';
 const FIELDS = ['id', 'pdfBase64', 'fileName', 'expiresAt', 'replaceOf', 'expectedRevision'];
 const RECORD_FIELDS = ['id', 'createdAt', 'expiresAt', 'size', 'replaceOf', 'status', 'fileName', 'recordSha256'];
+const PREPARATION_FIELDS = ['recipient', 'watermarkEnabled', 'sourceSha256', 'preparedSha256', 'preparationVersion'];
+const PREPARED_FIELDS = [...FIELDS, ...PREPARATION_FIELDS];
+const PREPARED_RECORD_FIELDS = [...RECORD_FIELDS, ...PREPARATION_FIELDS];
+const RECIPIENT_FIELDS = ['type', 'organizationName', 'personName'];
 const SHA256 = /^[0-9a-f]{64}$/;
 const unsafeName = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\\/]/u;
 const timestamp = value => Number.isSafeInteger(value) && value > 0 && value <= 8640000000000000;
@@ -19,6 +24,22 @@ function fileName(value) {
   const normalized = value.normalize('NFC').trim();
   if (!normalized || normalized.length > 120) throw new Denied(400, 'invalid_request');
   return normalized;
+}
+
+function preparation(value) {
+  const recipient = value.recipient;
+  if (!exactKeys(recipient, RECIPIENT_FIELDS) || !['organization', 'person'].includes(recipient.type) ||
+      typeof value.watermarkEnabled !== 'boolean' || value.preparationVersion !== 1 ||
+      typeof value.sourceSha256 !== 'string' || !SHA256.test(value.sourceSha256) ||
+      typeof value.preparedSha256 !== 'string' || !SHA256.test(value.preparedSha256) ||
+      (recipient.type === 'organization' && recipient.organizationName === null) ||
+      (recipient.type === 'person' && (recipient.organizationName !== null || recipient.personName === null))) throw new Error('invalid_preparation');
+  const normalized = { type: recipient.type,
+    organizationName: recipient.organizationName === null ? null : normalizeRecipientName(recipient.organizationName),
+    personName: recipient.personName === null ? null : normalizeRecipientName(recipient.personName) };
+  const recipientName = normalizeRecipientName([normalized.organizationName, normalized.personName].filter(name => name !== null).join(' '));
+  return { recipientName, metadata: { recipient: normalized, watermarkEnabled: value.watermarkEnabled,
+    sourceSha256: value.sourceSha256, preparedSha256: value.preparedSha256, preparationVersion: 1 } };
 }
 
 // Uploads use an owner-only bounded reader. Raising the public password/body
@@ -85,11 +106,18 @@ export class VaultRegistrations {
         state.revision !== 2 * state.documents.length + state.reservations.length) throw new Error('invalid_registry');
     const ids = new Set();
     for (const [entries, status] of [[state.documents, 'private'], [state.reservations, 'pending']]) for (const entry of entries) {
-      if (!exactKeys(entry, RECORD_FIELDS) || !UUID.test(entry.id) || entry.id === pin.id || ids.has(entry.id) ||
+      const prepared = exactKeys(entry, PREPARED_RECORD_FIELDS);
+      if ((!exactKeys(entry, RECORD_FIELDS) && !prepared) || !UUID.test(entry.id) || entry.id === pin.id || ids.has(entry.id) ||
           !timestamp(entry.createdAt) || !timestamp(entry.expiresAt) || !Number.isSafeInteger(entry.size) ||
           entry.size < 5 || entry.size > MAX_PDF_BYTES || !(entry.replaceOf === null || entry.replaceOf === pin.id) ||
           entry.status !== status || !SHA256.test(entry.recordSha256)) throw new Error('invalid_registry');
-      try { if (fileName(entry.fileName) !== entry.fileName) throw new Error(); }
+      try {
+        if (fileName(entry.fileName) !== entry.fileName) throw new Error();
+        if (prepared) {
+          const { metadata } = preparation(entry);
+          if (RECIPIENT_FIELDS.some(key => entry.recipient[key] !== metadata.recipient[key])) throw new Error();
+        }
+      }
       catch { throw new Error('invalid_registry'); }
       ids.add(entry.id);
     }
@@ -118,28 +146,41 @@ export class VaultRegistrations {
       if (request.headers.get('origin') !== url.origin || request.headers.get('content-type') !== 'application/json' ||
           ['cross-site', 'same-site'].includes(request.headers.get('sec-fetch-site'))) throw new Denied();
       input = await registrationBody(request);
-      if (!exactKeys(input, FIELDS) || !UUID.test(input.id) || input.id === pin.id ||
+      const hasPreparation = exactKeys(input, PREPARED_FIELDS);
+      if ((!exactKeys(input, FIELDS) && !hasPreparation) || !UUID.test(input.id) || input.id === pin.id ||
           !timestamp(input.expiresAt) || input.expiresAt <= Date.now() ||
           !(input.replaceOf === null || input.replaceOf === pin.id) ||
           !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) throw new Denied(400, 'invalid_request');
       input.fileName = fileName(input.fileName);
+      let prepared = null;
+      if (hasPreparation) {
+        try { prepared = preparation(input); }
+        catch { throw new Denied(400, 'invalid_request'); }
+      }
       try { bytes = unb64(input.pdfBase64, MAX_PDF_BYTES); }
       catch { throw new Denied(400, 'invalid_request'); }
       input.pdfBase64 = '';
       if (bytes.length < 5 || String.fromCharCode(...bytes.subarray(0, 5)) !== '%PDF-') throw new Denied(400, 'invalid_pdf');
+      // The owner's preparation metadata is not proof of PDF structure or a
+      // watermark. Only the digest of the uploaded PDF can be checked here.
+      if (prepared) {
+        const actual = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('');
+        if (actual !== prepared.metadata.preparedSha256) throw new Denied(400, 'invalid_request');
+      }
       const keys = await this.keys();
       return await this.serial(async () => {
         const before = await this.state(this.ctx.storage, keys.audit, pin);
         this.check(before, input);
         if (input.expiresAt <= Date.now()) throw new Denied(400, 'invalid_request');
         const record = await sealDocument({ id: input.id, bytes, subjects: [subject],
-          expiresAt: input.expiresAt, authMode: 'access' }, keys.wrap);
+          expiresAt: input.expiresAt, authMode: 'access', ...(prepared ? { recipientName: prepared.recipientName } : {}) }, keys.wrap);
         bytes.fill(0);
         const serialized = utf8(JSON.stringify(record));
         const digestBytes = await crypto.subtle.digest('SHA-256', serialized);
         const digest = Array.from(new Uint8Array(digestBytes), b => b.toString(16).padStart(2, '0')).join('');
         const reservation = { id: input.id, createdAt: Date.now(), expiresAt: input.expiresAt, size: bytes.byteLength,
-          replaceOf: input.replaceOf, status: 'pending', fileName: input.fileName, recordSha256: digest };
+          replaceOf: input.replaceOf, status: 'pending', fileName: input.fileName, recordSha256: digest,
+          ...(prepared?.metadata ?? {}) };
         // Every possible R2 write consumes a durable encrypted slot first.
         // Failed or uncertain operations retain it; retries cannot create an
         // unlimited set of unlisted ciphertext objects.

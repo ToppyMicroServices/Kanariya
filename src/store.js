@@ -2,6 +2,8 @@ import { notificationTargets, deliverNotification } from "./notifications.js";
 
 const TOKEN = /^[A-Za-z0-9_-]{1,512}$/;
 const MANAGED = /^kr_[a-f0-9]{64}$/;
+const DOCUMENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const DOCUMENT_CANARY_SOURCE = 'vault-management-v1';
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
@@ -57,6 +59,7 @@ export class KanariyaStore {
       CREATE INDEX IF NOT EXISTS deliveries_event ON deliveries(event_id);
       CREATE TABLE IF NOT EXISTS guards (key TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS guards_expiry ON guards(expires_at);
+      CREATE TABLE IF NOT EXISTS vault_canary_heads (document_id TEXT PRIMARY KEY, token TEXT NOT NULL UNIQUE);
     `);
   }
   rows(query, ...args) { return [...this.sql.exec(query, ...args)]; }
@@ -89,6 +92,7 @@ export class KanariyaStore {
   async fetch(request) {
     const url = new URL(request.url);
     const path = url.pathname;
+    if (/^\/internal\/vault-canary\/(status|create|revoke|events)$/.test(path)) return this.documentCanary(request);
     if (path === "/internal/hit" && request.method === "POST") {
       const data = await readJson(request);
       return json(await this.record(data));
@@ -106,6 +110,7 @@ export class KanariyaStore {
         if (data[key] !== undefined && (typeof data[key] !== "string" || data[key].length > max)) return json({ error: `Invalid ${key}` }, 400);
       }
       if (!data.name?.trim()) return json({ error: "Name is required" }, 400);
+      if (data.src === DOCUMENT_CANARY_SOURCE) return json({ error: 'Reserved source' }, 400);
       const now = Date.now();
       const expires = data.expiresAt === undefined ? now + 90 * DAY : data.expiresAt === null ? null : typeof data.expiresAt === "string" ? Date.parse(data.expiresAt) : NaN;
       if (expires !== null && (!Number.isFinite(expires) || expires <= now)) return json({ error: "Expiry must be in the future or null" }, 400);
@@ -144,6 +149,48 @@ export class KanariyaStore {
     }
     return json({ error: "Not found" }, 404);
   }
+  documentCanaryView(row) {
+    if (!row) return null;
+    return { token: row.token, state: row.revoked_at !== null ? 'revoked' : row.expires_at <= Date.now() ? 'expired' : 'active',
+      expiresAt: row.expires_at, hitCount: row.hit_count, lastSeenAt: row.last_seen_at };
+  }
+  async documentCanary(request) {
+    if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+    let input;
+    try { input = await readJson(request); } catch { return json({ error: 'invalid_request' }, 400); }
+    const action = new URL(request.url).pathname.split('/').at(-1), create = action === 'create';
+    if (!input || Array.isArray(input) || typeof input !== 'object' ||
+        Object.keys(input).length !== (create ? 2 : 1) || typeof input.documentId !== 'string' || !DOCUMENT_ID.test(input.documentId) ||
+        (create && (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > 8640000000000000))) {
+      return json({ error: 'invalid_request' }, 400);
+    }
+    const id = input.documentId;
+    const current = () => this.one('SELECT t.* FROM tokens t JOIN vault_canary_heads h ON h.token=t.token WHERE h.document_id=? AND t.src=? AND t.name=?', id, DOCUMENT_CANARY_SOURCE, id);
+    if (action === 'status') return json({ documentId: id, canary: this.documentCanaryView(current()) });
+    if (action === 'events') {
+      const rows = this.rows('SELECT e.* FROM events e JOIN tokens t ON t.token=e.token WHERE t.src=? AND t.name=? AND e.expires_at>? ORDER BY e.ts DESC,e.id DESC LIMIT 50',
+        DOCUMENT_CANARY_SOURCE, id, Date.now());
+      return json({ documentId: id, events: rows.map(row => ({ id: row.id, at: row.ts,
+        outcome: 'url_requested', notifications: this.rows('SELECT type,state FROM deliveries WHERE event_id=? ORDER BY type', row.id)
+          .map(({ type, state }) => ({ type, state })) })) });
+    }
+    return this.storage.transaction(async () => {
+      const row = current();
+      if (action === 'revoke') {
+        this.sql.exec('UPDATE tokens SET revoked_at=COALESCE(revoked_at,?) WHERE src=? AND name=?', Date.now(), DOCUMENT_CANARY_SOURCE, id);
+        return json({ documentId: id, canary: this.documentCanaryView(row ? current() : null) });
+      }
+      if (this.one('SELECT 1 FROM tokens WHERE src=? AND name=? AND revoked_at IS NULL AND expires_at>? LIMIT 1', DOCUMENT_CANARY_SOURCE, id, Date.now())) {
+        return json({ error: 'canary_exists' }, 409);
+      }
+      if (input.expiresAt <= Date.now()) return json({ error: 'invalid_request' }, 400);
+      if (this.one('SELECT COUNT(*) AS n FROM tokens').n >= setting(this.env, 'TOKEN_MAX_ITEMS', 1000, 1, 10000)) return json({ error: 'canary_capacity' }, 409);
+      const token = `kr_${randomHex(32)}`;
+      this.sql.exec('INSERT INTO tokens(token,name,location,src,created_at,expires_at) VALUES(?,?,?,?,?,?)', token, id, '', DOCUMENT_CANARY_SOURCE, Date.now(), input.expiresAt);
+      this.sql.exec('INSERT OR REPLACE INTO vault_canary_heads(document_id,token) VALUES(?,?)', id, token);
+      return json({ documentId: id, canary: this.documentCanaryView(this.one('SELECT * FROM tokens WHERE token=?', token)) }, 201);
+    });
+  }
   async record({ event, registered, nonce = "", nonceExpiresAt = 0 }) {
     const targets = await notificationTargets(this.env);
     return this.storage.transaction(async () => {
@@ -153,10 +200,13 @@ export class KanariyaStore {
         if (!MANAGED.test(event.token)) return { accepted: false, reason: "invalid" };
         token = this.one("SELECT * FROM tokens WHERE token=?", event.token);
         if (!token) return { accepted: false, reason: "unknown" };
+        if (event.test && token.src === DOCUMENT_CANARY_SOURCE) return { accepted: false, reason: 'document_canary_test_disabled' };
         if (!event.test && (token.revoked_at !== null || (token.expires_at !== null && token.expires_at <= now))) return { accepted: false, reason: "inactive" };
         if (event.test && token.last_test_at !== null && token.last_test_at + 10000 > now) return { accepted: false, reason: "test_rate_limit" };
         // Placement is trusted registry metadata; a visitor cannot relabel the alert.
-        event = { ...event, src: token.src, name: token.name, location: token.location };
+        event = token.src === DOCUMENT_CANARY_SOURCE && DOCUMENT_ID.test(token.name) ?
+          { kind: 'vault.canary', id: event.id, ts: event.ts, token: event.token, test: false, documentId: token.name, ipHash: '' } :
+          { ...event, src: token.src, name: token.name, location: token.location };
       }
       // Admission never evicts unexpired evidence, including another token's outbox.
       // Check both caps before writing nonce, rate or notification guards.
@@ -189,7 +239,8 @@ export class KanariyaStore {
         this.one("SELECT 1 FROM guards WHERE key=? AND expires_at>?", cooldownKey, now) ||
         this.one("SELECT 1 FROM guards WHERE key>=? AND key<? AND expires_at>? LIMIT 1", `${legacyDedupeBase},`, `${legacyDedupeBase}-`, now));
       const ttl = setting(this.env, "EVENT_TTL_SECONDS", 2592000, 60, 31536000);
-      this.sql.exec("INSERT INTO events VALUES(?,?,?,?,?)", event.id, event.token, now, JSON.stringify(event), now + ttl * 1000);
+      const body = event.kind === 'vault.canary' ? { kind: event.kind, id: event.id, ts: event.ts, documentId: event.documentId } : event;
+      this.sql.exec("INSERT INTO events VALUES(?,?,?,?,?)", event.id, event.token, now, JSON.stringify(body), now + ttl * 1000);
       if (nonce) this.sql.exec("INSERT OR REPLACE INTO guards VALUES(?,?,?)", JSON.stringify(["nonce", event.token, nonce]), 1, nonceExpiresAt);
       if (token) {
         if (event.test) this.sql.exec("UPDATE tokens SET last_test_at=? WHERE token=?", now, event.token);

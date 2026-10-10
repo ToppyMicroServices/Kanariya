@@ -72,9 +72,40 @@ completed and incomplete registrations together to 20 slots. A failed or uncerta
 write retains its slot and private status across restarts. The UI confirms a
 registration by reading its ID back and does not automatically resend an uncertain
 upload. Cleanup, retry and activation of incomplete candidates are not yet exposed
-by the console. Registration checks the PDF header and size; it does not establish
-structural validity, accessibility or the presence of a recipient watermark.
-Review the final PDF using the preparation checks above before any activation.
+by the console.
+
+Browser registration asks for an organization and optional contact name, or an
+individual name. Recipient watermarks default to on. A pinned, self-hosted
+`pdf-lib` worker validates the bounded PDF and adds the name in translucent gray
+to every page. The owner previews the final PDF before explicitly uploading it;
+changing the file, recipient, watermark option or deadline invalidates the preview.
+The original file is unchanged. Turning off the watermark still validates and
+previews the PDF. No PDF bytes leave the browser before registration is confirmed.
+
+The private registration stores the recipient, watermark option, input/output
+SHA-256 values and preparation version in encrypted metadata. The server checks
+the uploaded output hash; the other preparation fields are trusted owner claims,
+not server proof of a watermark or the original file's contents. The browser
+rejects encrypted, signed, interactive and overly complex PDFs. Library checks do
+not replace qpdf/Ghostscript and independent final-PDF render checks before any
+activation. The current public dummy document is not automatically changed.
+
+### Canary management
+
+The same owner page includes a closed Canary panel for the current dummy document.
+It can create an expiring URL, copy it, stop it and read up to 50 URL-hit records
+when an explicit `CANARY_ADMIN` service binding targets the ordinary Kanariya
+Worker's named `CanaryManagement` entrypoint. Without that binding it is inactive;
+there is no bearer-key or external-network fallback. Adding this binding requires
+approval and must preserve all existing production bindings.
+
+This private connection accepts only document UUIDs and the document's current
+deadline. It has no global token inventory, arbitrary forwarding or test-send
+operation. New document-managed Canary records and notifications omit recipient
+names, emails, IP hashes, user agents, referrers and location. Existing ordinary
+Canary tokens retain their behavior. The UI never fetches the Canary URL itself.
+A URL hit is not evidence that a PDF was read or that the intended person opened
+it; creating a URL does not insert it into a PDF or enable automatic PDF tracking.
 
 Disclosure contacts are an encrypted list of up to 50 email addresses, with stale
 edits rejected. They are records of intended recipients, **not email authentication

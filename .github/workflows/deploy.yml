@@ -47,6 +47,9 @@ jobs:
       - name: Run local runtime checks
         run: npm run test:runtime
 
+      - name: Verify private Canary management RPC
+        run: node scripts/check_canary_management.mjs
+
       - name: Run Vault local runtime checks
         working-directory: vault
         run: npm run test:runtime

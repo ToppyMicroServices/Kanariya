@@ -1,5 +1,6 @@
 import { KanariyaStore } from "./store.js";
 export { KanariyaStore };
+export { CanaryManagement } from './canary-management.js';
 
 const TOKEN = /^[A-Za-z0-9_-]{1,512}$/;
 const MANAGED_TOKEN = /^kr_[a-f0-9]{64}$/;

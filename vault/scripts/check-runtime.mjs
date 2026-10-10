@@ -162,7 +162,9 @@ export class RuntimeDocument extends VaultDocument {
     for (const name of ["pending", "failed", "providerAccepted"]) assert.ok(Number.isSafeInteger(value[name]) && value[name] >= 0);
   }
   for (const [path, mime] of [["/v1/admin", "text/html; charset=utf-8"], ["/v1/admin/assets/admin.js", "text/javascript; charset=utf-8"],
-    ["/v1/admin/assets/admin.css", "text/css; charset=utf-8"]]) {
+    ["/v1/admin/assets/admin.css", "text/css; charset=utf-8"],
+    ...["canary.js", "registration-preview.js", "pdf-preparation-worker.js", "pdf-lib.mjs", "pdf-preparation.mjs", "recipient.js"].map(name => ["/v1/admin/assets/" + name, "text/javascript; charset=utf-8"]),
+    ["/v1/admin/assets/pdf-lib-LICENSE.md", "text/plain; charset=utf-8"]]) {
     assert.equal((await signed(path, { actor: "" })).status, 401);
     assert.equal((await signed(path, { actor: subject })).status, 403);
     const page = await signed(path);
@@ -178,6 +180,17 @@ export class RuntimeDocument extends VaultDocument {
   assert.equal((await signed('/v1/admin/assets/management.js', { actor: subject })).status, 403);
   assert.equal(managementScript.status, 200); privateManagementHeaders(managementScript); assert.ok((await managementScript.text()).length > 100);
   report.checks.push("management_html_and_assets_require_owner_with_strict_csp");
+  for (const action of ['canary', 'canary-logs']) {
+    const path = `/v1/documents/${id}/${action}`;
+    assert.equal((await signed(path, { actor: '' })).status, 401);
+    assert.equal((await signed(path, { actor: subject })).status, 403);
+    const response = await signed(path); assert.equal(response.status, 200); privateManagementHeaders(response);
+    assert.equal((await response.json()).configured, false);
+  }
+  const disabledCanary = await signed(`/v1/documents/${id}/canary`, { method: 'POST', body: { action: 'create' } });
+  assert.equal(disabledCanary.status, 503); assert.deepEqual(await disabledCanary.json(), { error: 'canary_not_configured' });
+  report.checks.push('canary_management_is_inactive_without_an_explicit_service_binding');
+
   assert.equal((await signed("/v1/management", { actor: "" })).status, 401);
   assert.equal((await signed("/v1/management", { actor: subject })).status, 403);
   assert.deepEqual(await (await signed("/v1/management")).json(), { documentId: id });
@@ -226,26 +239,35 @@ export class RuntimeDocument extends VaultDocument {
   assert.equal((await signed(registryPath, { actor: subject })).status, 403);
   const emptyRegistry = await signed(registryPath); privateManagementHeaders(emptyRegistry);
   assert.deepEqual(await emptyRegistry.json(), { revision: 0, documents: [], pending: 0 });
-  const candidateId = crypto.randomUUID(), candidateName = 'Synthetic Runtime Registration.pdf';
+  const candidateId = crypto.randomUUID(), candidateName = 'Synthetic Runtime Registration.pdf', candidateRecipient = 'Synthetic Registration Recipient';
   const candidatePDF = new Uint8Array(4096); candidatePDF.fill(32); candidatePDF.set(utf8('%PDF-1.4\nSYNTHETIC-REGISTRATION-PRIVATE-BODY\n'));
   const registrationInput = { id: candidateId, pdfBase64: Buffer.from(candidatePDF).toString('base64'), fileName: candidateName,
-    expiresAt: Date.now() + 300000, replaceOf: null, expectedRevision: 0 };
+    expiresAt: Date.now() + 300000, replaceOf: null, expectedRevision: 0,
+    recipient: { type: 'organization', organizationName: candidateRecipient, personName: null }, watermarkEnabled: false,
+    sourceSha256: createHash('sha256').update(candidatePDF).digest('hex'),
+    preparedSha256: createHash('sha256').update(candidatePDF).digest('hex'), preparationVersion: 1 };
   const registryBefore = await runtimeState(registryStub);
   for (const actor of ['', subject]) assert.equal((await signed(registryPath, { actor, method: 'POST', body: registrationInput })).status, actor ? 403 : 401);
   assert.equal((await signed(registryPath, { method: 'POST', body: registrationInput, headers: { origin: 'https://elsewhere.example.test' } })).status, 403);
   assert.deepEqual(await runtimeState(registryStub), registryBefore); assert.equal(await bucket.head(`staging/${candidateId}.sealed.json`), null);
   report.checks.push('registration_unauthenticated_requests_do_not_read_keys_or_store_documents');
+  assert.equal((await signed(registryPath, { method: 'POST', body: { ...registrationInput, preparedSha256: 'b'.repeat(64) } })).status, 400);
+  assert.deepEqual(await runtimeState(registryStub), registryBefore);
+  report.checks.push('prepared_pdf_hash_mismatch_rejected_before_keys_storage_or_registration');
   const registeredResponse = await signed(registryPath, { method: 'POST', body: registrationInput }); assert.equal(registeredResponse.status, 201);
   const registered = await registeredResponse.json(); assert.ok(registered.revision > 0); assert.equal(registered.pending, 0); assert.equal(registered.documents.length, 1);
-  assert.deepEqual(Object.keys(registered.documents[0]).sort(), ['id', 'createdAt', 'expiresAt', 'size', 'replaceOf', 'status', 'fileName'].sort());
+  assert.deepEqual(Object.keys(registered.documents[0]).sort(), ['id', 'createdAt', 'expiresAt', 'size', 'replaceOf', 'status', 'fileName', 'recipient', 'watermarkEnabled', 'sourceSha256', 'preparedSha256', 'preparationVersion'].sort());
   assert.equal(registered.documents[0].id, candidateId); assert.equal(registered.documents[0].fileName, candidateName);
   assert.equal(registered.documents[0].size, candidatePDF.length); assert.equal(registered.documents[0].status, 'private');
   assert.equal(registered.documents[0].replaceOf, null); assert.equal(registered.documents[0].expiresAt, registrationInput.expiresAt);
+  assert.deepEqual(registered.documents[0].recipient, registrationInput.recipient);
+  assert.equal(registered.documents[0].preparedSha256, registrationInput.preparedSha256);
   const storedCandidate = await (await bucket.get(`staging/${candidateId}.sealed.json`)).text();
-  for (const value of [Buffer.from(candidatePDF).toString('base64'), 'SYNTHETIC-REGISTRATION-PRIVATE-BODY', candidateName, env.VAULT_WRAP_KEY]) assert.ok(!storedCandidate.includes(value));
+  for (const value of [Buffer.from(candidatePDF).toString('base64'), 'SYNTHETIC-REGISTRATION-PRIVATE-BODY', candidateName, candidateRecipient, env.VAULT_WRAP_KEY]) assert.ok(!storedCandidate.includes(value));
   const registrationState = await runtimeState(registryStub);
   assert.ok(registrationState.metrics.r2Gets > 0 && registrationState.metrics.r2Puts > 0);
   assert.ok(!JSON.stringify(registrationState.registration).includes(candidateName));
+  assert.ok(!JSON.stringify(registrationState.registration).includes(candidateRecipient));
   assert.deepEqual(await (await signed(registryPath)).json(), registered);
   assert.equal((await signed(registryPath, { method: 'POST', body: { ...registrationInput, id: crypto.randomUUID() } })).status, 409);
   assert.equal((await signed(`/v1/documents/${candidateId}/open`, { actor: subject, method: 'POST', body: { requestId: crypto.randomUUID() } })).status, 403);
@@ -365,7 +387,7 @@ export class RuntimeDocument extends VaultDocument {
     const bytes = await readFile(path);
     assert.ok(!bytes.includes(Buffer.from(pdf)));
     assert.ok(!bytes.includes(Buffer.from(pdf).toString("base64")));
-    for (const secret of [subject, contactEmail, candidateName, 'Synthetic Replacement Candidate.pdf', 'SYNTHETIC-REGISTRATION-PRIVATE-BODY',
+    for (const secret of [subject, contactEmail, candidateName, candidateRecipient, 'Synthetic Replacement Candidate.pdf', 'SYNTHETIC-REGISTRATION-PRIVATE-BODY',
       Buffer.from(candidatePDF).toString('base64'), "SYNTHETIC-RUNTIME-PRIVATE-BODY", env.VAULT_WRAP_KEY, env.VAULT_AUDIT_KEY]) assert.ok(!bytes.includes(Buffer.from(secret)));
   }
   report.checks.push("durable_storage_contains_no_fixture_plaintext_or_keys");
@@ -492,7 +514,7 @@ export class RuntimeDocument extends VaultDocument {
     report.error ??= 'fixture_outbound_validation_failed'; process.exitCode = 1;
   }
   report.pass = report.status === "passed";
-  report.testCounts = { runtimeChecksExpected: 28, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
+  report.testCounts = { runtimeChecksExpected: 30, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
     bundleChecksPassed: report.checks.filter(check => check === "dry_run_bundle" || check.startsWith("frozen_")).length, totalChecksPassed: report.checks.length };
   await recordReport(); console.log(JSON.stringify(report));
 }

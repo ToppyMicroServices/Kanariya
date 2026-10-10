@@ -74,10 +74,12 @@ function line(value, max = 512) {
 
 function title(event) {
   if (event.kind === "vault.decryption") return "Kanariya protected-document event";
+  if (event.kind === 'vault.canary') return 'Kanariya document canary event';
   return event.test === true ? "Kanariya TEST notification" : "Kanariya DETECTION: token accessed";
 }
 
 function eventText(event, deliveryId) {
+  if (event.kind === 'vault.canary') return `${title(event)}\nevent ID: ${line(event.id, 128)}\nts: ${line(event.ts, 64)}\nstatus: URL requested`;
   if (event.kind === "vault.decryption") {
     const outcome = ["decrypted", "failed", "unknown"].includes(event.outcome) ? event.outcome : "unknown";
     return `${title(event)}\nevent ID: ${line(event.id, 128)}\nstatus: ${outcome}`;
@@ -125,7 +127,7 @@ function requestFor(env, target, event, deliveryId) {
       throw new Error("configuration_error");
     }
     const sender = { email: from, name: line(env.MAIL_FROM_NAME || "Kanariya", 256) };
-    const subject = event.kind === "vault.decryption" ? "Kanariya protected-document event" : line(`${env.MAIL_SUBJECT_PREFIX || "Kanariya alert"} [${event.test === true ? "TEST" : "DETECTION"}]: ${event.token}`, 256);
+    const subject = event.kind === 'vault.canary' ? title(event) : event.kind === "vault.decryption" ? "Kanariya protected-document event" : line(`${env.MAIL_SUBJECT_PREFIX || "Kanariya alert"} [${event.test === true ? "TEST" : "DETECTION"}]: ${event.token}`, 256);
     const text = eventText(event, deliveryId);
     if (provider === "cloudflare") {
       if (typeof env.NOTIFY_EMAIL?.send !== "function" || to.length > 50) {

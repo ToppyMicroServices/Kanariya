@@ -7,3 +7,5 @@ reports/
 *.sealed.json
 src/pdfjs-assets.generated.js
 src/pdfjs-assets.generated.js.*.tmp
+src/pdf-preparation-assets.generated.js
+src/pdf-preparation-assets.generated.js.*.tmp

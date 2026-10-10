@@ -84,6 +84,12 @@ async function fixture() {
     set alteredReadback(value) { alteredReadback = value; }, set afterRead(value) { afterRead = value; } };
 }
 
+function preparedInput(f, changes = {}) {
+  return f.input({ recipient: { type: 'organization', organizationName: '株式会社ダミー', personName: '採用担当' },
+    watermarkEnabled: true, sourceSha256: 'b'.repeat(64),
+    preparedSha256: createHash('sha256').update(f.pdf).digest('hex'), preparationVersion: 1, ...changes });
+}
+
 test('owner registration stores only encrypted PDF and metadata with a private exact response', async () => {
   const f = await fixture(), pinBefore = [f.env.DUMMY_DOCUMENT_ID, f.env.DUMMY_RECORD_SHA256], input = f.input();
   assert.deepEqual(await f.list(), { revision: 0, documents: [], pending: 0 });
@@ -113,6 +119,149 @@ test('a replacement candidate names only the current pinned document and remains
   assert.equal((await response.json()).documents[0].replaceOf, f.env.DUMMY_DOCUMENT_ID);
   assert.equal((await f.state()).documents[0].status, 'private');
   assert.equal(f.objects.size, 2); assert.equal(f.notifications, 0);
+});
+
+test('browser preparation metadata stays encrypted and owner-visible without publishing or asserting a PDF transform', async () => {
+  const f = await fixture(), pinBefore = [f.env.DUMMY_DOCUMENT_ID, f.env.DUMMY_RECORD_SHA256];
+  const input = preparedInput(f, { recipient: { type: 'organization', organizationName: ' 株式会社ダミー ', personName: ' 担当e\u0301 ' } });
+  const response = await f.request({ input }); assert.equal(response.status, 201);
+  const result = await response.json(), recipient = { type: 'organization', organizationName: '株式会社ダミー', personName: '担当é' };
+  assert.deepEqual(result.documents[0], { id: input.id, createdAt: result.documents[0].createdAt, expiresAt: input.expiresAt,
+    size: f.pdf.length, replaceOf: null, status: 'private', fileName: input.fileName,
+    recipient, watermarkEnabled: true, sourceSha256: input.sourceSha256, preparedSha256: input.preparedSha256, preparationVersion: 1 });
+  assert.equal(result.revision, 2); assert.equal(result.pending, 0);
+  const stored = f.objects.get(`staging/${input.id}.sealed.json`), record = JSON.parse(Buffer.from(stored).toString());
+  const policy = await readPolicy(record, input.id, f.wrap);
+  assert.equal(policy.recipientName, '株式会社ダミー 担当é');
+  assert.deepEqual(policy.subjects, [f.owner]); assert.equal(policy.authMode, 'access');
+  // These synthetic header bytes intentionally have no watermark or validated
+  // PDF structure. The upload API checks the received digest, not either claim.
+  assert.deepEqual(await decryptDocument(record, f.wrap, policy), f.pdf);
+  assert.equal(Object.hasOwn(policy, 'watermarkEnabled'), false);
+  assert.deepEqual((await f.state()).documents[0].recipient, recipient);
+  for (const persisted of [JSON.stringify([...f.storage.map]), Buffer.from(stored).toString()]) {
+    for (const sensitive of [recipient.organizationName, recipient.personName, policy.recipientName, input.sourceSha256,
+      input.preparedSha256, input.fileName, 'recipient', 'watermarkEnabled', 'SYNTHETIC_PRIVATE_REGISTRATION_CONTENT']) assert.ok(!persisted.includes(sensitive));
+  }
+  f.restart(); assert.deepEqual(await f.list(), result);
+  assert.deepEqual([f.env.DUMMY_DOCUMENT_ID, f.env.DUMMY_RECORD_SHA256], pinBefore);
+  assert.equal(Buffer.from(f.objects.get(`${pinBefore[0]}.sealed.json`)).toString(), 'SYNTHETIC_EXISTING_PUBLIC_RECORD');
+  assert.equal(f.notifications, 0);
+});
+
+for (const recipient of [
+  { type: 'organization', organizationName: '株式会社ダミー', personName: null },
+  { type: 'person', organizationName: null, personName: '個人ダミー' },
+]) test(`prepared ${recipient.type} metadata supports an explicit disabled watermark`, async () => {
+  const f = await fixture(), input = preparedInput(f, { recipient, watermarkEnabled: false });
+  const response = await f.request({ input }); assert.equal(response.status, 201);
+  const summary = (await response.json()).documents[0];
+  assert.deepEqual(summary.recipient, recipient); assert.equal(summary.watermarkEnabled, false);
+  const record = JSON.parse(Buffer.from(f.objects.get(`staging/${input.id}.sealed.json`)).toString());
+  const policy = await readPolicy(record, input.id, f.wrap);
+  assert.equal(policy.recipientName, recipient.organizationName ?? recipient.personName);
+  assert.deepEqual(await decryptDocument(record, f.wrap, policy), f.pdf); assert.equal(f.notifications, 0);
+});
+
+test('legacy v1 rows coexist with prepared candidates and acquire no preparation claims', async () => {
+  const f = await fixture(), legacy = f.input(); assert.equal((await f.request({ input: legacy })).status, 201);
+  const before = await f.list(), saved = (await f.state()).documents[0];
+  assert.equal(Object.keys(saved).length, 8);
+  for (const field of ['recipient', 'watermarkEnabled', 'sourceSha256', 'preparedSha256', 'preparationVersion']) {
+    assert.equal(Object.hasOwn(saved, field), false); assert.equal(Object.hasOwn(before.documents[0], field), false);
+  }
+  f.restart(); assert.deepEqual(await f.list(), before);
+  const response = await f.request({ input: preparedInput(f, { expectedRevision: 2 }) }); assert.equal(response.status, 201);
+  const result = await response.json(); assert.deepEqual(result.documents[0], before.documents[0]);
+  assert.equal(result.revision, 4); assert.equal(result.documents[1].preparationVersion, 1);
+  f.restart(); assert.deepEqual(await f.list(), result); assert.equal(f.notifications, 0);
+});
+
+for (const field of ['recipient', 'watermarkEnabled', 'sourceSha256', 'preparedSha256', 'preparationVersion']) {
+  test(`preparation fields must be supplied together: missing ${field}`, async () => {
+    const f = await fixture(), input = preparedInput(f); delete input[field];
+    assert.equal((await f.request({ input })).status, 400);
+    assert.deepEqual([f.reads, f.writes, f.storage.writes, f.notifications], [0, 0, 0, 0]);
+  });
+  test(`legacy uploads reject the isolated preparation field ${field}`, async () => {
+    const f = await fixture(), metadata = preparedInput(f), input = f.input({ [field]: metadata[field] });
+    assert.equal((await f.request({ input })).status, 400);
+    assert.deepEqual([f.reads, f.writes, f.storage.writes, f.notifications], [0, 0, 0, 0]);
+  });
+}
+
+for (const [label, changes] of [
+  ['recipient array', { recipient: [] }], ['recipient null', { recipient: null }],
+  ['unknown recipient type', { recipient: { type: 'company', organizationName: '会社', personName: null } }],
+  ['missing recipient field', { recipient: { type: 'organization', organizationName: '会社' } }],
+  ['extra recipient field', { recipient: { type: 'organization', organizationName: '会社', personName: null, email: 'forged@example.test' } }],
+  ['organization without a name', { recipient: { type: 'organization', organizationName: null, personName: '担当' } }],
+  ['person without a name', { recipient: { type: 'person', organizationName: null, personName: null } }],
+  ['person with an organization', { recipient: { type: 'person', organizationName: '会社', personName: '担当' } }],
+  ['empty organization name', { recipient: { type: 'organization', organizationName: ' ', personName: null } }],
+  ['path in recipient', { recipient: { type: 'person', organizationName: null, personName: '../dummy' } }],
+  ['bidi in recipient', { recipient: { type: 'person', organizationName: null, personName: 'dummy\u202e' } }],
+  ['malformed Unicode recipient', { recipient: { type: 'person', organizationName: null, personName: '\ud800' } }],
+  ['long combined recipient', { recipient: { type: 'organization', organizationName: '界'.repeat(40), personName: '界'.repeat(21) } }],
+  ['watermark string', { watermarkEnabled: 'true' }], ['watermark null', { watermarkEnabled: null }],
+  ['unknown preparation version', { preparationVersion: 2 }], ['string preparation version', { preparationVersion: '1' }],
+  ['invalid source hash', { sourceSha256: 'not-a-hash' }], ['uppercase source hash', { sourceSha256: 'A'.repeat(64) }],
+  ['non-string source hash', { sourceSha256: null }], ['invalid prepared hash', { preparedSha256: 'not-a-hash' }],
+  ['non-string prepared hash', { preparedSha256: ['a'.repeat(64)] }], ['wrong received PDF digest', { preparedSha256: 'c'.repeat(64) }],
+]) test(`prepared registration rejects ${label} before keys or persistence`, async () => {
+  const f = await fixture(); let keyReads = 0;
+  for (const key of ['VAULT_WRAP_KEY', 'VAULT_AUDIT_KEY']) {
+    const value = f.env[key]; Object.defineProperty(f.env, key, { get() { keyReads++; return value; } });
+  }
+  const response = await f.request({ input: preparedInput(f, changes) }); assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: 'invalid_request' });
+  assert.deepEqual([keyReads, f.reads, f.writes, f.storage.writes, f.notifications], [0, 0, 0, 0, 0]);
+});
+
+test('the combined recipient accepts the exact 180 UTF-8 byte boundary', async () => {
+  const f = await fixture(), recipient = { type: 'organization', organizationName: '界'.repeat(40), personName: 'x'.repeat(59) };
+  const response = await f.request({ input: preparedInput(f, { recipient }) }); assert.equal(response.status, 201);
+  assert.deepEqual((await response.json()).documents[0].recipient, recipient);
+});
+
+test('an incomplete prepared upload retains only encrypted metadata and a durable private reservation', async () => {
+  const f = await fixture(), input = preparedInput(f); f.readFailure = true;
+  assert.equal((await f.request({ input })).status, 503); f.restart();
+  assert.deepEqual(await f.list(), { revision: 1, documents: [], pending: 1 });
+  const reservation = (await f.state()).reservations[0];
+  for (const field of ['recipient', 'watermarkEnabled', 'sourceSha256', 'preparedSha256', 'preparationVersion']) assert.deepEqual(reservation[field], input[field]);
+  for (const sensitive of [input.recipient.organizationName, input.recipient.personName, input.sourceSha256, input.preparedSha256]) {
+    assert.ok(!JSON.stringify([...f.storage.map]).includes(sensitive));
+  }
+  const before = f.writes;
+  assert.equal((await f.request({ input: { ...input, expectedRevision: 1 } })).status, 409);
+  assert.equal(f.writes, before); assert.equal(f.notifications, 0);
+});
+
+for (const pending of [false, true]) for (const [label, change] of [
+  ['partial preparation', entry => { delete entry.sourceSha256; }],
+  ['extra metadata', entry => { entry.preparationComplete = true; }],
+  ['extra recipient field', entry => { entry.recipient.email = 'private@example.test'; }],
+  ['unnormalized recipient', entry => { entry.recipient.organizationName = ' 株式会社ダミー'; }],
+  ['unknown version', entry => { entry.preparationVersion = 2; }],
+  ['invalid hash', entry => { entry.preparedSha256 = null; }],
+]) test(`malformed ${pending ? 'pending' : 'completed'} preparation state rejects ${label} without exposing metadata`, async () => {
+  const f = await fixture(); f.readFailure = pending;
+  assert.equal((await f.request({ input: preparedInput(f) })).status, pending ? 503 : 201);
+  const state = await f.state(); change((pending ? state.reservations : state.documents)[0]); await f.writeState(state);
+  const before = [f.reads, f.writes, f.storage.writes];
+  for (const method of ['GET', 'POST']) {
+    const response = await f.request({ method, input: f.input({ expectedRevision: pending ? 1 : 2 }) });
+    assert.equal(response.status, 503); assert.deepEqual(await response.json(), { error: 'unavailable' });
+  }
+  assert.deepEqual([f.reads, f.writes, f.storage.writes], before); assert.equal(f.notifications, 0);
+});
+
+test('a legacy row with a partial preparation extension fails closed instead of acquiring preparation status', async () => {
+  const f = await fixture(); assert.equal((await f.request()).status, 201);
+  const state = await f.state(); state.documents[0].watermarkEnabled = true; await f.writeState(state);
+  const response = await f.request({ method: 'GET' }); assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'unavailable' });
 });
 
 test('the exact one MiB PDF boundary fits the separate upload and ciphertext limits', async () => {
