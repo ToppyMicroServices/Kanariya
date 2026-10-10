@@ -349,6 +349,21 @@ test("concurrent wrong-password attempts cannot bypass the durable per-source bu
   f.restart(); assert.equal((await f.request()).status, 429);
   assert.equal(f.storage.map.has('encrypted-journal'), false); assert.equal(f.calls.length, 0);
 });
+test("concurrent correct passwords keep the budget and parse each request once", async () => {
+  const f = await fixture(), instance = f.env.VAULT.get(f.id), originalInput = instance.input.bind(instance), inputCalls = [];
+  instance.input = async (request, max) => { inputCalls.push({ action: new URL(request.url).pathname.split('/').at(-1), max }); return originalInput(request, max); };
+  const responses = await Promise.all(Array.from({ length: 12 }, () => f.request()));
+  const details = await Promise.all(responses.map(async response => ({ status: response.status,
+    error: await response.clone().json().then(body => body.error ?? null, () => "non_json_response") })));
+  assert.equal(responses.filter(r => r.status === 200).length, 10, JSON.stringify(details));
+  assert.equal(responses.filter(r => r.status === 429).length, 2, JSON.stringify(details));
+  assert.deepEqual(inputCalls, Array.from({ length: 12 }, () => ({ action: "session", max: 2048 })));
+  assert.equal((await f.admission()).rates[0].count, 10); assert.equal((await f.state()).sessions.length, 10);
+  const cookie = responses.find(r => r.status === 200).headers.get('set-cookie').split(';')[0];
+  const opened = await f.request('open', { cookie }); assert.equal(opened.status, 200);
+  assert.deepEqual(new Uint8Array(await opened.arrayBuffer()), f.pdf);
+  assert.deepEqual(inputCalls.at(-1), { action: "open", max: 128 }); assert.equal(inputCalls.length, 13);
+});
 test("failure to persist the authentication attempt cannot issue a cookie or session", async () => {
   const f = await fixture(); f.storage.failAt = 1;
   const response = await f.request(); assert.equal(response.status, 503); assert.equal(response.headers.get("set-cookie"), null);
@@ -438,13 +453,20 @@ async function observeScrypt(callback, operation) {
   finally { cryptoNode.scryptSync = native; syncBuiltinESMExports(); }
 }
 test("every password KDF follows a durable budget commit and over-budget attempts never run it", async () => {
-  const f = await fixture(); let durableCount = 0, kdfs = 0;
-  f.storage.afterCommit = async () => { durableCount = (await f.admission()).rates[0].count; };
-  await observeScrypt(() => { kdfs++; assert.ok(durableCount >= kdfs, "the attempt must be durable before native scrypt starts"); }, async () => {
+  const f = await fixture(), committedCounts = [], kdfObservations = []; let durableCount = 0, kdfs = 0;
+  f.storage.afterCommit = async () => { durableCount = (await f.admission()).rates[0].count; committedCounts.push(durableCount); };
+  await observeScrypt(() => {
+    kdfs++; kdfObservations.push({ durableCount, kdfs });
+    assert.ok(durableCount >= kdfs, `the attempt must be durable before native scrypt starts: ${JSON.stringify(kdfObservations)}`);
+  }, async () => {
     const responses = await Promise.all(Array.from({ length: 12 }, () => f.request("session", { body: JSON.stringify({ password: "synthetic wrong password" }) })));
-    assert.equal(responses.filter(response => response.status === 401).length, 10);
-    assert.equal(responses.filter(response => response.status === 429).length, 2);
-    assert.equal(kdfs, 10); assert.equal(durableCount, 10);
+    const responseDetails = await Promise.all(responses.map(async response => ({ status: response.status,
+      error: await response.clone().json().then(body => body.error ?? null, () => "non_json_response") })));
+    const statusCounts = responseDetails.reduce((counts, response) => { counts[response.status] = (counts[response.status] ?? 0) + 1; return counts; }, {});
+    const diagnostic = JSON.stringify({ statusCounts, responses: responseDetails, kdfs, durableCount, committedCounts, kdfObservations });
+    assert.equal(responses.filter(response => response.status === 401).length, 10, diagnostic);
+    assert.equal(responses.filter(response => response.status === 429).length, 2, diagnostic);
+    assert.equal(kdfs, 10, diagnostic); assert.equal(durableCount, 10, diagnostic);
   });
 });
 test("unknown IDs, bad pins, disabled reader, and failed attempt persistence do not run password KDF", async () => {

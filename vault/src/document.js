@@ -120,7 +120,7 @@ export class VaultDocument {
     if (!(action === 'status' ? ['GET'] : action === 'session' ? ['POST', 'DELETE'] : ['POST']).includes(request.method)) throw new Denied(405, 'method_not_allowed');
     if (['cross-site', 'same-site'].includes(request.headers.get('sec-fetch-site')) ||
         (action !== 'status' && (request.headers.get('origin') !== url.origin || request.headers.get('content-type') !== 'application/json'))) throw new Denied();
-    const input = action === 'status' ? null : await this.input(request.clone(), action === 'session' ? 2048 : 128);
+    const input = action === 'status' ? null : await this.input(request, action === 'session' ? 2048 : 128);
     if (action === 'session' && (!input || Array.isArray(input) || typeof input !== 'object' ||
         (request.method === 'POST' ? Object.keys(input).length !== 1 || !passwordValid(input.password) : Object.keys(input).length))) throw new Denied(400, 'invalid_request');
     if (action === 'open' && (!input || Object.keys(input).length !== 1 || !UUID.test(input.requestId))) throw new Denied(400, 'invalid_request');
@@ -147,7 +147,7 @@ export class VaultDocument {
     }
     // R2 I/O cannot occupy the owner mutation queue. Authorization, expiry,
     // revocation and the unchanged pin are checked again in handle().
-    return { source, digest: pin.digest, record: await this.record(id, pin.digest) };
+    return { source, digest: pin.digest, record: await this.record(id, pin.digest), input };
   }
   live(policy, state, session = null) {
     if (policy.revoked || state.revoked || policy.expiresAt <= Date.now()) throw new Denied();
@@ -200,10 +200,10 @@ export class VaultDocument {
     }
     let input, token;
     if (action === 'open') {
-      input = await this.input(request);
+      input = passwordPath ? prepared.input : await this.input(request);
       if (!input || Object.keys(input).length !== 1 || !UUID.test(input.requestId)) throw new Denied(400, 'invalid_request');
     } else if (action === 'session') {
-      input = await this.input(request, 2048);
+      input = prepared.input;
       if (!input || Array.isArray(input) || typeof input !== 'object') throw new Denied(400, 'invalid_request');
       if (request.method === 'POST' && (Object.keys(input).length !== 1 || !passwordValid(input.password))) throw new Denied(400, 'invalid_request');
       if (request.method === 'DELETE' && Object.keys(input).length) throw new Denied(400, 'invalid_request');
