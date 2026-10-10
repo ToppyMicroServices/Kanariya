@@ -1,4 +1,4 @@
-export const ACCESS_ROUTE = /^\/v1\/documents\/([0-9a-f-]{36})\/(open|revoke|status|retry-notifications)$/;
+export const ACCESS_ROUTE = /^\/v1\/documents\/([0-9a-f-]{36})\/(open|revoke|status|retry-notifications|metadata|expiry)$/;
 export const PASSWORD_ROUTE = /^\/p\/([0-9a-f-]{36})\/(open|session|status)$/;
 export const HEADERS = {
   'cache-control': 'private, no-store, max-age=0', 'cdn-cache-control': 'no-store',

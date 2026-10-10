@@ -5,6 +5,8 @@ Credentials come only from CLOUDFLARE_API_TOKEN/CLOUDFLARE_ACCOUNT_ID. This
 helper never fetches secret values or R2 objects, and never changes bindings,
 variables, routes, migration settings, or public endpoints. No automatic retry
 or rollback is performed when an upload, activation, or readback is uncertain.
+R2 public configuration is a separate audit and is not rechecked by this
+Worker source release; this helper makes no R2 API requests.
 """
 import argparse
 import email.policy
@@ -156,7 +158,7 @@ class API:
                 error.close()
             failure = SafeFailure(f"api_http_{error.code}")
             failure.http_status, failure.api_codes = error.code, codes
-            failure.api_resource = "r2_public_metadata" if "/r2/buckets/" in path else "worker_or_zone_metadata"
+            failure.api_resource = "worker_or_zone_metadata"
             raise failure from None
         except (urllib.error.URLError, TimeoutError):
             raise SafeFailure("api_transport_unknown") from None
@@ -236,7 +238,7 @@ def source(api):
     return digest(body)
 
 
-def private_state(api):
+def worker_endpoints(api):
     subdomain = api(SCRIPT + "/subdomain")
     require(subdomain.get("enabled") is False and subdomain.get("previews_enabled") is False, "public_endpoint_changed")
     domains = api(f"/accounts/{ACCOUNT}/workers/domains")
@@ -258,13 +260,7 @@ def private_state(api):
     for zone in sorted(zones):
         rows = api(f"/zones/{zone}/workers/routes")
         require(isinstance(rows, list) and not any(row.get("script") == WORKER for row in rows), "vault_zone_route_changed")
-    base = f"/accounts/{ACCOUNT}/r2/buckets/{BUCKET}"
-    require(api(base).get("name") == BUCKET, "dummy_bucket_identity_unknown")
-    managed, custom = api(base + "/domains/managed"), api(base + "/domains/custom")
-    require(managed.get("enabled") is False and isinstance(custom.get("domains"), list) and
-            all(row.get("enabled") is False for row in custom["domains"]), "dummy_bucket_not_private")
-    return {"endpointsSha256": digest({"subdomain": subdomain, "assignedDomains": assigned, "zones": sorted(zones)}),
-            "bucketPublicStateSha256": digest({"managed": managed, "custom": custom})}
+    return {"endpointsSha256": digest({"subdomain": subdomain, "assignedDomains": assigned, "zones": sorted(zones)})}
 
 
 def snapshot(api, expected_active, expected_latest):
@@ -277,7 +273,7 @@ def snapshot(api, expected_active, expected_latest):
     result = {"activeDetail": detail(api, expected_active), "latestDetail": detail(api, expected_latest),
               "bindingsSha256": bindings, "settingsSha256": digest(stable),
               "settingsFlagsPresent": flags_present, "settingsFlags": flags,
-              "sourceSha256": source(api), **private_state(api)}
+              "sourceSha256": source(api), **worker_endpoints(api)}
     require(result["activeDetail"]["bindingsSha256"] == result["latestDetail"]["bindingsSha256"] == bindings,
             "active_current_binding_drift")
     require(active(api) == expected_active and latest(api) == expected_latest, "state_changed_during_readback")
@@ -287,7 +283,7 @@ def snapshot(api, expected_active, expected_latest):
 def unchanged(observed, baseline, expected_source):
     require(observed["sourceSha256"] == expected_source, "source_readback_mismatch")
     for key in ("activeDetail", "latestDetail", "bindingsSha256", "settingsSha256",
-                "settingsFlagsPresent", "settingsFlags", "endpointsSha256", "bucketPublicStateSha256"):
+                "settingsFlagsPresent", "settingsFlags", "endpointsSha256"):
         require(observed[key] == baseline[key], "configuration_changed")
 
 
@@ -335,7 +331,7 @@ def deploy(api, body, report, report_path):
     evidence(report_path, report)
     unchanged(snapshot(api, version, version), baseline, report["candidateSha256"])
     report.update(phase="active_source_and_configuration_verified", status="passed", percentage=100,
-                  sourceBindingsRuntimeAndPrivateStateVerified=True)
+                  sourceBindingsRuntimeAndWorkerEndpointsVerified=True)
     evidence(report_path, report)
     return report
 
@@ -349,7 +345,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     report = {"status": "running_not_verified", "phase": "local_gate", "worker": WORKER,
               "remoteMutations": 0, "workerSecretValuesRead": False, "varsOrSecretsWritten": False,
-              "r2ObjectsAccessed": False, "notificationsSent": 0,
+              "r2ApiRequests": 0, "r2ObjectsAccessed": False, "r2ConfigurationWritten": False,
+              "r2PublicConfigurationVerified": False,
+              "r2PublicConfiguration": "not_rechecked_source_only_release", "notificationsSent": 0,
               "automaticRetry": False, "automaticRollback": False}
     report_created = False
     try:

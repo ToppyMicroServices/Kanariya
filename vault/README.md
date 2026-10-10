@@ -11,7 +11,7 @@ The encrypted version-2 document policy selects exactly one `authMode`:
 
 There is no fallback between modes. A password session cannot open an Access document, and an Access JWT cannot substitute for the shared password. Owner status, revocation and notification repair stay under `/v1/documents/...` and always require the verified owner Access subject. Shared access is audited as `shared-password`, not as an identified individual.
 
-This source change does not activate the private deployment. The origin, Access configuration, owner/secrets, exact dummy UUID/ciphertext digest and provider setup must still be valid. The dummy-only gate is unchanged; real CVs remain excluded. Before any approved activation, review the Access application routing: `/` and `/v1/*` must remain protected, while only the separate `/p/*` reader surface may be reachable without a reader JWT. Do not turn off Access for the whole hostname. Use a dedicated origin without an existing service worker or cache rules that override the no-store headers. No Access policy, secret, bucket or live document is provisioned by these scripts or by the main repository workflow.
+The source-only release preserves the existing deployment configuration. The origin, Access configuration, owner/secrets, exact dummy UUID/ciphertext digest and provider setup must remain valid. The dummy-only gate is unchanged; real CVs remain excluded. Before any new installation, review the Access application routing: `/` and `/v1/*` must remain protected, while only the separate `/p/*` reader surface may be reachable without a reader JWT. Do not turn off Access for the whole hostname. Use a dedicated origin without an existing service worker or cache rules that override the no-store headers. No Access policy, secret, bucket or live document is provisioned by these scripts or by the main repository workflow.
 
 For offline preparation, the trusted stdin object accepted by `seal-document.mjs` adds `authMode`. Password mode uses `authMode:"password"`, `subjects:[]`, and `password`; Access mode uses `authMode:"access"` (or omission), `subjects`, and no password. Do not put credentials in command arguments, shell history, URLs, logs or checked-in files. Use the existing trusted secret-store bridge. Prefer a long randomly generated password or passphrase; communicate it separately from the document link.
 
@@ -35,13 +35,22 @@ current session deadline; that session lasts at most five minutes, does not rene
 automatically, and may end before the document deadline. The reader can authenticate
 again while the document remains valid.
 
-There is no owner UI or API for editing `expiresAt`. To change the deadline, prepare
-a replacement dummy record with the desired expiry, then review and update its
-private R2 object, document UUID and exact ciphertext digest together. Use a new
-UUID, preserve the existing service keys and bindings, and verify the replacement
-before sharing its new link. The old link remains valid until its original deadline
-unless the owner explicitly revokes it. This preparation does not upload or deploy
-the replacement automatically and does not admit a real CV.
+The owner console at `/v1/admin` manages the current pinned dummy PDF, its reader
+link, viewing deadline and irreversible revocation. It requires the existing
+verified owner Access subject; a reader's Access login or password session cannot
+use it. It does not open the PDF or send a notification when the page loads.
+
+The owner can shorten the deadline, or restore it up to the original sealed
+policy's expiry. This override is bound to the pinned ciphertext digest and saved
+only in the encrypted Durable Object journal. Existing password sessions are
+shortened as well; restoring the document deadline does not extend those sessions.
+The API rejects stale edits, revoked documents and extensions past the sealed
+expiry. Both reader modes enforce the effective deadline on new acquisitions.
+
+Registering or replacing a PDF is not supported by this console. A deadline beyond
+the sealed policy requires a separately prepared and reviewed replacement record,
+with its private R2 object, new UUID and exact ciphertext digest updated together.
+The dummy-only gate remains in place, and real CVs are not admitted.
 
 Revocation stops future acquisitions in both modes. Password mode also polls
 authorization while displaying a document; Access mode does not poll revocation
@@ -63,7 +72,7 @@ PDF release is POST-only. GET, HEAD, Range headers and conditional requests do n
 
 Notification sends now take place outside the document's serialized request queue. A short encrypted durable lease is committed before each send and its result is committed afterward; owner status/revoke remain responsive during a slow provider call. Retries remain at-least-once and retain the same event idempotency key; a process crash can still cause duplicate provider acceptance.
 
-**Status (2026-10-07):** the native Cloudflare notification candidate is active as private version `f9921a18-5a91-4af1-a97a-99a31b3208a6`, with source SHA-256 `dc71446d70cd91969e57b478d94b79f9dd184080ba01bbfb354e3919f02568ec` verified by readback. The owner confirmed both local dummy-test notifications in Proton's Spam folder. Inbox placement remains unverified. Activation preserved the original nine bindings, keys, runtime/settings, disabled public endpoints and root Proton mail DNS. Origin, Access, owner subject and dummy pins remain unconfigured, so production document viewing is inactive. No real CV access, Proton mailbox access, paid upgrade or additional notification send occurred during activation.
+**Historical snapshot (2026-10-07):** the native Cloudflare notification candidate was activated as private version `f9921a18-5a91-4af1-a97a-99a31b3208a6`, with source SHA-256 `dc71446d70cd91969e57b478d94b79f9dd184080ba01bbfb354e3919f02568ec` verified by readback. The owner confirmed both local dummy-test notifications in Proton's Spam folder. Inbox placement remained unverified. Activation preserved the original nine bindings, keys, runtime/settings, disabled public endpoints and root Proton mail DNS. At that point origin, Access, owner subject and dummy pins were unconfigured and production viewing was inactive. The later dummy rollout configured these values; this snapshot is not a description of the current deployment. No real CV access, Proton mailbox access, paid upgrade or additional notification send occurred during that activation.
 
 **Previous deployment (2026-10-06):** the local canvas viewer displayed the reviewed dummy PDF in the browser that previously showed an empty native PDF frame. The exact tested bundle was deployed to the private Vault as version `49f347bc-7397-499f-9a80-3e6135ce4657`, with source hash `af59ef55d3164040909bca7a9c250b46d2d9df5aa3e8bd37ef2383bbf1bdd773` verified by readback. Two new independent 256-bit dummy-service keys were backed up separately in macOS Keychain, verified there, then added as `VAULT_WRAP_KEY` and `VAULT_AUDIT_KEY` secrets. Source deployment inherited all nine existing bindings and preserved the runtime, migration tag, settings and disabled public endpoints. Notification settings and the owner subject were absent. Origin, Access and dummy-pin values were invalid placeholders. Existing Drive archives and CV keys were unchanged.
 
@@ -167,9 +176,17 @@ and saved copies can be redistributed or opened without notifying this service.
 
 Both checked-in Vault configurations are templates with placeholders; do not use them to overwrite an existing deployment. For a source update, first read the live Worker metadata and inherit all bindings, including secret bindings and the `send_email` sender/recipient restrictions. Preserve the live compatibility date, runtime settings and migrations. If `nodejs_compat` is absent, add that flag for this source's native `node:crypto` support; leave other runtime values unchanged. Read back the uploaded version to confirm these settings before activation. Any public route or Access scope change requires a separate review and approval.
 
-For the existing dummy installation, run the manual **Deploy Vault source** GitHub workflow on the reviewed main commit. It uses the existing `CF_API_TOKEN` and `CF_ACCOUNT_ID`, tests a frozen bundle, and inherits the live bindings without reading their secret values. It verifies source, settings, endpoints and private bucket metadata before and after activation. A configuration mismatch stops the release; an uncertain upload or activation is not automatically retried or rolled back. The ordinary main workflow still deploys only the canary Worker.
+For the existing dummy installation, run the manual **Deploy Vault source** GitHub workflow on the reviewed main commit. It uses the existing `CF_API_TOKEN` and `CF_ACCOUNT_ID`, tests a frozen bundle, and inherits the live bindings without reading their secret values. It verifies source, settings, runtime, the dummy bucket binding and Worker endpoints before and after activation. A configuration mismatch stops the release; an uncertain upload or activation is not automatically retried or rolled back. The ordinary main workflow still deploys only the canary Worker.
 
-After the new code archives audit/replay records, older code cannot read those records. Do not automatically roll back to a pre-compaction version; recovery must retain replay enforcement and archived evidence.
+This source-only release makes no R2 API calls and changes no R2 configuration or
+objects. It does not re-establish the bucket's current public-domain settings; the
+report marks that separate audit as unverified. The previous R2 settings check
+returned an authorization error before any update. Account-wide R2 read permission
+is not required for the Worker source upload and is not added by this workflow.
+Keep the existing private-bucket configuration; any change to its public exposure
+requires a separate review.
+
+After the new code archives audit/replay records, older code cannot read those records. Code predating the owner deadline API also ignores a saved deadline override and can reopen access until the original sealed expiry. Do not automatically roll back to either version; recovery must retain replay enforcement, archived evidence and the effective document deadline.
 
 1. Select the target account, Access-protected HTTPS origin and private R2 bucket. Confirm the deployment scope and current provider costs. Keep the existing canary Worker and its routes separate.
 2. Set `PUBLIC_ORIGIN`, `ACCESS_ISSUER` and `ACCESS_AUDIENCE` to the actual Access application. Pin the same issuer/audience in the deployed Worker. Set the owner subject as secret `VAULT_OWNER_SUB` and review each reader's subject-based grant.
@@ -187,9 +204,13 @@ Drive remains an encrypted archive. This service uses a private R2 working copy 
 
 | Path | Method | Authorization and effect |
 | --- | --- | --- |
+| `/v1/admin` and its assets | GET | Owner Access only; empty management UI, no document decryption |
+| `/v1/management` | GET | Owner only; configured dummy document ID |
 | `/` and viewer assets | GET | Valid Access identity; no document decryption |
 | `/v1/documents/<uuid>/open` | POST | Pinned dummy ID and exact ciphertext digest, same-origin JSON `{"requestId":"<fresh-v4-uuid>"}`, document grant and expiry; audited decryption |
 | `/v1/documents/<uuid>/status` | GET | Owner only; counts/outcomes, no personal audit details |
+| `/v1/documents/<uuid>/metadata` | GET | Owner only; current PDF policy metadata, effective/sealed deadlines and notification counts; no PDF bytes or password verifier |
+| `/v1/documents/<uuid>/expiry` | POST | Owner only, same-origin `{"expiresAt":<epoch-ms>,"expectedExpiresAt":<current-epoch-ms>}`; encrypted deadline update within the sealed policy's limit |
 | `/v1/documents/<uuid>/revoke` | POST | Owner only, same-origin empty JSON `{}`; durable revocation |
 | `/v1/documents/<uuid>/retry-notifications` | POST | Owner only, same-origin `{}`; explicit rebinding of failed jobs to corrected configured destinations |
 
@@ -197,7 +218,7 @@ Access viewer links use the document UUID in the URL fragment (`/#<uuid>`); pass
 
 All document routes, including owner operations, are restricted to the configured dummy UUID. Replacing the encrypted object without updating its configured digest blocks subsequent opens.
 
-Limits: PDF only, up to 1 MiB; at most 50 grant subjects; 10 accepted requests per subject/document/minute; 100 pending jobs/document; 500 attempts and 1,000 jobs retained within a rolling 30-day window. Expired accepted entries are pruned on activity. Capacity exhaustion fails closed rather than deleting recent audit entries to keep serving. Pending/failed jobs are retained for owner handling. These are deliberate bounds, not a production throughput guarantee.
+Limits: PDF only, up to 1 MiB; at most 50 grant subjects; 10 accepted requests per actor/document/minute and 100 per day; 10 pending jobs per actor and 100 per document. Completed audit entries and jobs are moved out of the active journal into separately encrypted records; audit and replay evidence expires after 30 days. Pending/failed jobs remain available for owner handling. Storage or notification failures can still stop new acquisitions; these limits are not a production throughput guarantee.
 
 ## Verification
 
@@ -251,7 +272,7 @@ The `notify` label is an optional domain choice, used here to separate notificat
 
 A follow-up authoritative DNS read found the child SPF record, no child DMARC record, and no TXT or CNAME at `cf2024-1._domainkey.notify.toppymicros.com`. A TXT record exists at the same selector under the root domain. The root policy specifies `sp=reject`, `adkim=s` and `aspf=s`. If the actual validated DKIM signature uses the root domain, it does not strictly align with the child's From domain; an independently passing aligned SPF result could still satisfy DMARC. This is a candidate explanation for Spam, not a diagnosis: the message's actual signing domain, selector and recipient authentication results remain unobserved. Mailbox receipt does not validate sender authentication. No DNS or sender change was made during this review. See [DMARC alignment](https://www.rfc-editor.org/rfc/rfc9989.html#section-4.4).
 
-After both owner-reported receipts were linked to their exact events, the notification candidate was activated at 100% and read back as `f9921a18-5a91-4af1-a97a-99a31b3208a6`. The activation validator records mailbox receipt with an explicit Spam folder; it does not claim Inbox placement. All original source, native acceptance, same-event, private endpoint, binding and root mail DNS checks remained in place. Activation sent no additional notification. Production Access, owner subject and dummy pins remain unconfigured, so this is a private configuration deployment rather than a working production document-sharing service.
+After both owner-reported receipts were linked to their exact events, the notification candidate was activated at 100% and read back as `f9921a18-5a91-4af1-a97a-99a31b3208a6`. The activation validator records mailbox receipt with an explicit Spam folder; it does not claim Inbox placement. All original source, native acceptance, same-event, private endpoint, binding and root mail DNS checks remained in place. Activation sent no additional notification. At that historical stage, production Access, owner subject and dummy pins were unconfigured. Those values were configured during the later dummy rollout; this paragraph does not establish the current active source or its deployment status.
 
 See the current [binding API](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/), [binding restrictions](https://developers.cloudflare.com/email-service/configuration/send-bindings/), [domain configuration](https://developers.cloudflare.com/email-service/configuration/domains/) and [plan conditions](https://developers.cloudflare.com/email-service/platform/pricing/).
 

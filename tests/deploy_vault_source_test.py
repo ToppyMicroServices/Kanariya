@@ -68,6 +68,10 @@ class FakeAPI:
                     "script_runtime": copy.deepcopy(self.runtime),
                     "script": {"handlers": ["fetch"], "named_handlers": ["VaultDocument"]}}}
         if path == release.SCRIPT + "/settings":
+            if self.failure == "worker_permission":
+                error = release.SafeFailure("api_http_403")
+                error.http_status, error.api_codes, error.api_resource = 403, [10000], "worker_or_zone_metadata"
+                raise error
             self.settings_reads += 1
             value = {"bindings": bindings(), "compatibility_date": "2026-01-12",
                      "compatibility_flags": ["nodejs_compat"], "observability": {"enabled": False}}
@@ -83,20 +87,15 @@ class FakeAPI:
                        b'Content-Type: application/javascript+module\r\n\r\n' + body + b"\r\n--synthetic--\r\n")
             return "multipart/form-data; boundary=synthetic", encoded
         if path == release.SCRIPT + "/subdomain":
-            return {"enabled": False, "previews_enabled": False}
+            return {"enabled": self.failure == "public_endpoint", "previews_enabled": False}
         if path == f"/accounts/{release.ACCOUNT}/workers/domains":
             return [{"service": release.WORKER, "hostname": "vault.toppymicros.com", "environment": "production"}]
         if path.startswith("/zones?"):
             return [{"id": release.ZONE, "account": {"id": release.ACCOUNT}}]
         if path == f"/zones/{release.ZONE}/workers/routes":
-            return []
-        bucket = f"/accounts/{release.ACCOUNT}/r2/buckets/{release.BUCKET}"
-        if path.startswith(bucket):
-            if self.failure == "r2_permission":
-                error = release.SafeFailure("api_http_403")
-                error.http_status, error.api_codes, error.api_resource = 403, [10000], "r2_public_metadata"
-                raise error
-            return {"name": release.BUCKET} if path == bucket else {"enabled": False} if path.endswith("/managed") else {"domains": []}
+            return [{"script": release.WORKER}] if self.failure == "vault_route" else []
+        if "/r2/" in path:
+            raise AssertionError("R2 API is outside the Worker source release scope")
         raise AssertionError("unexpected read: " + path)
 
 
@@ -134,6 +133,15 @@ class SourceReleaseTests(unittest.TestCase):
         report = json.loads(self.report.read_text())
         self.assertEqual(report["phase"], "active_source_and_configuration_verified")
         self.assertEqual(report["remoteMutations"], 2)
+        self.assertTrue(report["sourceBindingsRuntimeAndWorkerEndpointsVerified"])
+        self.assertNotIn("sourceBindingsRuntimeAndPrivateStateVerified", report)
+        self.assertNotIn("bucketPublicStateSha256", report["baseline"])
+        self.assertEqual(report["r2ApiRequests"], 0)
+        self.assertFalse(report["r2ObjectsAccessed"])
+        self.assertFalse(report["r2ConfigurationWritten"])
+        self.assertFalse(report["r2PublicConfigurationVerified"])
+        self.assertEqual(report["r2PublicConfiguration"], "not_rechecked_source_only_release")
+        self.assertFalse(any("/r2/" in path for _, path in api.calls))
         self.assertEqual(self.report.stat().st_mode & 0o777, 0o600)
         self.assertEqual([path for path, _ in api.posts], [release.SCRIPT + "/versions", release.SCRIPT + "/deployments"])
         multipart = api.posts[0][1]
@@ -155,16 +163,33 @@ class SourceReleaseTests(unittest.TestCase):
             self.assertEqual(self.run_release(api)[0], 1)
         self.assertEqual(api.posts, [])
 
-    def test_missing_r2_permission_stops_before_any_mutation_and_reports_safe_codes(self):
-        api = FakeAPI("r2_permission")
+    def test_worker_permission_denial_stops_before_any_mutation_and_reports_safe_codes(self):
+        api = FakeAPI("worker_permission")
         status, _, output = self.run_release(api)
         self.assertEqual(status, 1)
         self.assertEqual(api.posts, [])
         report = json.loads(self.report.read_text())
         self.assertEqual(report["remoteMutations"], 0)
         self.assertEqual(report["phase"], "read_only_preflight")
-        self.assertEqual((report["httpStatus"], report["apiErrorCodes"], report["apiResource"]), (403, [10000], "r2_public_metadata"))
+        self.assertEqual((report["httpStatus"], report["apiErrorCodes"], report["apiResource"]), (403, [10000], "worker_or_zone_metadata"))
         self.assertIn('"apiErrorCodes": [10000]', output)
+
+    def test_changed_dummy_bucket_binding_stops_before_upload(self):
+        api = FakeAPI()
+        rows = bindings()
+        next(row for row in rows if row["name"] == "VAULT_DOCUMENTS")["bucket_name"] = "unapproved-bucket"
+        with patch(__name__ + ".bindings", return_value=rows):
+            self.assertEqual(self.run_release(api)[0], 1)
+        self.assertEqual(api.posts, [])
+        self.assertFalse(any("/r2/" in path for _, path in api.calls))
+
+    def test_worker_endpoint_exposure_stops_before_upload(self):
+        for failure in ("public_endpoint", "vault_route"):
+            with self.subTest(failure=failure):
+                api = FakeAPI(failure)
+                self.assertEqual(self.run_release(api)[0], 1)
+                self.assertEqual(api.posts, [])
+                self.report.unlink()
 
     def test_preupload_configuration_drift_stops_without_mutation(self):
         api = FakeAPI("preupload_drift")
@@ -242,10 +267,10 @@ class SourceReleaseTests(unittest.TestCase):
         error = urllib.error.HTTPError("https://api.cloudflare.com", 403, SECRET_MARKER, {}, io.BytesIO(payload))
         with patch.object(api.opener, "open", side_effect=error):
             with self.assertRaises(release.SafeFailure) as caught:
-                api(f"/accounts/{release.ACCOUNT}/r2/buckets/{release.BUCKET}")
+                api(release.SCRIPT + "/settings")
         self.assertEqual(str(caught.exception), "api_http_403")
         self.assertEqual(caught.exception.api_codes, [10000])
-        self.assertEqual(caught.exception.api_resource, "r2_public_metadata")
+        self.assertEqual(caught.exception.api_resource, "worker_or_zone_metadata")
 
 
 if __name__ == "__main__":

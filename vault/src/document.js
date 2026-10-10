@@ -33,6 +33,9 @@ export class VaultDocument {
     if (!Array.isArray(state.sessions)) throw new Error('invalid_journal');
     state.readerUsage ??= []; state.archivedAccepted ??= 0;
     if (!Array.isArray(state.readerUsage) || !Number.isSafeInteger(state.archivedAccepted)) throw new Error('invalid_journal');
+    if (Object.hasOwn(state, 'deadline') && (!state.deadline || Array.isArray(state.deadline) ||
+        Object.keys(state.deadline).length !== 2 || typeof state.deadline.recordDigest !== 'string' || !/^[0-9a-f]{64}$/.test(state.deadline.recordDigest) ||
+        !Number.isSafeInteger(state.deadline.expiresAt) || state.deadline.expiresAt <= 0)) throw new Error('invalid_journal');
     return state;
   }
   async archive(tx, key, type, id, value, at) {
@@ -149,8 +152,15 @@ export class VaultDocument {
     // revocation and the unchanged pin are checked again in handle().
     return { source, digest: pin.digest, record: await this.record(id, pin.digest), input };
   }
+  expiresAt(policy, state) {
+    if (!state.deadline) return policy.expiresAt;
+    // Owner changes can shorten or restore this record's sealed permission,
+    // never enlarge it or silently transfer it to replacement ciphertext.
+    if (state.deadline.recordDigest !== dummyPin(this.env).digest || state.deadline.expiresAt > policy.expiresAt) throw new Error('invalid_journal');
+    return state.deadline.expiresAt;
+  }
   live(policy, state, session = null) {
-    if (policy.revoked || state.revoked || policy.expiresAt <= Date.now()) throw new Denied();
+    if (policy.revoked || state.revoked || this.expiresAt(policy, state) <= Date.now()) throw new Denied();
     if (session && session.expiresAt <= Date.now()) throw new Denied(401, 'unauthenticated');
   }
   async input(request, max = 128) {
@@ -163,6 +173,33 @@ export class VaultDocument {
     if (action === 'status') {
       const state = await this.state(this.ctx.storage, keys.audit);
       return json({ revoked: state.revoked, pending: state.jobs.filter(j => j.state === 'pending').length,
+        failed: state.jobs.filter(j => j.state === 'failed').length,
+        providerAccepted: state.archivedAccepted + state.jobs.filter(j => j.state === 'accepted').length });
+    }
+    if (action === 'metadata' || action === 'expiry') {
+      const input = action === 'expiry' ? await this.input(request) : null;
+      if (action === 'expiry' && (!input || Array.isArray(input) || typeof input !== 'object' ||
+          Object.keys(input).length !== 2 || !Number.isSafeInteger(input.expiresAt) ||
+          !Number.isSafeInteger(input.expectedExpiresAt))) throw new Denied(400, 'invalid_request');
+      const pin = dummyPin(this.env), record = await this.record(id, pin.digest);
+      const policy = await readPolicy(record, id, keys.wrap);
+      let state = await this.state(this.ctx.storage, keys.audit);
+      if (state.documentId && state.documentId !== id) throw new Error('identity_mismatch');
+      if (action === 'expiry') {
+        state = await this.mutate(id, keys.audit, latest => {
+          const current = this.expiresAt(policy, latest);
+          if (policy.revoked || latest.revoked || policy.expiresAt <= Date.now()) throw new Denied();
+          if (input.expectedExpiresAt !== current) throw new Denied(409, 'expiry_changed');
+          if (input.expiresAt <= Date.now() || input.expiresAt > policy.expiresAt) throw new Denied(400, 'invalid_expiry');
+          latest.deadline = { recordDigest: pin.digest, expiresAt: input.expiresAt };
+          // Restoring the document deadline must not prolong an old session.
+          for (const session of latest.sessions) session.expiresAt = Math.min(session.expiresAt, input.expiresAt);
+          return latest;
+        });
+      }
+      return json({ id, mime: policy.mime, size: policy.size, authMode: policy.authMode ?? 'access',
+        recipientName: policy.recipientName ?? null, expiresAt: this.expiresAt(policy, state), sealedExpiresAt: policy.expiresAt,
+        revoked: policy.revoked || state.revoked, pending: state.jobs.filter(j => j.state === 'pending').length,
         failed: state.jobs.filter(j => j.state === 'failed').length,
         providerAccepted: state.archivedAccepted + state.jobs.filter(j => j.state === 'accepted').length });
     }
@@ -188,9 +225,9 @@ export class VaultDocument {
       passwordEnabled(this.env); accessConfiguration(this.env);
       if (!prepared) throw new Denied();
     }
-    const methods = action === 'status' ? ['GET'] : passwordPath && action === 'session' ? ['POST', 'DELETE'] : ['POST'];
+    const methods = action === 'status' || action === 'metadata' ? ['GET'] : passwordPath && action === 'session' ? ['POST', 'DELETE'] : ['POST'];
     if (!methods.includes(request.method)) throw new Denied(405, 'method_not_allowed');
-    if (action !== 'status' && (request.headers.get('origin') !== origin(this.env) ||
+    if (!['status', 'metadata'].includes(action) && (request.headers.get('origin') !== origin(this.env) ||
         request.headers.get('content-type') !== 'application/json')) throw new Denied();
     if (passwordPath && ['cross-site', 'same-site'].includes(request.headers.get('sec-fetch-site'))) throw new Denied();
     let subject;
@@ -230,15 +267,15 @@ export class VaultDocument {
       if (!verifyPassword(input.password, policy.passwordVerifier)) throw new Denied(401, 'unauthenticated');
       input.password = '';
       const raw = randomToken(), hash = await hashToken(raw);
-      const expiresAt = Math.min(policy.expiresAt, Date.now() + SESSION_MS);
+      const expiresAt = Math.min(this.expiresAt(policy, state), Date.now() + SESSION_MS);
       await this.mutate(id, keys.audit, latest => {
         this.live(policy, latest);
         latest.sessions = latest.sessions.filter(s => s.recordDigest === pin.digest);
         if (latest.sessions.length >= MAX_SESSIONS) throw new Denied(429, 'session_limit');
         latest.sessions.push({ hash, expiresAt, recordDigest: pin.digest });
       });
-      this.live(policy, { revoked: false }, { expiresAt });
-      return json({ expiresAt: policy.expiresAt, sessionExpiresAt: expiresAt }, 200,
+      this.live(policy, state, { expiresAt });
+      return json({ expiresAt: this.expiresAt(policy, state), sessionExpiresAt: expiresAt }, 200,
         { 'set-cookie': sessionCookie(id, raw, Math.max(0, Math.floor((expiresAt - Date.now()) / 1000))) });
     }
     this.live(policy, state);
@@ -247,7 +284,7 @@ export class VaultDocument {
       session = state.sessions.find(s => s.hash === hash && s.recordDigest === pin.digest && s.expiresAt > Date.now());
       if (!session) throw new Denied(401, 'unauthenticated');
       subject = 'shared-password'; // No claim of individual identity for a shared credential.
-      if (action === 'status') return json({ expiresAt: policy.expiresAt, sessionExpiresAt: session.expiresAt });
+      if (action === 'status') return json({ expiresAt: this.expiresAt(policy, state), sessionExpiresAt: session.expiresAt });
     } else if (!policy.subjects.includes(subject)) throw new Denied();
     if (request.headers.has('range') || request.headers.has('if-range')) throw new Denied(400, 'range_not_supported');
     const eventId = crypto.randomUUID();
@@ -281,7 +318,7 @@ export class VaultDocument {
     } catch (error) { bytes.fill(0); throw error; }
     return new Response(bytes, { headers: { ...HEADERS, 'content-type': 'application/pdf',
       ...recipientHeaders(policy), 'x-vault-event': eventId,
-      'x-vault-expires-at': String(policy.expiresAt),
+      'x-vault-expires-at': String(this.expiresAt(policy, state)),
       ...(session ? { 'x-vault-session-expires-at': String(session.expiresAt) } : {}) } });
   }
   async finish(id, key, eventId, outcome) {

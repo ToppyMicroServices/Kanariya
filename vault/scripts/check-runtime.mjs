@@ -82,7 +82,8 @@ export class RuntimeDocument extends VaultDocument {
     pdf = new Uint8Array(fixture);
   }
   report.fixture = { kind: fixturePath ? "approved_dummy_pdf" : "generated_synthetic_bytes", sha256: createHash("sha256").update(pdf).digest("hex") };
-  const encrypted = await sealDocument({ id, bytes: pdf, subjects: [subject, otherSubject], expiresAt: Date.now() + 300000 }, await importKey(env.VAULT_WRAP_KEY));
+  const sealedExpiresAt = Date.now() + 300000;
+  const encrypted = await sealDocument({ id, bytes: pdf, subjects: [subject, otherSubject], expiresAt: sealedExpiresAt }, await importKey(env.VAULT_WRAP_KEY));
   const recordBytes = JSON.stringify(encrypted);
   env.DUMMY_DOCUMENT_ID = id;
   env.DUMMY_RECORD_SHA256 = createHash("sha256").update(recordBytes).digest("hex");
@@ -107,12 +108,67 @@ export class RuntimeDocument extends VaultDocument {
   await mf.ready;
   const bucket = await mf.getR2Bucket("VAULT_DOCUMENTS");
   await bucket.put(`${id}.sealed.json`, recordBytes);
-  async function request(action, actor = subject, requestId = crypto.randomUUID(), documentId = id) {
-    return mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/v1/documents/${documentId}/${action}`, {
-      method: action === "status" ? "GET" : "POST",
-      headers: { origin: env.PUBLIC_ORIGIN, "content-type": "application/json", "cf-access-jwt-assertion": actor ? await token(actor) : "" },
-      ...(action === "status" ? {} : { body: JSON.stringify(action === "open" ? { requestId } : {}) }), signal: AbortSignal.timeout(5000) });
+  async function signed(path, { actor = env.VAULT_OWNER_SUB, method = "GET", body, headers = {} } = {}) {
+    return mf.dispatchFetch(`${env.PUBLIC_ORIGIN}${path}`, { method,
+      headers: { origin: env.PUBLIC_ORIGIN, "content-type": "application/json", "cf-access-jwt-assertion": actor ? await token(actor) : "", ...headers },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(5000) });
   }
+  async function request(action, actor = subject, requestId = crypto.randomUUID(), documentId = id, input) {
+    const method = ["status", "metadata"].includes(action) ? "GET" : "POST";
+    return signed(`/v1/documents/${documentId}/${action}`, { actor, method,
+      ...(method === "GET" ? {} : { body: input ?? (action === "open" ? { requestId } : {}) }) });
+  }
+  function privateManagementHeaders(response) {
+    assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0");
+    assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("content-security-policy"), "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'");
+  }
+  const metadataKeys = ["id", "mime", "size", "authMode", "recipientName", "expiresAt", "sealedExpiresAt", "revoked", "pending", "failed", "providerAccepted"].sort();
+  function metadataShape(value, documentId, authMode, maximum, recipientName = null) {
+    assert.deepEqual(Object.keys(value).sort(), metadataKeys);
+    assert.equal(value.id, documentId); assert.equal(value.mime, "application/pdf"); assert.equal(value.size, pdf.length);
+    assert.equal(value.authMode, authMode); assert.equal(value.recipientName, recipientName);
+    assert.equal(value.sealedExpiresAt, maximum);
+    for (const name of ["pending", "failed", "providerAccepted"]) assert.ok(Number.isSafeInteger(value[name]) && value[name] >= 0);
+  }
+  for (const [path, mime] of [["/v1/admin", "text/html; charset=utf-8"], ["/v1/admin/assets/admin.js", "text/javascript; charset=utf-8"],
+    ["/v1/admin/assets/admin.css", "text/css; charset=utf-8"]]) {
+    assert.equal((await signed(path, { actor: "" })).status, 401);
+    assert.equal((await signed(path, { actor: subject })).status, 403);
+    const page = await signed(path);
+    assert.equal(page.status, 200); assert.equal(page.headers.get("content-type"), mime); privateManagementHeaders(page);
+    const text = await page.text(); assert.ok(text.length > 100);
+    if (path === "/v1/admin") {
+      assert.match(text, /src="\/v1\/admin\/assets\/admin\.js"/);
+      assert.doesNotMatch(text, /<script\s*>|\son[a-z]+\s*=/i);
+    }
+  }
+  report.checks.push("management_html_and_assets_require_owner_with_strict_csp");
+  assert.equal((await signed("/v1/management", { actor: "" })).status, 401);
+  assert.equal((await signed("/v1/management", { actor: subject })).status, 403);
+  assert.deepEqual(await (await signed("/v1/management")).json(), { documentId: id });
+  assert.equal((await request("metadata", "")).status, 401);
+  assert.equal((await request("metadata", subject)).status, 403);
+  const initialMetadataResponse = await request("metadata", env.VAULT_OWNER_SUB);
+  privateManagementHeaders(initialMetadataResponse);
+  const initialMetadata = await initialMetadataResponse.json();
+  metadataShape(initialMetadata, id, "access", sealedExpiresAt);
+  assert.equal(initialMetadata.expiresAt, sealedExpiresAt); assert.equal(initialMetadata.revoked, false);
+  assert.deepEqual([initialMetadata.pending, initialMetadata.failed, initialMetadata.providerAccepted], [0, 0, 0]);
+  assert.equal(notifications.length, 0);
+  report.checks.push("owner_only_bootstrap_and_minimal_document_metadata");
+  const expiryPath = `/v1/documents/${id}/expiry`, expiryBody = { expiresAt: sealedExpiresAt - 1000, expectedExpiresAt: sealedExpiresAt };
+  assert.equal((await signed(expiryPath, { actor: "", method: "POST", body: expiryBody })).status, 401);
+  assert.equal((await signed(expiryPath, { actor: subject, method: "POST", body: expiryBody })).status, 403);
+  assert.equal((await signed(expiryPath, { method: "POST", body: expiryBody, headers: { origin: "https://elsewhere.example.test" } })).status, 403);
+  for (const input of [{ expiresAt: sealedExpiresAt + 1, expectedExpiresAt: sealedExpiresAt },
+    { expiresAt: Date.now() - 1, expectedExpiresAt: sealedExpiresAt }, { ...expiryBody, unexpected: true }]) {
+    assert.equal((await signed(expiryPath, { method: "POST", body: input })).status, 400);
+  }
+  assert.equal((await request("metadata", env.VAULT_OWNER_SUB)).status, 200);
+  assert.equal(notifications.length, 0);
+  report.checks.push("expiry_authentication_origin_and_sealed_maximum_enforced");
   assert.equal((await request("open", "")).status, 401);
   assert.equal((await request("open", "unauthorized-subject")).status, 403);
   report.checks.push("signature_and_document_grant");
@@ -153,6 +209,24 @@ export class RuntimeDocument extends VaultDocument {
   assert.equal((await request('open', subject, oldRequests[0].requestId)).status, 409);
   assert.ok((await (await request('status', env.VAULT_OWNER_SUB)).json()).providerAccepted >= 1000);
   report.checks.push('saturated_legacy_journal_archive_and_replay_in_workerd');
+  const shortenedAccess = Date.now() + 2000;
+  const accessUpdate = await signed(expiryPath, { method: "POST", body: { expiresAt: shortenedAccess, expectedExpiresAt: sealedExpiresAt } });
+  assert.equal(accessUpdate.status, 200);
+  const updatedAccessMetadata = await accessUpdate.json();
+  metadataShape(updatedAccessMetadata, id, "access", sealedExpiresAt); assert.equal(updatedAccessMetadata.expiresAt, shortenedAccess);
+  assert.equal((await signed(expiryPath, { method: "POST", body: expiryBody })).status, 409);
+  const shortenedOpen = await request("open");
+  assert.equal(shortenedOpen.status, 200); assert.deepEqual(new Uint8Array(await shortenedOpen.arrayBuffer()), pdf);
+  assert.equal(Number(shortenedOpen.headers.get("x-vault-expires-at")), shortenedAccess);
+  await pause(Math.max(0, shortenedAccess - Date.now() + 100));
+  assert.equal((await request("open")).status, 403);
+  const restoredAccess = await signed(expiryPath, { method: "POST", body: { expiresAt: sealedExpiresAt, expectedExpiresAt: shortenedAccess } });
+  assert.equal(restoredAccess.status, 200); assert.equal((await restoredAccess.json()).expiresAt, sealedExpiresAt);
+  const restoredOpen = await request("open");
+  assert.equal(restoredOpen.status, 200); assert.deepEqual(new Uint8Array(await restoredOpen.arrayBuffer()), pdf);
+  assert.equal(Number(restoredOpen.headers.get("x-vault-expires-at")), sealedExpiresAt);
+  assert.equal(await (await bucket.get(`${id}.sealed.json`)).text(), recordBytes);
+  report.checks.push("access_expiry_cas_shortening_expiration_and_restore_without_r2_write");
   for (const path of await files(persist)) {
     const bytes = await readFile(path);
     assert.ok(!bytes.includes(Buffer.from(pdf)));
@@ -162,13 +236,15 @@ export class RuntimeDocument extends VaultDocument {
   report.checks.push("durable_storage_contains_no_fixture_plaintext_or_keys");
   assert.equal((await request("revoke", env.VAULT_OWNER_SUB)).status, 200);
   assert.equal((await request("open")).status, 403);
+  assert.equal((await signed(expiryPath, { method: "POST", body: expiryBody })).status, 403);
   report.checks.push("owner_revocation");
   // A separate fresh dummy document exercises shared-password mode without
   // weakening the Access document or reusing its irreversible revocation state.
   await mf.dispose(); mf = null;
   const passwordId = crypto.randomUUID(), password = "synthetic-shared-password-only";
+  const passwordSealedExpiresAt = Date.now() + 300000, recipientName = "Synthetic Runtime Recipient";
   const passwordRecord = JSON.stringify(await sealDocument({ id: passwordId, bytes: pdf, subjects: [],
-    expiresAt: Date.now() + 300000, authMode: "password", password }, await importKey(env.VAULT_WRAP_KEY)));
+    expiresAt: passwordSealedExpiresAt, authMode: "password", password, recipientName }, await importKey(env.VAULT_WRAP_KEY)));
   const passwordEnv = { ...env, PASSWORD_READER_ENABLED: "1", DUMMY_DOCUMENT_ID: passwordId,
     DUMMY_RECORD_SHA256: createHash("sha256").update(passwordRecord).digest("hex") };
   const passwordPersist = join(temporary, "password-durable-objects");
@@ -219,6 +295,33 @@ export class RuntimeDocument extends VaultDocument {
   assert.equal((await shared('open', { cookie: otherUnlock.headers.get('set-cookie').split(';')[0], headers: { 'cf-connecting-ip': '198.51.100.2' } })).status, 200);
   assert.equal((await shared('session', { method: 'DELETE' })).status, 200);
   report.checks.push('password_budget_isolates_sources_and_cookie_less_logout');
+  assert.deepEqual(await (await signed("/v1/management")).json(), { documentId: passwordId });
+  const passwordMetadata = await (await request("metadata", env.VAULT_OWNER_SUB, crypto.randomUUID(), passwordId)).json();
+  metadataShape(passwordMetadata, passwordId, "password", passwordSealedExpiresAt, recipientName);
+  const passwordExpiryPath = `/v1/documents/${passwordId}/expiry`, shortenedPassword = Date.now() + 2000;
+  const shortenPasswordResponse = await signed(passwordExpiryPath, { method: "POST", body: { expiresAt: shortenedPassword, expectedExpiresAt: passwordSealedExpiresAt } });
+  assert.equal(shortenPasswordResponse.status, 200); assert.equal((await shortenPasswordResponse.json()).expiresAt, shortenedPassword);
+  const shortenedSession = await (await shared("status", { cookie })).json();
+  assert.deepEqual(shortenedSession, { expiresAt: shortenedPassword, sessionExpiresAt: shortenedPassword });
+  const shortPasswordOpen = await shared("open", { cookie });
+  assert.equal(shortPasswordOpen.status, 200); assert.deepEqual(new Uint8Array(await shortPasswordOpen.arrayBuffer()), pdf);
+  assert.equal(Number(shortPasswordOpen.headers.get("x-vault-expires-at")), shortenedPassword);
+  assert.equal(Number(shortPasswordOpen.headers.get("x-vault-session-expires-at")), shortenedPassword);
+  report.checks.push("owner_expiry_shortens_existing_password_cookie_and_pdf_deadlines");
+  const restorePasswordResponse = await signed(passwordExpiryPath, { method: "POST", body: { expiresAt: passwordSealedExpiresAt, expectedExpiresAt: shortenedPassword } });
+  assert.equal(restorePasswordResponse.status, 200); assert.equal((await restorePasswordResponse.json()).expiresAt, passwordSealedExpiresAt);
+  assert.deepEqual(await (await shared("status", { cookie })).json(), { expiresAt: passwordSealedExpiresAt, sessionExpiresAt: shortenedPassword });
+  const freshSource = { "cf-connecting-ip": "203.0.113.3" };
+  const freshUnlock = await shared("session", { body: { password }, headers: freshSource });
+  assert.equal(freshUnlock.status, 200);
+  const freshCookie = freshUnlock.headers.get("set-cookie").split(";")[0], freshSession = await freshUnlock.json();
+  assert.equal(freshSession.expiresAt, passwordSealedExpiresAt); assert.ok(freshSession.sessionExpiresAt > shortenedPassword);
+  await pause(Math.max(0, shortenedPassword - Date.now() + 100));
+  assert.equal((await shared("status", { cookie })).status, 401);
+  assert.equal((await shared("open", { cookie })).status, 401);
+  assert.equal((await shared("status", { cookie: freshCookie, headers: freshSource })).status, 200);
+  assert.equal(await (await (await mf.getR2Bucket("VAULT_DOCUMENTS")).get(`${passwordId}.sealed.json`)).text(), passwordRecord);
+  report.checks.push("restored_document_deadline_does_not_extend_old_password_session");
   assert.equal((await request("revoke", env.VAULT_OWNER_SUB, crypto.randomUUID(), passwordId)).status, 200);
   assert.equal((await shared("status", { cookie })).status, 403);
   assert.equal((await shared("open", { cookie })).status, 403);
@@ -226,7 +329,7 @@ export class RuntimeDocument extends VaultDocument {
   report.checks.push("owner_revocation_invalidates_existing_password_session");
   for (const path of await files(passwordPersist)) {
     const bytes = await readFile(path);
-    for (const secret of [password, cookie.split("=")[1], env.VAULT_WRAP_KEY, env.VAULT_AUDIT_KEY]) assert.ok(!bytes.includes(Buffer.from(secret)));
+    for (const secret of [password, cookie.split("=")[1], freshCookie.split("=")[1], recipientName, env.VAULT_WRAP_KEY, env.VAULT_AUDIT_KEY]) assert.ok(!bytes.includes(Buffer.from(secret)));
     assert.ok(!bytes.includes(Buffer.from(pdf)));
   }
   report.checks.push("password_session_and_document_secrets_not_persisted_in_plaintext");
@@ -247,7 +350,7 @@ export class RuntimeDocument extends VaultDocument {
   try { if (temporary) await rm(temporary, { recursive: true, force: true }); }
   catch { report.status = "cleanup_failed"; process.exitCode = 1; }
   report.pass = report.status === "passed";
-  report.testCounts = { runtimeChecksExpected: 16, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
+  report.testCounts = { runtimeChecksExpected: 22, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
     bundleChecksPassed: report.checks.filter(check => check === "dry_run_bundle" || check.startsWith("frozen_")).length, totalChecksPassed: report.checks.length };
   await recordReport(); console.log(JSON.stringify(report));
 }
