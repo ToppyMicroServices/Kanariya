@@ -1,4 +1,5 @@
-import { notificationTargets, deliverNotification } from "./notifications.js";
+import { notificationTargets, deliverNotification, notificationEvent } from "./notifications.js";
+import { sealSource, openSource } from './access-source.js';
 
 const TOKEN = /^[A-Za-z0-9_-]{1,512}$/;
 const MANAGED = /^kr_[a-f0-9]{64}$/;
@@ -144,7 +145,7 @@ export class KanariyaStore {
       if (!TOKEN.test(token)) return json({ error: "Invalid token" }, 400);
       const limit = setting(this.env, "EXPORT_MAX_ITEMS", 1000, 1, 1000);
       return json(this.rows("SELECT * FROM events WHERE token=? AND expires_at>? ORDER BY ts DESC,id DESC LIMIT ?", token, Date.now(), limit).map(row => ({
-        ...JSON.parse(row.body), deliveries: this.rows("SELECT * FROM deliveries WHERE event_id=? ORDER BY type", row.id).map(d => this.deliveryView(d)),
+        ...notificationEvent(JSON.parse(row.body)), deliveries: this.rows("SELECT * FROM deliveries WHERE event_id=? ORDER BY type", row.id).map(d => this.deliveryView(d)),
       })));
     }
     return json({ error: "Not found" }, 404);
@@ -170,9 +171,10 @@ export class KanariyaStore {
     if (action === 'events') {
       const rows = this.rows('SELECT e.* FROM events e JOIN tokens t ON t.token=e.token WHERE t.src=? AND t.name=? AND e.expires_at>? ORDER BY e.ts DESC,e.id DESC LIMIT 50',
         DOCUMENT_CANARY_SOURCE, id, Date.now());
-      return json({ documentId: id, events: rows.map(row => ({ id: row.id, at: row.ts,
+      return json({ documentId: id, events: await Promise.all(rows.map(async row => ({ id: row.id, at: row.ts,
+        source: await openSource(this.env, JSON.parse(row.body).sourceBox, { ...JSON.parse(row.body), token: row.token }),
         outcome: 'url_requested', notifications: this.rows('SELECT type,state FROM deliveries WHERE event_id=? ORDER BY type', row.id)
-          .map(({ type, state }) => ({ type, state })) })) });
+          .map(({ type, state }) => ({ type, state })) }))) });
     }
     return this.storage.transaction(async () => {
       const row = current();
@@ -191,7 +193,7 @@ export class KanariyaStore {
       return json({ documentId: id, canary: this.documentCanaryView(this.one('SELECT * FROM tokens WHERE token=?', token)) }, 201);
     });
   }
-  async record({ event, registered, nonce = "", nonceExpiresAt = 0 }) {
+  async record({ event, registered, nonce = "", nonceExpiresAt = 0, source = null }) {
     const targets = await notificationTargets(this.env);
     return this.storage.transaction(async () => {
       const now = Date.now();
@@ -240,6 +242,10 @@ export class KanariyaStore {
         this.one("SELECT 1 FROM guards WHERE key>=? AND key<? AND expires_at>? LIMIT 1", `${legacyDedupeBase},`, `${legacyDedupeBase}-`, now));
       const ttl = setting(this.env, "EVENT_TTL_SECONDS", 2592000, 60, 31536000);
       const body = event.kind === 'vault.canary' ? { kind: event.kind, id: event.id, ts: event.ts, documentId: event.documentId } : event;
+      if (event.kind === 'vault.canary') {
+        const box = await sealSource(this.env, source, event);
+        if (box) body.sourceBox = box;
+      }
       this.sql.exec("INSERT INTO events VALUES(?,?,?,?,?)", event.id, event.token, now, JSON.stringify(body), now + ttl * 1000);
       if (nonce) this.sql.exec("INSERT OR REPLACE INTO guards VALUES(?,?,?)", JSON.stringify(["nonce", event.token, nonce]), 1, nonceExpiresAt);
       if (token) {

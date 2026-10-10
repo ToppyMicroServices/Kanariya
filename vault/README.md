@@ -148,11 +148,26 @@ approval and must preserve all existing production bindings.
 
 This private connection accepts only document UUIDs and the document's current
 deadline. It has no global token inventory, arbitrary forwarding or test-send
-operation. New document-managed Canary records and notifications omit recipient
-names, emails, IP hashes, user agents, referrers and location. Existing ordinary
+operation. Document-managed Canary records omit recipient names, emails, IP
+hashes, user agents and full referring URLs. An optional, separate 32-byte
+base64 `CANARY_SOURCE_KEY` secret on the ordinary `kanariya` Worker enables
+AES-GCM encrypted source evidence: Cloudflare's connection IP, country, ASN,
+network name and the referring hostname only. The key stays in Worker secrets,
+separate from SQLite; it must not be committed or placed in logs. Without a
+valid key, source evidence is not saved. Old records and records whose key is
+unavailable show no source information. Keep the key to read retained evidence;
+replacing it cannot decrypt evidence encrypted with the previous key.
+
+Only the owner-authorized private history returns decrypted source evidence.
+Public exports and notifications retain their minimal event format, omitting
+both source plaintext and ciphertext. The existing event retention (30 days by
+default), rate and storage limits also apply to this evidence. Existing ordinary
 Canary tokens retain their behavior. The UI never fetches the Canary URL itself.
 A URL hit is not evidence that a PDF was read or that the intended person opened
 it; creating a URL does not insert it into a PDF or enable automatic PDF tracking.
+IP/network information can describe a proxy, scanner or shared connection. A
+referring hostname is an optional, changeable navigation hint, not the visitor's
+own domain. No reverse-DNS service receives visitor IPs.
 
 Disclosure contacts are an encrypted list of up to 50 email addresses, with stale
 edits rejected. They are records of intended recipients, **not email authentication

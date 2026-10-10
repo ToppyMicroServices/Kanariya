@@ -1,4 +1,5 @@
 import { KanariyaStore } from "./store.js";
+import { accessSource } from './access-source.js';
 export { KanariyaStore };
 export { CanaryManagement } from './canary-management.js';
 
@@ -169,7 +170,7 @@ const application = {
       };
       const response = await store(env).fetch(new Request("https://kanariya.internal/internal/hit", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ event, registered, nonce, nonceExpiresAt }),
+        body: JSON.stringify({ event, registered, nonce, nonceExpiresAt, source: registered ? accessSource(request, env) : null }),
       }));
       if (!response.ok) console.error("kanariya_record_failed");
     } catch {

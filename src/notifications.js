@@ -113,7 +113,12 @@ function httpsUrl(value) {
   return url;
 }
 
+export function notificationEvent(event) {
+  return event.kind === 'vault.canary' ? { kind: event.kind, id: event.id, ts: event.ts, documentId: event.documentId } : event;
+}
+
 function requestFor(env, target, event, deliveryId) {
+  event = notificationEvent(event);
   const headers = { "content-type": "application/json" };
   let url;
   let payload;

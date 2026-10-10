@@ -41,9 +41,11 @@ def bindings():
 
 
 class FakeAPI:
-    def __init__(self, failure=None, settings_are_active=False):
+    def __init__(self, failure=None, settings_are_active=False, canary_binding=None):
         self.active, self.latest = BASE, BASE
         self.rows = {BASE: bindings()}
+        if canary_binding is not None:
+            self.rows[BASE].append(copy.deepcopy(canary_binding))
         self.calls, self.posts = [], []
         self.failure, self.settings_are_active = failure, settings_are_active
         self.settings_reads = 0
@@ -260,6 +262,30 @@ class DummyRotationTests(unittest.TestCase):
 
     def test_settings_endpoint_may_describe_active_version_during_staging(self):
         self.assertEqual(self.approved(FakeAPI(settings_are_active=True))[0], 0)
+
+    def test_rotation_preserves_the_existing_validated_canary_binding(self):
+        for environment in (None, "production"):
+            with self.subTest(environment=environment):
+                canary = dict(release.CANARY_BINDING)
+                if environment is not None:
+                    canary["environment"] = environment
+                api = FakeAPI(canary_binding=canary)
+                self.assertEqual(self.approved(api)[0], 0)
+                self.assertIn("service", api.metadata["keep_bindings"])
+                self.assertEqual(next(row for row in api.rows[NEW] if row["name"] == "CANARY_ADMIN"), canary)
+                self.assertFalse(any(row["type"] == "service" for row in api.metadata["bindings"]))
+                self.assertEqual(len(api.posts), 2)
+                self.assertEqual(self.report()["remoteMutations"], 2)
+                self.report_path.unlink()
+
+    def test_unapproved_canary_binding_is_rejected_before_rotation_upload(self):
+        for change in ({"service": "other-worker"}, {"entrypoint": "OtherManagement"},
+                       {"environment": "staging"}, {"props": {}}):
+            with self.subTest(change=change):
+                api = FakeAPI(canary_binding={**release.CANARY_BINDING, **change})
+                self.assertEqual(self.approved(api)[0], 1)
+                self.assertEqual(api.posts, [])
+                self.report_path.unlink()
 
     def test_missing_or_wrong_approval_prevents_even_provider_preflight(self):
         for approval in (None, "f" * 64):

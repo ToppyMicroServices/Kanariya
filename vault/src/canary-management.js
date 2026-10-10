@@ -1,6 +1,7 @@
 import { identity } from './auth.js';
 import { dummyPin, origin, Denied, json, requestBody } from './http.js';
 import { boundedBody, parseJSON } from './crypto.js';
+import { isIP } from 'node:net';
 
 export const CANARY_ORIGIN = 'https://kanariya.toppymicros.com';
 const TOKEN = /^kr_[a-f0-9]{64}$/;
@@ -8,6 +9,27 @@ const EVENT = /^[a-f0-9]{32}$/;
 const time = value => Number.isSafeInteger(value) && value > 0 && value <= 8640000000000000;
 const exact = (value, fields) => value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).length === fields.length && fields.every(field => Object.hasOwn(value, field));
+
+function hostname(value) {
+  if (typeof value !== 'string' || value.length > 253 || /[\u0000-\u0020\u007f-\u009f]/.test(value)) return false;
+  if (!value) return true;
+  try {
+    const url = new URL(`https://${value}/`);
+    return url.hostname === value && url.host === value && !url.username && !url.password &&
+      url.pathname === '/' && !url.search && !url.hash;
+  } catch { return false; }
+}
+
+function sourceValue(value) {
+  if (value === null) return null;
+  if (!exact(value, ['ip', 'country', 'asn', 'network', 'refererHost']) ||
+      typeof value.ip !== 'string' || value.ip.length > 45 || value.ip.includes('%') || !isIP(value.ip) ||
+      typeof value.country !== 'string' || !/^(?:[A-Z]{2})?$/.test(value.country) ||
+      !(value.asn === null || Number.isSafeInteger(value.asn) && value.asn > 0 && value.asn <= 4294967295) ||
+      typeof value.network !== 'string' || value.network.length > 160 || /[\u0000-\u001f\u007f-\u009f]/.test(value.network) ||
+      !hostname(value.refererHost)) throw new Error('canary_response');
+  return value;
+}
 
 function statusValue(value, id) {
   if (!exact(value, ['documentId', 'canary']) || value.documentId !== id) throw new Error('canary_response');
@@ -20,13 +42,14 @@ function statusValue(value, id) {
 }
 function eventValue(value, id) {
   if (!exact(value, ['documentId', 'events']) || value.documentId !== id || !Array.isArray(value.events) || value.events.length > 50) throw new Error('canary_response');
-  for (const event of value.events) {
-    if (!exact(event, ['id', 'at', 'outcome', 'notifications']) || !EVENT.test(event.id) || !time(event.at) ||
+  const events = value.events.map(event => {
+    if (!(exact(event, ['id', 'at', 'outcome', 'notifications']) || exact(event, ['id', 'at', 'outcome', 'notifications', 'source'])) || !EVENT.test(event.id) || !time(event.at) ||
         event.outcome !== 'url_requested' || !Array.isArray(event.notifications) || event.notifications.length > 4 ||
         event.notifications.some(n => !exact(n, ['type', 'state']) || !['email', 'webhook', 'slack', 'discord'].includes(n.type) ||
           !['pending', 'retrying', 'accepted', 'failed'].includes(n.state))) throw new Error('canary_response');
-  }
-  return { configured: true, documentId: id, events: value.events };
+    return { ...event, source: Object.hasOwn(event, 'source') ? sourceValue(event.source) : null };
+  });
+  return { configured: true, documentId: id, events };
 }
 async function rpc(binding, method, args) {
   let timer;

@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -40,7 +40,7 @@ async function check() {
     durableObjectsPersist: join(temporary, 'storage'),
     workers: [{ name: 'canary-fixture', modules: true, modulesRoot: build, scriptPath: join(build, 'worker.js'),
       compatibilityDate: '2026-01-12', durableObjects: { KANARI_STORE: { className: 'KanariyaStore', useSQLite: true } },
-      bindings: { ADMIN_KEY: 'synthetic-admin', IP_HMAC_KEY: 'synthetic-ip-key', RATE_LIMIT_MAX: '0' },
+      bindings: { ADMIN_KEY: 'synthetic-admin', IP_HMAC_KEY: 'synthetic-ip-key', RATE_LIMIT_MAX: '0', CANARY_SOURCE_KEY: Buffer.alloc(32, 115).toString('base64') },
       outboundService: async () => { outboundRequests++; throw new Error('All external requests are blocked in this check'); },
     }, { name: 'trusted-caller-fixture', modules: true, compatibilityDate: '2026-01-12',
       script: `export default { async fetch(request, env) {
@@ -92,12 +92,25 @@ async function check() {
   assert.equal(hit.status, 204);
   const events = (await rpc('events')).value.events; assert.equal(events.length, 1);
   assert.equal(events[0].outcome, 'url_requested'); assert.deepEqual(events[0].notifications, []);
+  assert.equal(events[0].source.ip, '198.51.100.17'); assert.equal(events[0].source.refererHost, 'private.example.test');
+  assert.deepEqual((await rpc('events', other)).value.events, []);
   const exportResponse = await main.fetch('https://fixture.test/admin/export?token=' + canary.token, { headers: { authorization: 'Bearer synthetic-admin' } });
   const stored = await exportResponse.json(); assert.equal(stored.length, 1);
   assert.deepEqual(Object.keys(stored[0]).sort(), ['deliveries', 'documentId', 'id', 'kind', 'ts']);
   assert.equal(stored[0].kind, 'vault.canary'); assert.equal(stored[0].documentId, id);
   assert.doesNotMatch(JSON.stringify(stored), /PRIVATE_SYNTHETIC_|198\.51\.100\.17|ipHash|referer|user-agent/);
-  checks.push('Native hits store opaque identifiers and fixed outcomes without visitor IP, headers, email or referrer');
+  const storageRoot = join(temporary, 'storage');
+  let storageFilesChecked = 0;
+  for (const name of await readdir(storageRoot, { recursive: true })) {
+    if (!/\.sqlite(?:-wal|-shm)?$/.test(name)) continue;
+    const storedBytes = await readFile(join(storageRoot, name));
+    storageFilesChecked++;
+    for (const marker of ['198.51.100.17', 'private.example.test', 'PRIVATE_SYNTHETIC_', Buffer.alloc(32, 115).toString('base64')]) {
+      assert.equal(storedBytes.includes(Buffer.from(marker)), false, 'Private source or key must never appear in persisted SQLite bytes');
+    }
+  }
+  assert.ok(storageFilesChecked > 0, 'Persisted SQLite files must actually be inspected');
+  checks.push('Native owner RPC decrypts source evidence; SQLite bytes and public export omit plaintext source and keys');
   const revoked = await rpc('revoke'); assert.equal(revoked.value.canary.state, 'revoked');
   await main.fetch('https://fixture.test/canary/' + canary.token);
   assert.equal((await rpc('events')).value.events.length, 1);

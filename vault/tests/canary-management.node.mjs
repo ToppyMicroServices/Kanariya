@@ -120,10 +120,56 @@ test('document-scoped logs accept bounded fixed evidence only', async () => {
     outcome: 'url_requested', notifications: [{ type: 'email', state: 'accepted' }] }] } });
   const response = (await f.request({ logs: true })).response; assert.equal(response.status, 200);
   const value = await response.json(); assert.equal(value.events.length, 1); assert.equal(value.events[0].outcome, 'url_requested');
+  assert.equal(value.events[0].source, null);
   f.binding.events = async documentId => ({ status: 200, value: { documentId, events: Array(51).fill(value.events[0]) } });
   assert.equal((await f.request({ logs: true })).response.status, 503);
   f.binding.events = async documentId => ({ status: 200, value: { documentId, events: [{ ...value.events[0], readerEmail: 'private@example.test' }] } });
   assert.equal((await f.request({ logs: true })).response.status, 503);
+});
+
+test('owner logs accept bounded source evidence and normalize legacy records without source', async () => {
+  const f = fixture(), base = { id: 'c'.repeat(32), at: Date.now(), outcome: 'url_requested', notifications: [] };
+  for (const source of [null,
+    { ip: '198.51.100.9', country: 'JP', asn: 64500, network: 'Example network', refererHost: 'careers.example.test' },
+    { ip: '2001:db8::9', country: '', asn: null, network: '', refererHost: '' },
+    { ip: '::ffff:192.0.2.9', country: 'US', asn: 4294967295, network: 'Example network', refererHost: '[2001:db8::9]' },
+  ]) {
+    f.binding.events = async documentId => ({ status: 200, value: { documentId, events: [{ ...base, source }] } });
+    const response = (await f.request({ logs: true })).response; assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).events[0].source, source);
+  }
+  f.binding.events = async documentId => ({ status: 200, value: { documentId, events: [base] } });
+  assert.equal((await (await f.request({ logs: true })).response.json()).events[0].source, null);
+  assert.deepEqual(f.deadlineReads, []); assert.equal(f.sideEffects, 0);
+});
+
+test('malformed or expanded source evidence fails closed rather than exposing extra private data', async () => {
+  const f = fixture(), base = { id: 'c'.repeat(32), at: Date.now(), outcome: 'url_requested', notifications: [] };
+  const source = { ip: '198.51.100.9', country: 'JP', asn: 64500, network: 'Example network', refererHost: 'careers.example.test' };
+  const invalid = [undefined, {}, [], { ...source, email: 'private@example.test' }, { ...source, ip: '' },
+    { ...source, ip: '198.51.100.999' }, { ...source, ip: '0198.51.100.9' }, { ...source, ip: '2001:db8::9%en0' },
+    { ...source, ip: 'a'.repeat(46) }, { ...source, country: 'Japan' }, { ...source, country: 'jp' },
+    { ...source, asn: 0 }, { ...source, asn: -1 }, { ...source, asn: 4294967296 }, { ...source, asn: '64500' },
+    { ...source, network: 'x'.repeat(161) }, { ...source, network: 'name\nPRIVATE' }, { ...source, network: 'name\u0085PRIVATE' },
+    { ...source, refererHost: 'https://careers.example.test/private' }, { ...source, refererHost: 'careers.example.test/private' },
+    { ...source, refererHost: 'careers.example.test:443' }, { ...source, refererHost: 'user:secret@careers.example.test' },
+    { ...source, refererHost: 'careers.example.test?email=private@example.test' }, { ...source, refererHost: 'x'.repeat(254) },
+    { ...source, refererHost: 'Careers.example.test' }, { ...source, refererHost: 'careers.example.test\nPRIVATE' },
+  ];
+  for (const value of invalid) {
+    f.binding.events = async documentId => ({ status: 200, value: { documentId, events: [{ ...base, source: value }] } });
+    const response = (await f.request({ logs: true })).response;
+    assert.equal(response.status, 503); assert.deepEqual(await response.json(), { error: 'unavailable' });
+  }
+});
+
+test('source-bearing logs remain owner-only and pinned to the dummy document', async () => {
+  const f = fixture();
+  for (const [options, status] of [[{ subject: 'reader' }, 403], [{ subject: null }, 401], [{ id: crypto.randomUUID() }, 403]]) {
+    const response = (await f.request({ logs: true, ...options })).response;
+    assert.equal(response.status, status); assert.doesNotMatch(await response.text(), /source|198\.51\.100/);
+  }
+  assert.equal(f.bindingReads, 0); assert.deepEqual(f.calls, []); assert.equal(f.sideEffects, 0);
 });
 
 test('unexpected upstream routes, identities and response data fail closed', async () => {

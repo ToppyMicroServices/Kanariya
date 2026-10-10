@@ -35,14 +35,21 @@ def bindings():
 
 
 class FakeAPI:
-    def __init__(self, failure=None):
+    def __init__(self, failure=None, canary_binding=None):
         self.active, self.latest = BASE, BASE
         self.calls, self.posts = [], []
         self.failure = failure
+        self.canary_bindings = {BASE: copy.deepcopy(canary_binding)}
         self.settings_reads = 0
         self.runtime = {"migration_tag": "v1-vault", "compatibility_date": "2026-01-12",
                         "compatibility_flags": ["nodejs_compat"], "usage_model": "standard",
                         "limits": {"cpu_ms": 30000}}
+
+    def binding_rows(self, version):
+        rows = bindings()
+        if self.canary_bindings.get(version) is not None:
+            rows.append(copy.deepcopy(self.canary_bindings[version]))
+        return rows
 
     def __call__(self, path, method="GET", data=None, content_type=None, raw=False):
         self.calls.append((method, path))
@@ -51,6 +58,12 @@ class FakeAPI:
             if path == release.SCRIPT + "/versions":
                 if self.failure == "upload_timeout":
                     raise release.SafeFailure("api_transport_unknown")
+                message = release.BytesParser(policy=release.email.policy.default).parsebytes(
+                    ("Content-Type: " + content_type + "\r\nMIME-Version: 1.0\r\n\r\n").encode() + data)
+                metadata = json.loads(next(part for part in message.iter_parts()
+                    if part.get_param("name", header="content-disposition") == "metadata").get_payload(decode=True))
+                self.canary_bindings[NEW] = (copy.deepcopy(self.canary_bindings[BASE])
+                    if "service" in metadata["keep_bindings"] else None)
                 self.latest = NEW
                 return {"id": NEW}
             if path == release.SCRIPT + "/deployments":
@@ -64,7 +77,8 @@ class FakeAPI:
         if path == release.SCRIPT + "/versions":
             return {"items": [{"id": self.latest}]}
         if path.startswith(release.SCRIPT + "/versions/"):
-            return {"id": path.rsplit("/", 1)[1], "resources": {"bindings": bindings(),
+            version = path.rsplit("/", 1)[1]
+            return {"id": version, "resources": {"bindings": self.binding_rows(version),
                     "script_runtime": copy.deepcopy(self.runtime),
                     "script": {"handlers": ["fetch"], "named_handlers": ["VaultDocument"]}}}
         if path == release.SCRIPT + "/settings":
@@ -73,7 +87,7 @@ class FakeAPI:
                 error.http_status, error.api_codes, error.api_resource = 403, [10000], "worker_or_zone_metadata"
                 raise error
             self.settings_reads += 1
-            value = {"bindings": bindings(), "compatibility_date": "2026-01-12",
+            value = {"bindings": self.binding_rows(self.latest), "compatibility_date": "2026-01-12",
                      "compatibility_flags": ["nodejs_compat"], "observability": {"enabled": False}}
             if (self.failure == "preupload_drift" and self.settings_reads >= 2 or
                 self.failure == "postactivation_drift" and self.active == NEW):
@@ -150,10 +164,62 @@ class SourceReleaseTests(unittest.TestCase):
         for forbidden in (b'"bindings"', b'"vars"', b'"migrations"', b'"migration_tag"', SECRET_MARKER.encode(), RECIPIENT.encode()):
             self.assertNotIn(forbidden, multipart)
         self.assertIn(b'"keep_bindings"', multipart)
+        self.assertNotIn(b'"service"', multipart)
         self.assertIn(b'"limits": {"cpu_ms": 30000}', multipart)
         self.assertEqual(api.posts[1][1]["versions"], [{"version_id": NEW, "percentage": 100}])
         for marker in (SECRET_MARKER, RECIPIENT, SENDER):
             self.assertNotIn(marker, output + self.report.read_text())
+
+    def test_existing_approved_canary_binding_is_inherited_without_creating_or_rewriting_it(self):
+        for environment in (None, "production"):
+            with self.subTest(environment=environment):
+                canary = dict(release.CANARY_BINDING)
+                if environment is not None:
+                    canary["environment"] = environment
+                api = FakeAPI(canary_binding=canary)
+                self.assertEqual(self.run_release(api)[0], 0)
+                self.assertEqual(api.canary_bindings[NEW], canary)
+                multipart = api.posts[0][1]
+                self.assertIn(b'"service"', multipart)
+                self.assertNotIn(b'"CANARY_ADMIN"', multipart)
+                self.assertNotIn(b'"CanaryManagement"', multipart)
+                report = json.loads(self.report.read_text())
+                self.assertEqual(report["remoteMutations"], 2)
+                self.assertTrue(report["sourceBindingsRuntimeAndWorkerEndpointsVerified"])
+                self.assertEqual(report["r2ApiRequests"], 0)
+                self.report.unlink()
+
+    def test_unapproved_canary_binding_stops_before_upload(self):
+        changes = ({"name": "CANARY_SERVICE"}, {"type": "plain_text"},
+                   {"service": "other-worker"}, {"entrypoint": "OtherManagement"},
+                   {"environment": "staging"}, {"environment": "default"},
+                   {"environment": ""}, {"environment": None}, {"props": {}},
+                   {"account_id": release.ACCOUNT})
+        for change in changes:
+            with self.subTest(change=change):
+                api = FakeAPI(canary_binding={**release.CANARY_BINDING, **change})
+                self.assertEqual(self.run_release(api)[0], 1)
+                self.assertEqual(api.posts, [])
+                self.report.unlink()
+        for missing in ("service", "entrypoint"):
+            with self.subTest(missing=missing):
+                canary = dict(release.CANARY_BINDING)
+                del canary[missing]
+                api = FakeAPI(canary_binding=canary)
+                self.assertEqual(self.run_release(api)[0], 1)
+                self.assertEqual(api.posts, [])
+                self.report.unlink()
+
+    def test_optional_canary_binding_does_not_relax_mandatory_or_unique_binding_requirements(self):
+        cases = (bindings()[1:] + [dict(release.CANARY_BINDING)],
+                 bindings() + [dict(release.CANARY_BINDING)] * 2,
+                 bindings() + [dict(release.CANARY_BINDING),
+                     {"name": "UNAPPROVED", "type": "service", "service": "kanariya"}])
+        for rows in cases:
+            with self.subTest(names=[row["name"] for row in rows]):
+                with self.assertRaises(release.SafeFailure) as caught:
+                    release.checked_bindings(rows)
+                self.assertEqual(str(caught.exception), "binding_names_or_types_changed")
 
     def test_unapproved_notification_sender_stops_before_upload(self):
         api = FakeAPI()

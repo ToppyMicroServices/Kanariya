@@ -241,6 +241,12 @@ An old signed URL cannot be turned into a registered URL or given a new stored e
 
 Kanariya stores an HMAC of the request IP when `IP_HMAC_KEY` is configured, plus country/ASN and bounded User-Agent and Referer strings. It does not store request bodies or the full request query. User-Agent, Referer, and placement labels can still contain sensitive information, and configured notification services receive the event metadata.
 
+Vault-managed Canary tokens use a separate minimal event format. Optionally, a
+dedicated `CANARY_SOURCE_KEY` Worker secret enables encrypted connection IP and
+network evidence for owner history only; notifications and public exports omit
+this evidence. See [Vault Canary management](vault/README.md#canary-management)
+for key storage, retention and interpretation limits.
+
 Use tokens only in systems and data you own or are authorized to monitor. Link scanners, previews, and email proxies can trigger requests. Files that are never opened, or clients that block remote resources, may produce no event. This is an HTTP access signal, not a high-interaction honeypot or proof of exfiltration.
 
 One Durable Object serves the installation. Inventory, retained-event and delivery limits bound parts of its workload; they are not a guarantee against all public-endpoint abuse. A flood can consume installation event capacity and prevent later evidence from being stored until rows expire. Rate limits, storage availability, and provider limits can also cause dropped events or failed deliveries. Local unit tests do not establish production capacity, migration success, or live provider delivery.

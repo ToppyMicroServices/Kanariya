@@ -41,6 +41,8 @@ BINDING_TYPES = {
     "NOTIFY_EMAIL": "send_email", "PASSWORD_READER_ENABLED": "plain_text",
     "VAULT_OWNER_SUB": "secret_text",
 }
+CANARY_BINDING = {"name": "CANARY_ADMIN", "type": "service", "service": "kanariya",
+                  "entrypoint": "CanaryManagement"}
 FIXED_VARS = {
     "PUBLIC_ORIGIN": "https://vault.toppymicros.com",
     "ACCESS_ISSUER": "https://toppymicros.cloudflareaccess.com",
@@ -167,10 +169,27 @@ class API:
         return value["result"]
 
 
+def checked_binding_types(value):
+    require(isinstance(value, list) and all(isinstance(row, dict) and
+            isinstance(row.get("name"), str) and isinstance(row.get("type"), str)
+            for row in value), "binding_metadata_invalid")
+    types = {row["name"]: row["type"] for row in value}
+    expected = dict(BINDING_TYPES)
+    if CANARY_BINDING["name"] in types:
+        expected[CANARY_BINDING["name"]] = CANARY_BINDING["type"]
+    require(len(value) == len(expected) and types == expected, "binding_names_or_types_changed")
+    by_name = {row["name"]: row for row in value}
+    if CANARY_BINDING["name"] in by_name:
+        canary = by_name[CANARY_BINDING["name"]]
+        require(set(canary) in (set(CANARY_BINDING), set(CANARY_BINDING) | {"environment"}) and
+                all(canary.get(key) == item for key, item in CANARY_BINDING.items()) and
+                ("environment" not in canary or canary["environment"] == "production"),
+                "canary_service_binding_changed")
+    return sorted(set(types.values()))
+
+
 def checked_bindings(value):
-    require(isinstance(value, list) and all(isinstance(row, dict) for row in value), "binding_metadata_invalid")
-    require(len(value) == len(BINDING_TYPES) and
-            {row.get("name"): row.get("type") for row in value} == BINDING_TYPES, "binding_names_or_types_changed")
+    checked_binding_types(value)
     by_name = {row["name"]: row for row in value}
     for name, expected in FIXED_VARS.items():
         require(by_name[name].get("text") == expected, "approved_auth_or_dummy_configuration_changed")
@@ -221,7 +240,8 @@ def detail(api, version):
             runtime.get("compatibility_flags") == ["nodejs_compat"] and
             runtime.get("usage_model") == "standard", "tested_runtime_changed")
     script = resources.get("script") or {}
-    return {"bindingsSha256": checked_bindings(resources.get("bindings")), "runtime": runtime,
+    return {"bindingsSha256": checked_bindings(resources.get("bindings")),
+            "bindingTypes": checked_binding_types(resources.get("bindings")), "runtime": runtime,
             "handlersSha256": digest({"handlers": script.get("handlers"), "namedHandlers": script.get("named_handlers")})}
 
 
@@ -287,8 +307,9 @@ def unchanged(observed, baseline, expected_source):
         require(observed[key] == baseline[key], "configuration_changed")
 
 
-def multipart(body, runtime):
-    metadata = {"main_module": "worker.js", "keep_bindings": sorted(set(BINDING_TYPES.values())),
+def multipart(body, runtime, binding_types):
+    # Retain an existing, validated service binding; this never creates one.
+    metadata = {"main_module": "worker.js", "keep_bindings": binding_types,
                 **{key: value for key, value in runtime.items() if key != "migration_tag"}}
     boundary = "kanariya-vault-source-" + uuid.uuid4().hex
     parts = []
@@ -310,7 +331,7 @@ def deploy(api, body, report, report_path):
     evidence(report_path, report)
     # Recheck immediately before the first mutation, including concurrent changes.
     unchanged(snapshot(api, base, base), baseline, baseline["sourceSha256"])
-    data, boundary = multipart(body, baseline["latestDetail"]["runtime"])
+    data, boundary = multipart(body, baseline["latestDetail"]["runtime"], baseline["latestDetail"]["bindingTypes"])
     report.update(phase="upload_attempt_started", remoteMutations=None)
     evidence(report_path, report)
     created = api(SCRIPT + "/versions", method="POST", data=data,

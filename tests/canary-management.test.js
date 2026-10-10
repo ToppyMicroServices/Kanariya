@@ -109,3 +109,36 @@ it('respects the existing installation inventory cap without removing another to
   expect(ordinary.status).toBe(201); expect((await bridge(s).create(id, future())).status).toBe(409);
   expect(s.object.rows('SELECT * FROM tokens')).toHaveLength(1);
 });
+
+it('encrypts document source evidence at rest and releases it only through scoped private history', async () => {
+  const s = setup({ CANARY_SOURCE_KEY: btoa('s'.repeat(32)), WEBHOOK_URL: 'https://fixture.test/synthetic-notify' }), rpc = bridge(s);
+  const token = (await rpc.create(id, future())).value.canary.token;
+  const request = new Request(`https://kanariya.toppymicros.com/canary/${token}`, {
+    headers: { 'cf-connecting-ip': '198.51.100.19', referer: 'https://private-source.example.test/PRIVATE_PATH?secret=PRIVATE_QUERY', 'user-agent': 'PRIVATE_UA' },
+  });
+  Object.defineProperty(request, 'cf', { value: { country: 'JP', asn: 64512, asOrganization: 'PRIVATE_NETWORK' } });
+  await worker.fetch(request, s.env); s.restart();
+  const persisted = JSON.stringify(['tokens', 'events', 'deliveries', 'guards'].flatMap(table => s.object.rows(`SELECT * FROM ${table}`)));
+  for (const secret of ['198.51.100.19', 'PRIVATE_', 'private-source.example.test', '64512', s.env.CANARY_SOURCE_KEY]) expect(persisted).not.toContain(secret);
+  const owner = (await bridge(s).events(id)).value.events[0];
+  expect(owner.source).toEqual({ ip: '198.51.100.19', country: 'JP', asn: 64512, network: 'PRIVATE_NETWORK', refererHost: 'private-source.example.test' });
+  expect((await bridge(s).events(other)).value.events).toEqual([]);
+  const exported = await (await worker.fetch(admin(`/admin/export?token=${token}`), s.env)).json();
+  expect(exported[0]).not.toHaveProperty('sourceBox'); expect(JSON.stringify(exported)).not.toContain('PRIVATE_');
+  const notify = vi.fn(async () => new Response(null, { status: 200 })); vi.stubGlobal('fetch', notify); await s.object.alarm();
+  const sent = JSON.parse(notify.mock.calls[0][1].body);
+  expect(Object.keys(sent.event).sort()).toEqual(['documentId', 'id', 'kind', 'ts']);
+  expect(JSON.stringify(sent)).not.toMatch(/sourceBox|PRIVATE_|198\.51\.100\.19/);
+  s.env.CANARY_SOURCE_KEY = btoa('t'.repeat(32));
+  expect((await bridge(s).events(id)).value.events[0].source).toBeNull();
+});
+
+it('does not capture legacy ordinary tokens or trust X-Forwarded-For for exact source', async () => {
+  const s = setup({ CANARY_SOURCE_KEY: btoa('s'.repeat(32)) }), rpc = bridge(s);
+  const token = (await rpc.create(id, future())).value.canary.token;
+  await worker.fetch(new Request(`https://kanariya.toppymicros.com/canary/${token}`, { headers: { 'x-forwarded-for': '198.51.100.9' } }), s.env);
+  expect((await rpc.events(id)).value.events[0].source).toBeNull(); expect(hits(s, token)[0]).not.toHaveProperty('sourceBox');
+  const ordinary = await (await worker.fetch(admin('/admin/tokens', { method: 'POST', data: { name: 'ordinary' } }), s.env)).json();
+  await worker.fetch(new Request(ordinary.url, { headers: { 'cf-connecting-ip': '198.51.100.9' } }), s.env);
+  expect(hits(s, ordinary.token)[0]).not.toHaveProperty('sourceBox');
+});

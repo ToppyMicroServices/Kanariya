@@ -26,7 +26,7 @@ function browser(options = {}) {
   const state = { status: summary(), logs: { configured: true, documentId: id, events: [] }, ...options.state };
   class BrowserDate extends Date { static now() { return clock; } }
   vm.runInNewContext(js, {
-    Date: BrowserDate, Intl, Uint8Array, TextDecoder, AbortController,
+    Date: BrowserDate, Intl, Uint8Array, TextDecoder, AbortController, URL,
     document: { getElementById: name => elements[name], createElement: () => element() },
     navigator: { clipboard: { async writeText(value) { copies.push(value); } } },
     addEventListener: (name, callback) => events.set(name, callback),
@@ -122,6 +122,50 @@ test('logs are explicit, bounded and distinguish URL requests and send acceptanc
   assert.equal(ui.elements['canary-events'].children.length, 0); assert.match(ui.elements['canary-status'].textContent, /読み込めません/);
   ui.state.logs.events = [{ ...event, id: '<img src=x onerror=alert(1)>' }]; await ui.click('canary-logs');
   assert.equal(ui.elements['canary-events'].children.length, 0);
+});
+
+test('owner logs show source IP, network and referrer hostname as text without triggering requests', async () => {
+  const network = '<img src=x onerror=alert(1)>', event = { id: 'b'.repeat(32), at: now, outcome: 'url_requested', notifications: [],
+    source: { ip: '198.51.100.9', country: 'JP', asn: 64500, network, refererHost: 'careers.example.test' } };
+  const ui = browser({ state: { logs: { configured: true, documentId: id, events: [event] } } }); await settled(); await ui.open();
+  await ui.click('canary-logs');
+  const text = ui.elements['canary-events'].children[0].textContent;
+  assert.match(text, /接続元IP: 198\.51\.100\.9（JP）/);
+  assert.ok(text.includes('ネットワーク: ' + network + ' AS64500'));
+  assert.match(text, /参照元サイト: careers\.example\.test/);
+  assert.equal(ui.requests.length, 3); assert.equal(ui.posts().length, 0);
+  assert.match(html, /<summary>ご案内<\/summary>.*接続元IP・ネットワーク・参照元サイト/);
+  for (const source of [null, undefined, { ip: '2001:db8::9', country: '', asn: null, network: '', refererHost: '' }]) {
+    ui.state.logs.events = [{ ...event, source }]; await ui.click('canary-logs');
+    const displayed = ui.elements['canary-events'].children[0].textContent;
+    if (source) { assert.match(displayed, /接続元IP: 2001:db8::9/); assert.doesNotMatch(displayed, /ネットワーク:|参照元サイト:/); }
+    else assert.match(displayed, /接続元情報なし/);
+  }
+});
+
+test('malformed source fields and expanded records clear owner logs without rendering', async () => {
+  const source = { ip: '198.51.100.9', country: 'JP', asn: 64500, network: 'Example network', refererHost: 'careers.example.test' };
+  const event = { id: 'b'.repeat(32), at: now, outcome: 'url_requested', notifications: [], source };
+  const ui = browser({ state: { logs: { configured: true, documentId: id, events: [event] } } }); await settled(); await ui.open();
+  await ui.click('canary-logs'); assert.equal(ui.elements['canary-events'].children.length, 1);
+  for (const invalid of [{}, [], { ...source, ip: '<img src=x>' }, { ...source, ip: '198.51.100.999' },
+    { ...source, ip: '0198.51.100.9' }, { ...source, ip: '2001:db8::9%en0' }, { ...source, ip: 'a'.repeat(46) },
+    { ...source, country: 'jp' }, { ...source, asn: 4294967296 }, { ...source, asn: 0 }, { ...source, asn: '64500' },
+    { ...source, network: 'x'.repeat(161) }, { ...source, network: 'name\nPRIVATE' }, { ...source, network: 'name\u0085PRIVATE' },
+    { ...source, refererHost: 'user:secret@careers.example.test' }, { ...source, refererHost: 'careers.example.test:443' },
+    { ...source, refererHost: 'careers.example.test/private' }, { ...source, refererHost: 'careers.example.test?email=private' },
+    { ...source, refererHost: 'Careers.example.test' }, { ...source, refererHost: 'x'.repeat(254) }, { ...source, email: 'private@example.test' },
+  ]) {
+    ui.state.logs.events = [{ ...event, source: invalid }]; await ui.click('canary-logs');
+    assert.equal(ui.elements['canary-events'].children.length, 0); assert.match(ui.elements['canary-status'].textContent, /読み込めません/);
+  }
+  for (const invalid of [{ ...event, readerEmail: 'private@example.test' }, { ...event, notifications: [{ state: 'accepted' }] },
+    { ...event, at: 0 }, { ...event, at: 8640000000000001 }]) {
+    ui.state.logs.events = [invalid]; await ui.click('canary-logs'); assert.equal(ui.elements['canary-events'].children.length, 0);
+  }
+  ui.state.logs = { configured: true, documentId: id, events: [event], extra: 'private' };
+  await ui.click('canary-logs'); assert.equal(ui.elements['canary-events'].children.length, 0);
+  assert.equal(ui.posts().length, 0);
 });
 
 test('invalid IDs and foreign URL responses cannot produce a URL or enable a mutation', async () => {

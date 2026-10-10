@@ -182,8 +182,7 @@ def checked_qa(pdf_path, qa_path, plan):
 def checked_bindings(value, pins):
     require(isinstance(value, list) and all(isinstance(row, dict) for row in value), "binding_metadata_invalid")
     rows = copy.deepcopy(value)
-    require(len(rows) == 15 and {row.get("name"): row.get("type") for row in rows} == release.BINDING_TYPES,
-            "existing_fifteen_bindings_required")
+    binding_types = release.checked_binding_types(rows)
     by_name = {row["name"]: row for row in rows}
     for name, value in pins.items():
         require(by_name[name].get("text") == value, "expected_dummy_pins_changed")
@@ -201,6 +200,7 @@ def checked_bindings(value, pins):
             for key in ("text", "key_base64", "key_jwk"):
                 row.pop(key, None)
     return {"bindingsSha256": digest(sorted(rows, key=lambda row: row["name"])),
+            "bindingTypes": binding_types,
             "preservedBindingsSha256": digest(sorted((row for row in rows if row["name"] not in PIN_NAMES),
                                                       key=lambda row: row["name"])),
             "plainText": sorted((row for row in rows if row["type"] == "plain_text"), key=lambda row: row["name"])}
@@ -270,13 +270,13 @@ def unchanged(observed, baseline):
             require(observed[slot][name] == baseline[slot][name], "other_configuration_changed")
 
 
-def multipart(body, runtime, plain_text, pins):
+def multipart(body, runtime, plain_text, pins, binding_types):
     rows = copy.deepcopy(plain_text)
     for row in rows:
         if row["name"] in PIN_NAMES:
             row["text"] = pins[row["name"]]
     metadata = {"main_module": "worker.js", "bindings": rows,
-                "keep_bindings": sorted(set(release.BINDING_TYPES.values()) - {"plain_text"}),
+                "keep_bindings": sorted(set(binding_types) - {"plain_text"}),
                 **{key: value for key, value in runtime.items() if key != "migration_tag"}}
     boundary = "kanariya-vault-dummy-" + uuid.uuid4().hex
     parts = []
@@ -306,7 +306,8 @@ def rotate(api, plan, report, report_path, execute=False):
     require(report.get("approvalMatched") is True, "exact_plan_approval_required")
     unchanged(snapshot(api, base, base, old_pins, old_pins)[0], baseline)
     check_expiry(plan)
-    data, boundary = multipart(body, baseline["latestDetail"]["runtime"], baseline["latestDetail"]["plainText"], new_pins)
+    data, boundary = multipart(body, baseline["latestDetail"]["runtime"], baseline["latestDetail"]["plainText"],
+                               new_pins, baseline["latestDetail"]["bindingTypes"])
     report.update(phase="upload_attempt_started", remoteMutations=None)
     release.evidence(report_path, report)
     created = api(release.SCRIPT + "/versions", method="POST", data=data,
