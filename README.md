@@ -34,7 +34,9 @@ flowchart LR
   Legacy[(Existing Workers KV)] --> Export
 ```
 
-Events and their delivery records expire after 30 days by default. Export excludes expired SQLite events immediately; alarms remove expired events, delivery rows, and temporary guards, with cleanup scheduled at least hourly while records remain. Token summaries and revoked/expired inventory records persist independently of event retention. Hit counts describe accepted non-test requests, including repeats whose notifications were deduplicated; dropped requests do not increase them.
+Events and their delivery records expire after 30 days by default. SQLite retains at most 1,000 events per token and 10,000 across the installation by default, including admin test events. Admission removes expired rows, then checks both limits in the same transaction before writing an event, guard, or delivery. At capacity, it drops the new event without evicting unexpired evidence or another token's pending deliveries. A saturated token does not block others while installation capacity remains. Lowering a limit below the existing count stops new admissions until expiry frees capacity; it does not erase existing evidence.
+
+Export excludes expired SQLite events immediately; admission and alarms remove expired events, delivery rows, and temporary guards, with alarm cleanup scheduled at least hourly while records remain. Token summaries and revoked/expired inventory records persist independently of event retention. Hit counts describe accepted non-test requests, including repeats whose notifications were deduplicated; dropped requests do not increase them. These SQLite row limits do not change historical KV retention.
 
 `KANARI_KV` is an optional compatibility binding for historical events and still-live legacy nonce records. New data is written to SQLite. Legacy export reads at most the first `EXPORT_MAX_ITEMS` matching KV keys, in batches of up to 100 values, and merges that subset with current events. The returned subset is sorted newest first and capped at 1,000 by default. If the response header `x-kanariya-legacy-truncated` is `true`, more old KV keys exist; the response does not represent the globally newest legacy history. Historical KV entries retain their existing KV expiration, and are not copied into SQLite.
 
@@ -116,7 +118,7 @@ Token creation accepts a nonblank name of at most 120 characters, location up to
 
 Token records contain `token`, `name`, `location`, `src`, `createdAt`, `expiresAt`, `revokedAt`, `lastSeenAt`, `hitCount`, `lastTestAt`, `state`, and `url`. Nullable times are `null`; other times are ISO strings. State is `active`, `expired`, or `revoked`.
 
-Revoke and test return `404` for an unknown registered token. Tests inside the ten-second interval return `429`. Unsupported methods return `405`; storage configuration or access failures on admin operations return `503`. Duplicate query parameters are rejected.
+Revoke and test return `404` for an unknown registered token. Tests inside the ten-second interval return `429`; tests at either event capacity limit return `409` with `event_capacity`. Unsupported methods return `405`; storage configuration or access failures on admin operations return `503`. Duplicate query parameters are rejected.
 
 After the transport check, the public canary endpoint deliberately returns `204` for accepted hits as well as invalid, expired, revoked, rate-limited, replayed, or otherwise dropped hits. **A `204` does not confirm storage or notification delivery.** Check the authenticated export. Only `GET` records a hit.
 
@@ -135,7 +137,7 @@ Configure any combination of these destinations:
 
 Slack and Discord use their own payloads; no separate relay adapter is needed. The adapters follow [Slack's text-formatting rules](https://docs.slack.dev/messaging/formatting-message-text/) and [Discord's webhook API](https://discord.com/developers/docs/resources/webhook#execute-webhook). Chat and email text distinguish **TEST** from **DETECTION**; the generic webhook exposes `event.test`. All formats include stable event and delivery IDs. See [the MailChannels guide](howto_MailChannels.md) for email authentication and domain setup.
 
-Public hits notify once per `(token, ipHash, ua)` within the default 30-minute deduplication interval. Repeated accepted hits still create events. Deduplication requires both an IP hash and a User-Agent; admin tests bypass it.
+Public hits notify once per `(token, ipHash)` within the default 30-minute deduplication interval. Changing or omitting User-Agent does not reset it. Guards saved by older versions with a User-Agent component continue to suppress that token/IP until their original expiry. Without an IP header or `IP_HMAC_KEY`, requests share the token's empty-hash bucket; no raw IP is used as a fallback. The token also has a default 60-second notification cooldown across all IP hashes, so rotating IPs cannot queue a new notification set on every hit. This cooldown can suppress alerts from distinct visitors. Repeated accepted hits still create events and increase hit counts until a rate or storage limit is reached. Admin tests bypass notification deduplication and cooldown, while retaining their ten-second test interval and event capacity limits.
 
 Each configured destination gets its own delivery status:
 
@@ -144,7 +146,7 @@ Each configured destination gets its own delivery status:
 - `accepted`: the destination returned an HTTP 2xx response.
 - `failed`: a terminal error, exhausted attempts, expired event, or full queue.
 
-The default maximum is six attempts total. Network failures, ten-second timeouts, HTTP `408`, `429`, and `5xx` are retried. The backoff starts at 30 seconds and doubles, capped at one hour; a provider's `Retry-After` can extend it up to 24 hours. Other HTTP errors fail without retry. The queue holds at most 10,000 pending/retrying destination deliveries by default; overflow is recorded as `queue_full` while the event is retained.
+The default maximum is six attempts total. Network failures, ten-second timeouts, HTTP `408`, `429`, and `5xx` are retried. The backoff starts at 30 seconds and doubles, capped at one hour; a provider's `Retry-After` can extend it up to 24 hours. Other HTTP errors fail without retry. The queue holds at most 10,000 pending/retrying destination deliveries by default; overflow is recorded as `queue_full` while the event is retained. Retained delivery rows are also bounded by event capacity and the number of configured destinations.
 
 Delivery uses at-least-once semantics within these attempt and retention limits. Receivers may use `deliveryId` to recognize duplicates. `accepted` confirms only provider HTTP acceptance, not inbox arrival or that anyone read a message. Inspect the destination when testing.
 
@@ -169,7 +171,10 @@ Configure these non-secret values in `[vars]` in `wrangler.toml`, or the matchin
 | --- | --- | --- |
 | `TOKEN_MAX_ITEMS` | `1000` | `1`–`10000`; includes retained expired/revoked records |
 | `EVENT_TTL_SECONDS` | `2592000` | `60`–`31536000`; event and delivery retention |
+| `EVENT_MAX_ITEMS_PER_TOKEN` | `1000` | `1`–`10000`; retained SQLite events per token, including tests |
+| `EVENT_MAX_ITEMS` | `10000` | `1`–`100000`; retained SQLite events across the installation |
 | `DEDUPE_TTL_SECONDS` | `1800` | `1`–`86400` |
+| `NOTIFY_TOKEN_COOLDOWN_SECONDS` | `60` | `1`–`86400`; minimum interval between public notification sets for one token |
 | `EXPORT_MAX_ITEMS` | `1000` | `1`–`1000`; per-token merged export limit |
 | `RATE_LIMIT_WINDOW_SECONDS` | `60` | `0`–`86400`; `0` disables rate limiting |
 | `RATE_LIMIT_MAX` | `60` | `0`–`100000`; `0` disables rate limiting |
@@ -182,7 +187,7 @@ Configure these non-secret values in `[vars]` in `wrangler.toml`, or the matchin
 | `MAIL_FROM_NAME` | `Kanariya` | Email sender display name |
 | `MAIL_SUBJECT_PREFIX` | `Kanariya alert` | Email subject prefix |
 
-Rate limiting uses `(token, ipHash)` and a fixed time window. Requests without an IP hash share that token's empty-hash bucket. The ten-second admin-test interval, 90-day creation default, ten-second provider timeout, and 24-hour `Retry-After` ceiling are fixed in code.
+Rate limiting uses `(token, ipHash)` and a fixed time window. Requests without an IP hash share that token's empty-hash bucket. Event capacity, deduplication and the notification cooldown cannot be disabled with zero or negative values; those values clamp to the minimum. The ten-second admin-test interval, 90-day creation default, ten-second provider timeout, and 24-hour `Retry-After` ceiling are fixed in code.
 
 ## Deployment and migration
 
@@ -222,6 +227,8 @@ The GitHub Actions workflow runs the root and Vault unit/runtime checks, then de
 
 Legacy tokens remain available with their existing signature and timestamp rules. With the checked-in settings, a signed URL has a 300-second timestamp window. A nonce is consumed by an accepted request and retained through the signature validity interval, including allowed future clock skew. When the timestamp window is disabled, nonce retention remains five minutes. The legacy signer and `scripts/gen_signed_url.py` remain for compatibility; they do not create registry records or long-lived registered URLs.
 
+The local signer reads `MASTER_SECRET` or `SIGNING_SECRET` from the environment; `MASTER_SECRET` takes priority. Secret command-line flags, including abbreviations, are rejected. The smoke helper uses the same environment inputs. The deployment helper uses a private temporary directory for namespace discovery and removes it on exit.
+
 Token IDs must now be 1–512 URL-safe characters from `A–Z`, `a–z`, `0–9`, `_`, and `-`. Only IDs matching `^kr_[a-f0-9]{64}$` are treated as registered tokens. Other URL-safe IDs, including `kr_invoice`, remain legacy tokens. Extra path segments, percent-encoded aliases, and duplicate query parameters are rejected. Legacy URLs using those forms need replacement.
 
 An old signed URL cannot be turned into a registered URL or given a new stored expiry. Create a registered token and replace the URL in each document or file. Keep existing signing secrets and signature settings while still supporting valid legacy placements. The old smoke-test script exercises a public hit, not the separate admin test action; use the new test endpoint for a notification check that must not increase a registered token's hit count.
@@ -232,7 +239,7 @@ Kanariya stores an HMAC of the request IP when `IP_HMAC_KEY` is configured, plus
 
 Use tokens only in systems and data you own or are authorized to monitor. Link scanners, previews, and email proxies can trigger requests. Files that are never opened, or clients that block remote resources, may produce no event. This is an HTTP access signal, not a high-interaction honeypot or proof of exfiltration.
 
-One Durable Object serves the installation. Inventory and delivery limits bound parts of its workload; they are not a guarantee against all public-endpoint abuse. Rate limits, storage availability, and provider limits can cause dropped events or failed deliveries. Local unit tests do not establish production capacity, migration success, or live provider delivery.
+One Durable Object serves the installation. Inventory, retained-event and delivery limits bound parts of its workload; they are not a guarantee against all public-endpoint abuse. A flood can consume installation event capacity and prevent later evidence from being stored until rows expire. Rate limits, storage availability, and provider limits can also cause dropped events or failed deliveries. Local unit tests do not establish production capacity, migration success, or live provider delivery.
 
 ## License
 

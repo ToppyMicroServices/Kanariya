@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
-import { newKey, importKey, sealDocument, utf8 } from "../src/crypto.js";
+import { newKey, importKey, sealDocument, sealJSON, utf8 } from "../src/crypto.js";
 
 const exec = promisify(execFile), root = fileURLToPath(new URL("../", import.meta.url));
 const report = { status: "running_not_verified", checks: [], realDataUsed: false, liveNotificationsSent: false };
@@ -36,9 +36,23 @@ try {
     "deploy", "--dry-run", "--outdir", build], { cwd: root, timeout: 25000,
     env: { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_LOG_PATH: join(temporary, "wrangler.log") } });
   report.checks.push("dry_run_bundle");
+  // This local-only wrapper seeds historical encrypted state to exercise storage
+  // migration in workerd. It is never included in the deployment bundle.
+  const testWorker = join(build, 'fixture-worker.js');
+  await writeFile(testWorker, `import worker, { VaultDocument } from './worker.js';
+export default worker;
+export class RuntimeDocument extends VaultDocument {
+  async fetch(request) {
+    if (new URL(request.url).pathname === '/__synthetic_seed') {
+      await this.ctx.storage.put('encrypted-journal', await request.json());
+      return new Response(null, { status: 204 });
+    }
+    return super.fetch(request);
+  }
+}`);
   const env = { PUBLIC_ORIGIN: "https://vault.example.test", ACCESS_ISSUER: "https://fixture-runtime.cloudflareaccess.com", ACCESS_AUDIENCE: "fixture-runtime",
     VAULT_OWNER_SUB: "synthetic-owner", VAULT_WRAP_KEY: newKey(), VAULT_AUDIT_KEY: newKey(), WEBHOOK_URL: "https://notify.example.test/fixture" };
-  const id = crypto.randomUUID(), subject = "synthetic-private-runtime-subject";
+  const id = crypto.randomUUID(), subject = "synthetic-private-runtime-subject", otherSubject = 'synthetic-other-runtime-subject';
   let pdf = utf8("%PDF-1.4\nSYNTHETIC-RUNTIME-PRIVATE-BODY\n");
   if (process.argv[3]) {
     const fixture = await readFile(resolve(process.argv[3]));
@@ -48,7 +62,7 @@ try {
     pdf = new Uint8Array(fixture);
   }
   report.fixture = { kind: process.argv[3] ? "approved_dummy_pdf" : "generated_synthetic_bytes", sha256: createHash("sha256").update(pdf).digest("hex") };
-  const encrypted = await sealDocument({ id, bytes: pdf, subjects: [subject], expiresAt: Date.now() + 300000 }, await importKey(env.VAULT_WRAP_KEY));
+  const encrypted = await sealDocument({ id, bytes: pdf, subjects: [subject, otherSubject], expiresAt: Date.now() + 300000 }, await importKey(env.VAULT_WRAP_KEY));
   const recordBytes = JSON.stringify(encrypted);
   env.DUMMY_DOCUMENT_ID = id;
   env.DUMMY_RECORD_SHA256 = createHash("sha256").update(recordBytes).digest("hex");
@@ -56,10 +70,10 @@ try {
   const token = actor => new SignJWT({ sub: actor }).setProtectedHeader({ alg: "RS256", kid: "runtime" })
     .setIssuer(env.ACCESS_ISSUER).setAudience(env.ACCESS_AUDIENCE).setIssuedAt().setExpirationTime("10m").sign(pair.privateKey);
   const notifications = [], forbidden = [];
-  mf = new runtime.Miniflare({ modules: true, modulesRoot: build, scriptPath: join(build, "worker.js"),
+  mf = new runtime.Miniflare({ modules: true, modulesRules: [{ type: 'ESModule', include: ['**/*.js'] }], modulesRoot: build, scriptPath: testWorker,
     compatibilityDate: "2026-01-12", compatibilityFlags: ["nodejs_compat"], host: "127.0.0.1", port: 0, cf: false,
     log: new runtime.Log(runtime.LogLevel.ERROR), bindings: env,
-    durableObjects: { VAULT: { className: "VaultDocument", useSQLite: true } }, durableObjectsPersist: persist,
+    durableObjects: { VAULT: { className: "RuntimeDocument", useSQLite: true } }, durableObjectsPersist: persist,
     r2Buckets: ["VAULT_DOCUMENTS"],
     outboundService: async request => {
       if (request.url === env.ACCESS_ISSUER + "/cdn-cgi/access/certs") return new runtime.Response(JSON.stringify({ keys: [jwk] }), { headers: { "content-type": "application/json" } });
@@ -106,6 +120,19 @@ try {
   assert.equal(status.providerAccepted, 1); assert.ok(notifications.length >= 2);
   assert.equal(notifications.at(-1).event.outcome, "decrypted");
   report.checks.push("alarm_retry_and_provider_acceptance");
+  const namespace = await mf.getDurableObjectNamespace('VAULT'), objectId = namespace.idFromName(id), at = Date.now() - 120000;
+  const oldEvents = Array.from({ length: 500 }, () => ({ id: crypto.randomUUID(), documentId: id, subject, at, outcome: 'decrypted' }));
+  const oldRequests = oldEvents.map(() => ({ requestId: crypto.randomUUID(), subject, at }));
+  const oldJobs = oldEvents.flatMap(event => ['webhook', 'slack'].map(type => ({ eventId: event.id, at, state: 'accepted',
+    target: { type, fingerprint: 'ab'.repeat(32) }, attempts: 1, outcome: 'decrypted', nextAt: at, httpStatus: 202 })));
+  const oldJournal = await sealJSON({ version: 1, documentId: id, revoked: false, events: oldEvents, requests: oldRequests, jobs: oldJobs },
+    await importKey(env.VAULT_AUDIT_KEY), `journal:v1:${objectId.toString()}`);
+  assert.equal((await namespace.get(objectId).fetch('https://vault.example.test/__synthetic_seed', { method: 'POST', body: JSON.stringify(oldJournal) })).status, 204);
+  const migrated = await request('open', otherSubject);
+  assert.equal(migrated.status, 200); assert.deepEqual(new Uint8Array(await migrated.arrayBuffer()), pdf);
+  assert.equal((await request('open', subject, oldRequests[0].requestId)).status, 409);
+  assert.ok((await (await request('status', env.VAULT_OWNER_SUB)).json()).providerAccepted >= 1000);
+  report.checks.push('saturated_legacy_journal_archive_and_replay_in_workerd');
   for (const path of await files(persist)) {
     const bytes = await readFile(path);
     assert.ok(!bytes.includes(Buffer.from(pdf)));
@@ -140,7 +167,7 @@ try {
   await (await mf.getR2Bucket("VAULT_DOCUMENTS")).put(`${passwordId}.sealed.json`, passwordRecord);
   async function shared(action, { method = action === "status" ? "GET" : "POST", cookie = "", body, headers = {} } = {}) {
     return mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/p/${passwordId}/${action}`, { method,
-      headers: { origin: env.PUBLIC_ORIGIN, "content-type": "application/json", cookie, ...headers },
+      headers: { origin: env.PUBLIC_ORIGIN, "content-type": "application/json", "cf-connecting-ip": "192.0.2.1", cookie, ...headers },
       ...(method === "GET" || method === "HEAD" ? {} : { body: JSON.stringify(body ?? (action === "open" ? { requestId: crypto.randomUUID() } : {})) }),
       signal: AbortSignal.timeout(10000) });
   }
@@ -167,6 +194,11 @@ try {
   assert.equal(guesses.filter(r => r.status === 401).length, 8);
   assert.equal(guesses.filter(r => r.status === 429).length, 4);
   report.checks.push("concurrent_password_attempt_limit_persists");
+  const otherUnlock = await shared('session', { body: { password }, headers: { 'cf-connecting-ip': '198.51.100.2' } });
+  assert.equal(otherUnlock.status, 200);
+  assert.equal((await shared('open', { cookie: otherUnlock.headers.get('set-cookie').split(';')[0], headers: { 'cf-connecting-ip': '198.51.100.2' } })).status, 200);
+  assert.equal((await shared('session', { method: 'DELETE' })).status, 200);
+  report.checks.push('password_budget_isolates_sources_and_cookie_less_logout');
   assert.equal((await request("revoke", env.VAULT_OWNER_SUB, crypto.randomUUID(), passwordId)).status, 200);
   assert.equal((await shared("status", { cookie })).status, 403);
   assert.equal((await shared("open", { cookie })).status, 403);
@@ -180,10 +212,14 @@ try {
   report.checks.push("password_session_and_document_secrets_not_persisted_in_plaintext");
   assert.deepEqual(forbidden, []); report.checks.push("no_unexpected_outbound");
   report.status = "passed"; report.runtime = { node: process.version, wrangler: pkg.version };
-} catch {
+} catch (error) {
+  report.error = typeof error?.code === 'string' ? error.code : 'runtime_validation_failed';
   report.status = "failed"; process.exitCode = 1;
 } finally {
-  try { if (mf) await mf.dispose(); if (temporary) await rm(temporary, { recursive: true, force: true }); }
+  // A runtime disposal error must not skip removal of the synthetic fixture.
+  try { if (mf) await mf.dispose(); }
+  catch { report.status = "cleanup_failed"; process.exitCode = 1; }
+  try { if (temporary) await rm(temporary, { recursive: true, force: true }); }
   catch { report.status = "cleanup_failed"; process.exitCode = 1; }
   await recordReport(); console.log(JSON.stringify(report));
 }

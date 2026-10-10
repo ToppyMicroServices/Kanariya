@@ -8,6 +8,7 @@ import hmac
 import ipaddress
 import os
 import re
+import sys
 import time
 import urllib.parse
 
@@ -72,28 +73,41 @@ def parse_base_url(value):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate signed Kanariya URLs.")
+    # Reject old secret options before argparse can include their values in errors.
+    secret_options = ("--master-secret", "--secret")
+    if any(
+        option.startswith(flag.split("=", 1)[0])
+        for flag in sys.argv[1:]
+        if flag.startswith("--") and len(flag.split("=", 1)[0]) > 2
+        for option in secret_options
+    ):
+        raise SystemExit(
+            "Secret command-line arguments are not supported. "
+            "Set MASTER_SECRET or SIGNING_SECRET in the environment."
+        )
+
+    class SafeArgumentParser(argparse.ArgumentParser):
+        def error(self, message):
+            # Malformed or unknown arguments can contain a mistakenly supplied secret.
+            super().error("Invalid arguments. Use --help for supported options.")
+
+    parser = SafeArgumentParser(
+        description="Generate signed Kanariya URLs using MASTER_SECRET or SIGNING_SECRET from the environment.",
+        allow_abbrev=False,
+    )
     parser.add_argument("--base-url", default="https://kanariya.toppymicros.com/canary")
     parser.add_argument("--token", default="")
     parser.add_argument("--src", default="")
-    parser.add_argument(
-        "--master-secret",
-        default=os.getenv("MASTER_SECRET", ""),
-        help="Master secret for per-token derived signing (recommended).",
-    )
-    parser.add_argument(
-        "--secret",
-        default=os.getenv("SIGNING_SECRET", ""),
-        help="Legacy signing secret (fallback if --master-secret is not set).",
-    )
     parser.add_argument("--nonce", default="")
     parser.add_argument("--bytes", type=int, default=16)
     args = parser.parse_args()
 
-    if not args.master_secret and not args.secret:
+    master_secret = os.getenv("MASTER_SECRET", "")
+    secret = os.getenv("SIGNING_SECRET", "")
+    if not master_secret and not secret:
         raise SystemExit(
-            "MASTER_SECRET is required (use --master-secret or env). "
-            "Alternatively provide legacy SIGNING_SECRET via --secret."
+            "Set MASTER_SECRET in the environment. "
+            "Alternatively set the legacy SIGNING_SECRET."
         )
 
     parsed = parse_base_url(args.base_url)
@@ -111,11 +125,11 @@ def main():
 
     query = canonical_query(params)
     string_to_sign = f"{ts}|{path}|{query}"
-    if args.master_secret:
-        per_token = derived_signing_key(args.master_secret, token)
+    if master_secret:
+        per_token = derived_signing_key(master_secret, token)
         sig = hmac_hex(per_token, string_to_sign)
     else:
-        sig = hmac_hex(args.secret, string_to_sign)
+        sig = hmac_hex(secret, string_to_sign)
 
     signed_query = f"{query}&sig={sig}"
     url = urllib.parse.urlunparse(

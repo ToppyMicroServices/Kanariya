@@ -7,6 +7,7 @@ import { setup, hits } from "./helpers.js";
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 const script = fileURLToPath(new URL("../scripts/gen_signed_url.py", import.meta.url));
+const secretEnv = (overrides = {}) => ({ ...process.env, MASTER_SECRET: "", SIGNING_SECRET: "", ...overrides });
 
 describe("Python signer and Worker interoperability", () => {
   for (const secretName of ["MASTER_SECRET", "SIGNING_SECRET"]) {
@@ -19,12 +20,10 @@ describe("Python signer and Worker interoperability", () => {
           IP_HMAC_KEY: "interoperability-ip-key",
         });
         const env = state.env;
-        const secretFlag = secretName === "MASTER_SECRET" ? "--master-secret" : "--secret";
         const url = execFileSync("python3", [
           script, "--base-url", "https://example.test/canary",
           "--token", "interop-token", "--src", src,
-          secretFlag, env[secretName],
-        ], { encoding: "utf8" }).trim();
+        ], { encoding: "utf8", env: secretEnv({ [secretName]: env[secretName] }) }).trim();
         const tampered = new URL(url);
         tampered.searchParams.set("src", `${src}-changed`);
         await worker.fetch(new Request(tampered), env, { waitUntil() {} });
@@ -39,6 +38,55 @@ describe("Python signer and Worker interoperability", () => {
       }
     );
   }
+
+  it("keeps MASTER_SECRET priority when both environment secrets are set", async () => {
+    const state = setup({ MASTER_SECRET: "preferred-master-secret", REQUIRE_SIGNATURE: "1" });
+    const url = execFileSync("python3", [
+      script, "--base-url", "https://example.test/canary", "--token", "priority-token",
+    ], { encoding: "utf8", env: secretEnv({ MASTER_SECRET: state.env.MASTER_SECRET, SIGNING_SECRET: "different-legacy-secret" }) }).trim();
+    await worker.fetch(new Request(url), state.env, { waitUntil() {} });
+    expect(hits(state, "priority-token")).toHaveLength(1);
+  });
+});
+
+describe("Python signer secret inputs", () => {
+  const marker = "synthetic-argv-secret-marker";
+  const rejection = "Secret command-line arguments are not supported. Set MASTER_SECRET or SIGNING_SECRET in the environment.\n";
+
+  it.each(["--secret", "--sec", "--s", "--master-secret", "--master-sec", "--m"])(
+    "rejects %s and its equals form before parsing without echoing values", flag => {
+      for (const args of [[flag, marker], [`${flag}=${marker}`]]) {
+        const result = spawnSync("python3", [script, "--bytes", marker, ...args], {
+          encoding: "utf8", env: secretEnv(),
+        });
+        expect(result.status).toBe(1);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toBe(rejection);
+        expect(`${result.stdout}${result.stderr}`).not.toContain(marker);
+      }
+    }
+  );
+
+  it.each([
+    ["--unknown-secret", marker],
+    [`--master_secret=${marker}`],
+    ["--bytes", marker],
+    ["--base-u", marker],
+    ["--", marker],
+  ])("does not echo mistakenly supplied values for malformed argv %j", (...args) => {
+    const result = spawnSync("python3", [script, ...args], { encoding: "utf8", env: secretEnv() });
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Invalid arguments. Use --help for supported options.");
+    expect(result.stderr).not.toContain(marker);
+  });
+
+  it("requires an environment secret without suggesting plaintext argv", () => {
+    const result = spawnSync("python3", [script], { encoding: "utf8", env: secretEnv() });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("Set MASTER_SECRET in the environment. Alternatively set the legacy SIGNING_SECRET.\n");
+  });
 });
 
 describe("Python signer base URL validation", () => {
@@ -52,8 +100,7 @@ describe("Python signer base URL validation", () => {
     const state = setup({ MASTER_SECRET: "https-interoperability-secret", REQUIRE_SIGNATURE: "1" });
     const url = execFileSync("python3", [
       script, "--base-url", base, "--token", "https-interop-token",
-      "--master-secret", state.env.MASTER_SECRET,
-    ], { encoding: "utf8" }).trim();
+    ], { encoding: "utf8", env: secretEnv({ MASTER_SECRET: state.env.MASTER_SECRET }) }).trim();
     expect(new URL(url).origin).toBe(new URL(base).origin);
     const response = await worker.fetch(new Request(url), state.env, { waitUntil() {} });
     expect(response.status).toBe(204);
@@ -87,8 +134,7 @@ describe("Python signer base URL validation", () => {
   ])("rejects %s without echoing the URL or secret", (base) => {
     const result = spawnSync("python3", [
       script, "--base-url", base, "--token", "synthetic-token",
-      "--master-secret", "synthetic-signing-secret",
-    ], { encoding: "utf8" });
+    ], { encoding: "utf8", env: secretEnv({ MASTER_SECRET: "synthetic-signing-secret" }) });
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("Invalid base URL: use HTTPS, or HTTP on localhost, without credentials.\n");

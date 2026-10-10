@@ -7,6 +7,7 @@ BASE_URL="${BASE_URL:-https://kanariya.toppymicros.com}"
 TOKEN="${TOKEN:-}"
 SRC="${SRC:-smoke}"
 ADMIN_KEY="${ADMIN_KEY:-}"
+MASTER_SECRET="${MASTER_SECRET:-}"
 SIGNING_SECRET="${SIGNING_SECRET:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,12 +34,12 @@ if [[ -z "${TOKEN}" ]]; then
   echo "Generated TOKEN=${TOKEN}"
 fi
 
-if [[ -n "${SIGNING_SECRET}" ]]; then
-  CANARY_URL="$(python3 "${SCRIPT_DIR}/gen_signed_url.py" \
+if [[ -n "${MASTER_SECRET}" || -n "${SIGNING_SECRET}" ]]; then
+  CANARY_URL="$(MASTER_SECRET="${MASTER_SECRET}" SIGNING_SECRET="${SIGNING_SECRET}" \
+    python3 "${SCRIPT_DIR}/gen_signed_url.py" \
     --base-url "${BASE_URL%/}/canary" \
     --token "${TOKEN}" \
-    --src "${SRC}" \
-    --secret "${SIGNING_SECRET}")"
+    --src "${SRC}")"
 else
   CANARY_URL="${BASE_URL%/}/canary/${TOKEN}?src=${SRC}"
 fi

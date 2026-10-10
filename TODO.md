@@ -81,7 +81,7 @@
 - [x] (AI) `src/worker.js`（or TS）を実装
   - [x] `GET /canary/:token` でイベント保存 + 通知
   - [x] IPはHMAC化して保存（平文IPを残さない）
-  - [x] dedupe key（`token+ipHash+uaHash`）で通知抑制
+  - [x] dedupe key（`token+ipHash`）で通知抑制。IPハッシュなしはトークン内で共有し、IPが変わる場合もトークン全体の通知間隔で制限
   - [x] 204応答
   - [x] （任意）`GET /admin/export`（ADMIN_KEYで保護）
 - [x] (AI) 例外系：KV失敗時の挙動（落とす/無通知）を固定

@@ -61,6 +61,11 @@ export class KanariyaStore {
   }
   rows(query, ...args) { return [...this.sql.exec(query, ...args)]; }
   one(query, ...args) { return this.rows(query, ...args)[0]; }
+  removeExpired(now) {
+    this.sql.exec("DELETE FROM deliveries WHERE event_id IN (SELECT id FROM events WHERE expires_at<=?)", now);
+    this.sql.exec("DELETE FROM events WHERE expires_at<=?", now);
+    this.sql.exec("DELETE FROM guards WHERE expires_at<=?", now);
+  }
   tokenView(row, origin) {
     const iso = value => value === null ? null : new Date(value).toISOString();
     return {
@@ -125,7 +130,7 @@ export class KanariyaStore {
         id: randomHex(16), ts: new Date().toISOString(), token, test: true, src: "",
         ipHash: "", country: "", asn: "", ua: "Kanariya admin test", referer: "",
       } });
-      if (!result.accepted) return json({ error: result.reason }, result.reason === "test_rate_limit" ? 429 : 404);
+      if (!result.accepted) return json({ error: result.reason }, result.reason === "test_rate_limit" ? 429 : result.reason === "event_capacity" ? 409 : 404);
       return json({ eventId: result.eventId, test: true, deliveries: result.deliveries });
     }
     if (path === "/admin/export") {
@@ -153,6 +158,13 @@ export class KanariyaStore {
         // Placement is trusted registry metadata; a visitor cannot relabel the alert.
         event = { ...event, src: token.src, name: token.name, location: token.location };
       }
+      // Admission never evicts unexpired evidence, including another token's outbox.
+      // Check both caps before writing nonce, rate or notification guards.
+      this.removeExpired(now);
+      const tokenCap = setting(this.env, "EVENT_MAX_ITEMS_PER_TOKEN", 1000, 1, 10000);
+      const cap = setting(this.env, "EVENT_MAX_ITEMS", 10000, 1, 100000);
+      if (this.one("SELECT COUNT(*) AS n FROM events WHERE token=?", event.token).n >= tokenCap ||
+          this.one("SELECT COUNT(*) AS n FROM events").n >= cap) return { accepted: false, reason: "event_capacity" };
       if (nonce) {
         const key = JSON.stringify(["nonce", event.token, nonce]);
         if (this.one("SELECT 1 FROM guards WHERE key=? AND expires_at>?", key, now)) return { accepted: false, reason: "replay" };
@@ -167,9 +179,15 @@ export class KanariyaStore {
           this.sql.exec("INSERT OR REPLACE INTO guards VALUES(?,?,?)", key, count + 1, now + window * 1000);
         }
       }
-      const dedupeKey = JSON.stringify(["dedupe", event.token, event.ipHash, event.ua]);
-      const canDedupe = !event.test && event.ipHash && event.ua;
-      const dedupeHit = canDedupe && this.one("SELECT 1 FROM guards WHERE key=? AND expires_at>?", dedupeKey, now);
+      // New keys omit UA; an absent IP hash shares one token bucket without raw IP.
+      const dedupeKey = JSON.stringify(["dedupe", event.token, event.ipHash || ""]);
+      const cooldownKey = JSON.stringify(["notify", event.token]);
+      // The indexed comma-to-hyphen range matches old keys with a fourth UA item.
+      // Preserve every live old guard's expiry even when the visitor changes UA.
+      const legacyDedupeBase = dedupeKey.slice(0, -1);
+      const suppressed = !event.test && (this.one("SELECT 1 FROM guards WHERE key=? AND expires_at>?", dedupeKey, now) ||
+        this.one("SELECT 1 FROM guards WHERE key=? AND expires_at>?", cooldownKey, now) ||
+        this.one("SELECT 1 FROM guards WHERE key>=? AND key<? AND expires_at>? LIMIT 1", `${legacyDedupeBase},`, `${legacyDedupeBase}-`, now));
       const ttl = setting(this.env, "EVENT_TTL_SECONDS", 2592000, 60, 31536000);
       this.sql.exec("INSERT INTO events VALUES(?,?,?,?,?)", event.id, event.token, now, JSON.stringify(event), now + ttl * 1000);
       if (nonce) this.sql.exec("INSERT OR REPLACE INTO guards VALUES(?,?,?)", JSON.stringify(["nonce", event.token, nonce]), 1, nonceExpiresAt);
@@ -177,8 +195,11 @@ export class KanariyaStore {
         if (event.test) this.sql.exec("UPDATE tokens SET last_test_at=? WHERE token=?", now, event.token);
         else this.sql.exec("UPDATE tokens SET last_seen_at=?,hit_count=hit_count+1 WHERE token=?", now, event.token);
       }
-      if (!dedupeHit) {
-        if (canDedupe) this.sql.exec("INSERT OR REPLACE INTO guards VALUES(?,?,?)", dedupeKey, 1, now + setting(this.env, "DEDUPE_TTL_SECONDS", 1800, 1, 86400) * 1000);
+      if (!suppressed && targets.length) {
+        if (!event.test) {
+          this.sql.exec("INSERT OR REPLACE INTO guards VALUES(?,?,?)", dedupeKey, 1, now + setting(this.env, "DEDUPE_TTL_SECONDS", 1800, 1, 86400) * 1000);
+          this.sql.exec("INSERT OR REPLACE INTO guards VALUES(?,?,?)", cooldownKey, 1, now + setting(this.env, "NOTIFY_TOKEN_COOLDOWN_SECONDS", 60, 1, 86400) * 1000);
+        }
         let queued = this.one("SELECT COUNT(*) AS n FROM deliveries WHERE state IN ('pending','retrying')").n;
         for (const target of targets) {
           const full = queued >= setting(this.env, "NOTIFY_QUEUE_MAX", 10000, 1, 100000);
@@ -189,7 +210,7 @@ export class KanariyaStore {
         }
       }
       // The alarm and durable outbox commit together; no waitUntil-only delivery gap.
-      await this.wakeAt(now + ((!dedupeHit && targets.length) ? 100 : HOUR));
+      await this.wakeAt(now + ((!suppressed && targets.length) ? 100 : HOUR));
       return { accepted: true, eventId: event.id, deliveries: this.rows("SELECT * FROM deliveries WHERE event_id=? ORDER BY type", event.id).map(d => this.deliveryView(d)) };
     });
   }
@@ -215,9 +236,7 @@ export class KanariyaStore {
     }
     await this.storage.transaction(async () => {
       const now = Date.now();
-      this.sql.exec("DELETE FROM deliveries WHERE event_id IN (SELECT id FROM events WHERE expires_at<=?)", now);
-      this.sql.exec("DELETE FROM events WHERE expires_at<=?", now);
-      this.sql.exec("DELETE FROM guards WHERE expires_at<=?", now);
+      this.removeExpired(now);
       const next = this.one("SELECT MIN(next_at) AS at FROM deliveries WHERE state IN ('pending','retrying')")?.at;
       const expiry = this.one("SELECT MIN(expires_at) AS at FROM events")?.at;
       const guardExpiry = this.one("SELECT MIN(expires_at) AS at FROM guards")?.at;

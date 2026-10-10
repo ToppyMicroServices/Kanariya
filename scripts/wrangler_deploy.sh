@@ -7,29 +7,38 @@ WRANGLER_TOML="${WRANGLER_TOML:-wrangler.toml}"
 KV_TITLE="${KV_TITLE:-KANARI_KV}"
 WRANGLER_BIN="${WRANGLER_BIN:-wrangler}"
 
-echo "Deploying worker..."
-${WRANGLER_BIN} deploy
+umask 077
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kanariya-deploy.XXXXXXXXXX")"
+trap 'rm -rf -- "${TEMP_DIR}"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+KV_JSON="${TEMP_DIR}/kv_namespaces.json"
 
-if ! ${WRANGLER_BIN} kv namespace list --json > /tmp/kv_namespaces.json; then
+echo "Deploying worker..."
+"${WRANGLER_BIN}" deploy
+
+if ! "${WRANGLER_BIN}" kv namespace list --json > "${KV_JSON}"; then
   echo "Failed to list KV namespaces. Update ${WRANGLER_TOML} manually."
   exit 1
 fi
 
 if [[ "${AUTO_UPDATE_TOML:-}" != "1" ]]; then
   echo "KV namespaces (select the ID for ${KV_TITLE} and update ${WRANGLER_TOML}):"
-  cat /tmp/kv_namespaces.json
+  cat "${KV_JSON}"
   exit 0
 fi
 
-python3 - <<'PY'
+python3 - "${KV_JSON}" <<'PY'
 import json
 import os
 import re
+import sys
 
 toml_path = os.environ.get("WRANGLER_TOML", "wrangler.toml")
 kv_title = os.environ.get("KV_TITLE", "KANARI_KV")
 
-with open("/tmp/kv_namespaces.json", "r", encoding="utf-8") as fh:
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 
 kv_id = None

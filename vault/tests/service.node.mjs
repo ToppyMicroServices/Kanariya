@@ -6,6 +6,11 @@ import worker, { VaultDocument } from "../src/worker.js";
 import { pdfjsAssetMetadata } from "../src/pdfjs-assets.generated.js";
 import { newKey, importKey, sealDocument, readPolicy, decryptDocument, openJSON, utf8 } from "../src/crypto.js";
 
+function list(map, options) {
+  return new Map([...map].filter(([key]) => key.startsWith(options.prefix) && (!options.end || key < options.end))
+    .sort(([a], [b]) => a.localeCompare(b)).slice(0, options.limit));
+}
+
 const originalFetch = globalThis.fetch;
 after(() => { globalThis.fetch = originalFetch; });
 const pair = await generateKeyPair("RS256", { extractable: true });
@@ -18,6 +23,7 @@ class Storage {
   async transaction(fn) {
     const draft = new Map(structuredClone([...this.map])); let alarm = this.alarmAt;
     const result = await fn({ get: async k => structuredClone(draft.get(k)),
+      list: async options => list(draft, options), delete: async key => draft.delete(key),
       put: async (k, v) => { if (++this.writes === this.failAt) throw new Error("synthetic_failure"); draft.set(k, structuredClone(v)); },
       setAlarm: async at => { if (this.failAlarm) throw new Error("synthetic_alarm_failure"); alarm = at; },
       deleteAlarm: async () => { alarm = null; } });

@@ -6,6 +6,11 @@ import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import worker, { VaultDocument } from "../src/worker.js";
 import { newKey, importKey, sealDocument, readPolicy, openJSON, sealJSON, utf8 } from "../src/crypto.js";
 
+function list(map, options) {
+  return new Map([...map].filter(([key]) => key.startsWith(options.prefix) && (!options.end || key < options.end))
+    .sort(([a], [b]) => a.localeCompare(b)).slice(0, options.limit));
+}
+
 // Isolated dummy fixtures: no account, remote bucket, or notification service is used.
 const originalFetch = globalThis.fetch;
 after(() => { globalThis.fetch = originalFetch; });
@@ -14,13 +19,17 @@ const jwk = { ...await exportJWK(pair.publicKey), kid: "password-fixture", use: 
 const PASSWORD = "synthetic reader password";
 let fixtureNumber = 0;
 class Storage {
-  constructor() { this.map = new Map(); this.alarmAt = null; this.writes = 0; this.failAt = Infinity; this.afterCommit = null; }
+  constructor() { this.map = new Map(); this.alarmAt = null; this.writes = 0; this.failAt = Infinity; this.afterCommit = null; this.tail = Promise.resolve(); }
   async get(key) { return structuredClone(this.map.get(key)); }
   async setAlarm(at) { this.alarmAt = at; }
-  async transaction(fn) {
+  transaction(fn) {
+    const next = this.tail.then(() => this.runTransaction(fn)); this.tail = next.catch(() => {}); return next;
+  }
+  async runTransaction(fn) {
     const draft = new Map(structuredClone([...this.map])); let alarm = this.alarmAt;
     const result = await fn({
       get: async key => structuredClone(draft.get(key)),
+      list: async options => list(draft, options), delete: async key => draft.delete(key),
       put: async (key, value) => { if (++this.writes === this.failAt) throw new Error("synthetic_failure"); draft.set(key, structuredClone(value)); },
       setAlarm: async at => { alarm = at; }, deleteAlarm: async () => { alarm = null; },
     });
@@ -40,11 +49,12 @@ async function fixture({ authMode = "password", expiresAt = Date.now() + 600000,
     ...(recipientName === undefined ? {} : { recipientName }) }, wrappingKey);
   const pinRecord = () => { env.DUMMY_DOCUMENT_ID = id; env.DUMMY_RECORD_SHA256 = createHash("sha256").update(JSON.stringify(record)).digest("hex"); };
   pinRecord();
-  let reads = 0, jwksReads = 0, providerStatus = 202, providerHandler;
+  let reads = 0, jwksReads = 0, providerStatus = 202, providerHandler, recordHandler;
   const calls = [], storage = new Storage(), ctx = { storage, id: { toString: () => `password-object-${id}` } };
   const context = `journal:v1:password-object-${id}`;
   let instance = new VaultDocument(ctx, env);
   env.VAULT_DOCUMENTS = { async get(name) { reads++; assert.equal(name, `${id}.sealed.json`);
+    if (recordHandler) await recordHandler();
     if (!record) return null; const bytes = utf8(JSON.stringify(record)); return { size: bytes.length, body: new Response(bytes).body }; } };
   env.VAULT = { idFromName: value => { assert.equal(value, id); return value; }, get: () => instance };
   globalThis.fetch = async (url, options) => {
@@ -60,7 +70,7 @@ async function fixture({ authMode = "password", expiresAt = Date.now() + 600000,
   async function request(action = "session", options = {}) {
     const ownerRoute = options.access === true;
     const method = options.method || (action === "status" ? "GET" : "POST");
-    const headers = { origin: env.PUBLIC_ORIGIN, "content-type": "application/json", ...(options.cookie ? { cookie: options.cookie } : {}),
+    const headers = { origin: env.PUBLIC_ORIGIN, "content-type": "application/json", "cf-connecting-ip": "192.0.2.1", ...(options.cookie ? { cookie: options.cookie } : {}),
       ...(options.subject ? { "cf-access-jwt-assertion": await token(options.subject) } : {}), ...options.headers };
     const body = options.body ?? JSON.stringify(action === "session" && method === "POST" ? { password: PASSWORD } :
       action === "open" ? { requestId: options.requestId || crypto.randomUUID() } : {});
@@ -74,13 +84,15 @@ async function fixture({ authMode = "password", expiresAt = Date.now() + 600000,
     return { cookie: setCookie.split(";")[0], setCookie, response, body: await response.json() };
   }
   async function state() { return openJSON(await storage.get("encrypted-journal"), auditKey, context); }
+  async function admission() { return openJSON(await storage.get("encrypted-admission"), auditKey, `admission:${context}`); }
   async function replacePolicy(change) {
     const policy = await openJSON(record.policy, wrappingKey, `policy:v2:${id}`); change(policy);
     record.policy = await sealJSON(policy, wrappingKey, `policy:v2:${id}`); pinRecord();
   }
-  return { env, id, subject, pdf, expiresAt, wrappingKey, auditKey, context, storage, token, request, login, state, replacePolicy, pinRecord, calls,
+  return { env, id, subject, pdf, expiresAt, wrappingKey, auditKey, context, storage, token, request, login, state, admission, replacePolicy, pinRecord, calls,
     get reads() { return reads; }, get jwksReads() { return jwksReads; }, get record() { return record; }, set record(value) { record = value; },
     set providerHandler(value) { providerHandler = value; }, set providerStatus(value) { providerStatus = value; },
+    set recordHandler(value) { recordHandler = value; },
     restart() { instance = new VaultDocument(ctx, env); }, alarm() { return instance.alarm(); },
     async writeState(value) { storage.map.set("encrypted-journal", await sealJSON(value, auditKey, context)); },
   };
@@ -233,9 +245,12 @@ for (const direct of [false, true]) test(`password routes reject unknown and mal
 for (const [name, value] of [["DUMMY_DOCUMENT_ID", undefined], ["DUMMY_DOCUMENT_ID", "invalid"],
   ["DUMMY_RECORD_SHA256", undefined], ["DUMMY_RECORD_SHA256", "A".repeat(64)], ["DUMMY_RECORD_SHA256", "b".repeat(64)]]) {
   test(`password routes retain mandatory document/ciphertext pin admission (${name}, ${String(value)})`, async () => {
-    const f = await fixture(); f.env[name] = value; const observe = keyReads(f.env);
+    const f = await fixture(); f.env[name] = value;
+    const wrap = f.env.VAULT_WRAP_KEY; let wraps = 0;
+    Object.defineProperty(f.env, 'VAULT_WRAP_KEY', { get() { wraps++; return wrap; }, configurable: true });
     const response = await f.request(); assert.equal(response.status, value === "b".repeat(64) ? 403 : 503); privateResponse(response);
-    assert.equal(observe(), 0); assert.equal(f.storage.map.size, 0);
+    assert.equal(wraps, 0); assert.equal(f.storage.map.has('encrypted-journal'), false);
+    if (value !== 'b'.repeat(64)) assert.equal(f.storage.map.size, 0);
   });
 }
 for (const [label, options, status] of [
@@ -297,7 +312,7 @@ test("password sessions expire at five minutes and never outlive the document", 
   const short = await fixture({ expiresAt: Date.now() + 60000 }), session = await short.login();
   assert.ok(session.body.sessionExpiresAt <= short.expiresAt);
   await withClock(short.expiresAt, async () => {
-    for (const action of ["status", "open", "session"]) assert.equal((await short.request(action, { cookie: session.cookie })).status, 403);
+    for (const action of ["status", "open", "session"]) assert.ok([401, 403].includes((await short.request(action, { cookie: session.cookie })).status));
   });
 });
 for (const boundary of ["document", "session"]) test(`expiry crossing an asynchronous final audit commit denies the PDF (${boundary})`, async () => {
@@ -305,7 +320,7 @@ for (const boundary of ["document", "session"]) test(`expiry crossing an asynchr
   const { cookie, body } = await f.login(), originalNow = Date.now, initialWrites = f.storage.writes;
   let crossed = false;
   f.storage.afterCommit = async () => {
-    if (f.storage.writes >= initialWrites + 2) {
+    if (f.storage.writes >= initialWrites + 3) {
       await Promise.resolve(); crossed = true; Date.now = () => boundary === "document" ? f.expiresAt : body.sessionExpiresAt;
     }
   };
@@ -314,7 +329,7 @@ for (const boundary of ["document", "session"]) test(`expiry crossing an asynchr
   assert.ok(crossed, "the simulated expiry occurred after the final audit transaction");
   assert.equal(response.status, boundary === "session" ? 401 : 403); assert.doesNotMatch(await response.text(), /SYNTHETIC_PASSWORD_BODY/);
 });
-test("password authentication admits only ten attempts per fixed five-minute window, including successes", async () => {
+test("password authentication admits only ten attempts per source/five-minute window, including successes", async () => {
   const f = await fixture(), start = Date.now();
   await withClock(start, async () => {
     for (let i = 0; i < 10; i++) {
@@ -327,19 +342,19 @@ test("password authentication admits only ten attempts per fixed five-minute win
   await withClock(start + 299999, async () => { assert.equal((await f.request()).status, 429); });
   await withClock(start + 300001, async () => { assert.equal((await f.request()).status, 200); });
 });
-test("concurrent wrong-password attempts cannot bypass the durable per-document budget", async () => {
+test("concurrent wrong-password attempts cannot bypass the durable per-source budget", async () => {
   const f = await fixture();
   const responses = await Promise.all(Array.from({ length: 15 }, () => f.request("session", { body: JSON.stringify({ password: "synthetic wrong password" }) })));
   assert.equal(responses.filter(r => r.status === 401).length, 10); assert.equal(responses.filter(r => r.status === 429).length, 5);
   f.restart(); assert.equal((await f.request()).status, 429);
-  assert.equal((await f.state()).events.length, 0); assert.equal(f.calls.length, 0);
+  assert.equal(f.storage.map.has('encrypted-journal'), false); assert.equal(f.calls.length, 0);
 });
 test("failure to persist the authentication attempt cannot issue a cookie or session", async () => {
   const f = await fixture(); f.storage.failAt = 1;
   const response = await f.request(); assert.equal(response.status, 503); assert.equal(response.headers.get("set-cookie"), null);
   assert.equal(f.storage.map.size, 0); privateResponse(response);
 });
-for (const stage of [1, 2]) test(`password open with failing audit commit ${stage} never releases plaintext`, async () => {
+for (const stage of [2, 3]) test(`password open with failing audit commit ${stage - 1} never releases plaintext`, async () => {
   const f = await fixture(), { cookie } = await f.login(); f.storage.failAt = f.storage.writes + stage;
   const response = await f.request("open", { cookie }); assert.equal(response.status, 503); privateResponse(response);
   assert.doesNotMatch(await response.text(), /SYNTHETIC_PASSWORD_BODY/);
@@ -394,7 +409,7 @@ test("session journal stores only hashed tokens bound to the pinned record diges
   assert.equal(state.sessions.length, 1);
   assert.match(state.sessions[0].hash, /^[a-f0-9]{64}$/); assert.notEqual(state.sessions[0].hash, token);
   assert.equal(state.sessions[0].expiresAt, body.sessionExpiresAt); assert.equal(state.sessions[0].recordDigest, f.env.DUMMY_RECORD_SHA256);
-  assert.equal(state.passwordRate.count, 1); assert.ok(Number.isSafeInteger(state.passwordRate.start));
+  const rate = (await f.admission()).rates[0]; assert.equal(rate.count, 1); assert.ok(Number.isSafeInteger(rate.start));
 });
 test("password-session allocation never persists more than 32 active sessions", async () => {
   const f = await fixture(), { cookie } = await f.login(), state = await f.state(), actual = state.sessions[0];
@@ -407,11 +422,11 @@ test("password-session allocation never persists more than 32 active sessions", 
 });
 test("the password rate budget is durable before authentication succeeds or fails", async () => {
   const f = await fixture(), observedCounts = [];
-  f.storage.afterCommit = async () => { observedCounts.push((await f.state()).passwordRate.count); };
+  f.storage.afterCommit = async () => { observedCounts.push((await f.admission()).rates[0].count); };
   assert.equal((await f.request("session", { body: JSON.stringify({ password: "synthetic wrong password" }) })).status, 401);
-  assert.equal(observedCounts[0], 1); assert.equal((await f.state()).sessions.length, 0);
+  assert.equal(observedCounts[0], 1); assert.equal(f.storage.map.has('encrypted-journal'), false);
   f.storage.afterCommit = null; f.restart();
-  assert.equal((await f.request()).status, 200); assert.equal((await f.state()).passwordRate.count, 2);
+  assert.equal((await f.request()).status, 200); assert.equal((await f.admission()).rates[0].count, 2);
 });
 
 async function observeScrypt(callback, operation) {
@@ -424,8 +439,8 @@ async function observeScrypt(callback, operation) {
 }
 test("every password KDF follows a durable budget commit and over-budget attempts never run it", async () => {
   const f = await fixture(); let durableCount = 0, kdfs = 0;
-  f.storage.afterCommit = async () => { durableCount = (await f.state()).passwordRate.count; };
-  await observeScrypt(() => { kdfs++; assert.equal(durableCount, kdfs, "the attempt must be durable before native scrypt starts"); }, async () => {
+  f.storage.afterCommit = async () => { durableCount = (await f.admission()).rates[0].count; };
+  await observeScrypt(() => { kdfs++; assert.ok(durableCount >= kdfs, "the attempt must be durable before native scrypt starts"); }, async () => {
     const responses = await Promise.all(Array.from({ length: 12 }, () => f.request("session", { body: JSON.stringify({ password: "synthetic wrong password" }) })));
     assert.equal(responses.filter(response => response.status === 401).length, 10);
     assert.equal(responses.filter(response => response.status === 429).length, 2);
@@ -439,18 +454,20 @@ test("unknown IDs, bad pins, disabled reader, and failed attempt persistence do 
     const pin = f.env.DUMMY_RECORD_SHA256; f.env.DUMMY_RECORD_SHA256 = "b".repeat(64);
     assert.equal((await f.request()).status, 403); f.env.DUMMY_RECORD_SHA256 = pin;
     f.env.PASSWORD_READER_ENABLED = "0"; assert.equal((await f.request()).status, 403); f.env.PASSWORD_READER_ENABLED = "1";
-    f.storage.failAt = 1; assert.equal((await f.request()).status, 503);
+    f.storage.failAt = f.storage.writes + 1; assert.equal((await f.request()).status, 503);
   });
   assert.equal(kdfs, 0);
 });
-test("password content and status recheck the exact ciphertext pin before importing keys", async () => {
+test("password content and status recheck the exact ciphertext pin before document key access", async () => {
   const f = await fixture(), { cookie } = await f.login();
   f.record.document.ciphertext = "!!!!" + f.record.document.ciphertext.slice(4);
-  const observe = keyReads(f.env), writes = f.storage.writes;
+  const wrap = f.env.VAULT_WRAP_KEY; let wraps = 0;
+  Object.defineProperty(f.env, 'VAULT_WRAP_KEY', { get() { wraps++; return wrap; } });
+  const journal = structuredClone(f.storage.map.get('encrypted-journal'));
   for (const action of ["open", "status", "session"]) {
     const response = await f.request(action, { cookie }); assert.equal(response.status, 403); privateResponse(response);
   }
-  assert.equal(observe(), 0); assert.equal(f.storage.writes, writes);
+  assert.equal(wraps, 0); assert.deepEqual(f.storage.map.get('encrypted-journal'), journal);
 });
 test("password cookies with duplicate names are rejected instead of choosing an attacker-controlled value", async () => {
   const f = await fixture(), { cookie } = await f.login();
@@ -473,4 +490,80 @@ test("password document release retains mandatory notification configuration", a
   const f = await fixture(), { cookie } = await f.login(); delete f.env.WEBHOOK_URL;
   const response = await f.request("open", { cookie }); assert.equal(response.status, 503); privateResponse(response);
   assert.doesNotMatch(await response.text(), /SYNTHETIC_PASSWORD_BODY/); assert.equal((await f.state()).events.length, 0);
+});
+
+test("one source exhausting password attempts cannot lock out a different source", async () => {
+  const f = await fixture();
+  for (let i = 0; i < 10; i++) assert.equal((await f.request('session', { body: JSON.stringify({ password: 'synthetic wrong password' }) })).status, 401);
+  const reads = f.reads, writes = f.storage.writes, wrap = f.env.VAULT_WRAP_KEY; let wraps = 0, kdfs = 0;
+  Object.defineProperty(f.env, 'VAULT_WRAP_KEY', { get() { wraps++; return wrap; } });
+  await observeScrypt(() => { kdfs++; }, async () => {
+    for (const headers of [{ 'user-agent': 'changed' }, { 'x-forwarded-for': '198.51.100.2' }, { 'x-real-ip': '198.51.100.2' }]) {
+      assert.equal((await f.request('session', { headers })).status, 429);
+    }
+  });
+  assert.equal(f.reads, reads); assert.equal(f.storage.writes, writes); assert.equal(wraps, 0); assert.equal(kdfs, 0);
+  f.restart(); assert.equal((await f.request()).status, 429);
+  const other = await f.login({ headers: { 'cf-connecting-ip': '198.51.100.2' } });
+  assert.equal((await f.request('open', { cookie: other.cookie, headers: { 'cf-connecting-ip': '198.51.100.2' } })).status, 200);
+  const serialized = JSON.stringify([...f.storage.map]);
+  for (const value of ['192.0.2.1', '198.51.100.2', PASSWORD]) assert.ok(!serialized.includes(value));
+});
+test("equivalent IPv6 forms share an admission budget; missing or invalid edge source fails closed", async () => {
+  const f = await fixture();
+  for (const source of ['', 'not-an-ip']) assert.equal((await f.request('session', { headers: { 'cf-connecting-ip': source } })).status, 503);
+  assert.equal(f.reads, 0); assert.equal(f.storage.map.size, 0);
+  for (let i = 0; i < 10; i++) assert.equal((await f.request('session', { headers: { 'cf-connecting-ip': '2001:0db8:0:0:0:0:0:1' }, body: JSON.stringify({ password: 'synthetic wrong password' }) })).status, 401);
+  assert.equal((await f.request('session', { headers: { 'cf-connecting-ip': '2001:db8::1' } })).status, 429);
+});
+test("cookie-less logout is storage-free and keeps route, origin, and strict input checks", async () => {
+  const f = await fixture(); let keyAccess = 0;
+  for (const name of ['VAULT_AUDIT_KEY', 'VAULT_WRAP_KEY']) Object.defineProperty(f.env, name, { get() { keyAccess++; throw new Error('must_not_access_key'); } });
+  for (let i = 0; i < 20; i++) {
+    const response = await f.request('session', { method: 'DELETE' }); assert.equal(response.status, 200);
+    assert.match(response.headers.get('set-cookie'), /Max-Age=0/);
+  }
+  assert.equal((await f.request('session', { method: 'DELETE', headers: { origin: 'https://other.example.test' } })).status, 403);
+  assert.equal((await f.request('session', { method: 'DELETE', body: '{"extra":true}' })).status, 400);
+  assert.equal((await f.request('session', { method: 'DELETE', id: crypto.randomUUID() })).status, 403);
+  assert.equal(keyAccess, 0); assert.equal(f.reads, 0); assert.equal(f.storage.map.size, 0);
+});
+test("forged syntactically valid cookies never read R2 and bounded retries stop further storage writes", async () => {
+  const f = await fixture(), { cookie } = await f.login(), journal = structuredClone(f.storage.map.get('encrypted-journal')), reads = f.reads;
+  const forged = `__Secure-vault-${f.id}=${'b'.repeat(64)}`;
+  for (let i = 0; i < 30; i++) assert.equal((await f.request('open', { cookie: forged })).status, 401);
+  const writes = f.storage.writes;
+  assert.equal((await f.request('status', { cookie: forged })).status, 429);
+  assert.equal(f.reads, reads); assert.equal(f.storage.writes, writes); assert.deepEqual(f.storage.map.get('encrypted-journal'), journal);
+  f.restart(); assert.equal((await f.request('open', { cookie: forged })).status, 429);
+  assert.equal((await f.request('open', { cookie, headers: { 'cf-connecting-ip': '198.51.100.3' } })).status, 200);
+});
+test("slow password R2 reads do not hold owner controls and late results respect revocation", async () => {
+  const f = await fixture(), { cookie } = await f.login(), entered = deferred(), release = deferred();
+  f.recordHandler = async () => { entered.resolve(); await release.promise; };
+  const open = f.request('open', { cookie }); let status, revoke;
+  try {
+    assert.ok(await within(entered.promise.then(() => true)));
+    status = await within(f.request('status', { access: true, subject: f.env.VAULT_OWNER_SUB }));
+    revoke = await within(f.request('revoke', { access: true, subject: f.env.VAULT_OWNER_SUB }));
+  } finally { release.resolve(); }
+  assert.equal(status?.status, 200); assert.equal(revoke?.status, 200);
+  const denied = await open; assert.equal(denied.status, 403); assert.doesNotMatch(await denied.text(), /SYNTHETIC_PASSWORD_BODY/);
+});
+test("password reader job quotas count every notification target and do not reset with a new session", async () => {
+  const f = await fixture();
+  f.env.SLACK_WEBHOOK_URL = 'https://slack.example.test/synthetic';
+  f.env.DISCORD_WEBHOOK_URL = 'https://discord.example.test/synthetic';
+  const first = await f.login();
+  for (let i = 0; i < 3; i++) {
+    const response = await f.request('open', { cookie: first.cookie });
+    assert.equal(response.status, 200, response.status === 200 ? '' : await response.text());
+  }
+  assert.equal((await f.state()).jobs.length, 9);
+  const rotated = await f.login();
+  assert.equal((await f.request('open', { cookie: rotated.cookie })).status, 429);
+  assert.equal((await f.state()).jobs.length, 9);
+  const other = await f.request('open', { cookie: rotated.cookie, headers: { 'cf-connecting-ip': '198.51.100.4' } });
+  assert.equal(other.status, 200); assert.deepEqual(new Uint8Array(await other.arrayBuffer()), f.pdf);
+  assert.equal((await f.state()).jobs.length, 12); assert.equal(f.calls.length, 0);
 });

@@ -26,6 +26,9 @@ class Storage {
     const next = new Map(structuredClone([...this.map])); let alarm = this.alarmAt;
     const result = await change({
       get: async key => structuredClone(next.get(key)),
+      list: async options => new Map([...next].filter(([key]) => key.startsWith(options.prefix) && (!options.end || key < options.end))
+        .sort(([a], [b]) => a.localeCompare(b)).slice(0, options.limit)),
+      delete: async key => next.delete(key),
       put: async (key, value) => { this.writes++; next.set(key, structuredClone(value)); },
       setAlarm: async at => { alarm = at; }, deleteAlarm: async () => { alarm = null; },
     });
@@ -65,7 +68,7 @@ function privateResponse(response) {
   assert.equal(response.headers.get("cloudflare-cdn-cache-control"), "no-store");
 }
 function streamingRequest(url, stream, method = "POST", headers = {}) {
-  return new Request(url, { method, headers: { origin: new URL(url).origin, "content-type": "application/json", ...headers }, body: stream, duplex: "half" });
+  return new Request(url, { method, headers: { origin: new URL(url).origin, "content-type": "application/json", "cf-connecting-ip": "192.0.2.1", ...headers }, body: stream, duplex: "half" });
 }
 
 for (const [action, method, expected] of [["session", "POST", 403], ["open", "POST", 401], ["session", "DELETE", 200]]) {
