@@ -146,6 +146,14 @@ Worker's named `CanaryManagement` entrypoint. Without that binding it is inactiv
 there is no bearer-key or external-network fallback. Adding this binding requires
 approval and must preserve all existing production bindings.
 
+After approval, the manual `Configure private Canary connection` workflow on
+`main` adds this binding and an absent `CANARY_SOURCE_KEY` using the existing CI
+credential. It keeps the currently deployed source, runtime, other bindings and
+public endpoints, and verifies them before and after each change. An existing
+key is never overwritten. The report contains configuration hashes and version
+IDs, without key material. If a write or its verification is uncertain, the
+workflow stops without retrying; review its report before another run.
+
 This private connection accepts only document UUIDs and the document's current
 deadline. It has no global token inventory, arbitrary forwarding or test-send
 operation. Document-managed Canary records omit recipient names, emails, IP
