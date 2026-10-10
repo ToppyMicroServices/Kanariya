@@ -43,7 +43,9 @@ const surfaces = [...extraAssets.map(([path]) => path),'/v1/admin', '/v1/admin/a
 
 test('owner administration surfaces reject anonymous, password-cookie and non-owner identities', async () => {
   for (const path of [...surfaces, '/v1/registrations', `/v1/registrations/${crypto.randomUUID()}/replacement`]) {
-    assert.equal((await request(path)).status, 401, path);
+    const anonymous = await request(path);
+    assert.equal(anonymous.status, 401, path);
+    for (const [name, value] of Object.entries(HEADERS)) assert.equal(anonymous.headers.get(name), value, path);
     assert.equal((await request(path, null, { headers: { cookie: '__Host-fake=synthetic',
       'cf-access-authenticated-user-email': 'owner@example.test' } })).status, 401, path);
     assert.equal((await request(path, 'synthetic-reader')).status, 403, path);

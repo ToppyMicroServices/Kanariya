@@ -152,6 +152,7 @@ export class RuntimeDocument extends VaultDocument {
     assert.equal(response.headers.get("referrer-policy"), "no-referrer");
     assert.equal(response.headers.get("x-content-type-options"), "nosniff");
     assert.equal(response.headers.get("content-security-policy"), "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'");
+    assert.equal(response.headers.get("strict-transport-security"), "max-age=86400");
   }
   const metadataKeys = ["id", "mime", "size", "authMode", "recipientName", "expiresAt", "sealedExpiresAt", "revoked", "pending", "failed", "providerAccepted"].sort();
   function metadataShape(value, documentId, authMode, maximum, recipientName = null) {
@@ -165,8 +166,10 @@ export class RuntimeDocument extends VaultDocument {
     ["/v1/admin/assets/admin.css", "text/css; charset=utf-8"],
     ...["canary.js", "registration-preview.js", "pdf-preparation-worker.js", "pdf-lib.mjs", "pdf-preparation.mjs", "recipient.js"].map(name => ["/v1/admin/assets/" + name, "text/javascript; charset=utf-8"]),
     ["/v1/admin/assets/pdf-lib-LICENSE.md", "text/plain; charset=utf-8"]]) {
-    assert.equal((await signed(path, { actor: "" })).status, 401);
-    assert.equal((await signed(path, { actor: subject })).status, 403);
+    const anonymous = await signed(path, { actor: "" });
+    const reader = await signed(path, { actor: subject });
+    assert.equal(anonymous.status, 401); privateManagementHeaders(anonymous);
+    assert.equal(reader.status, 403); privateManagementHeaders(reader);
     const page = await signed(path);
     assert.equal(page.status, 200); assert.equal(page.headers.get("content-type"), mime); privateManagementHeaders(page);
     const text = await page.text(); assert.ok(text.length > 100);
@@ -395,6 +398,7 @@ export class RuntimeDocument extends VaultDocument {
   metadataShape(updatedAccessMetadata, id, "access", sealedExpiresAt); assert.equal(updatedAccessMetadata.expiresAt, shortenedAccess);
   assert.equal((await signed(expiryPath, { method: "POST", body: expiryBody })).status, 409);
   const shortenedOpen = await request("open");
+  privateManagementHeaders(shortenedOpen);
   assert.equal(shortenedOpen.status, 200); assert.deepEqual(new Uint8Array(await shortenedOpen.arrayBuffer()), pdf);
   assert.equal(Number(shortenedOpen.headers.get("x-vault-expires-at")), shortenedAccess);
   await pause(Math.max(0, shortenedAccess - Date.now() + 100));
@@ -453,12 +457,14 @@ export class RuntimeDocument extends VaultDocument {
   assert.equal((await shared("open")).status, 401);
   assert.equal((await shared("session", { body: { password: "wrong-synthetic-password" } })).status, 401);
   const unlocked = await shared("session", { body: { password } });
+  privateManagementHeaders(unlocked);
   assert.equal(unlocked.status, 200);
   const setCookie = unlocked.headers.get("set-cookie");
   assert.match(setCookie, /Secure/); assert.match(setCookie, /HttpOnly/); assert.match(setCookie, /SameSite=Strict/);
   const cookie = setCookie.split(";")[0];
   assert.equal((await shared("status", { cookie })).status, 200);
   const opened = await shared("open", { cookie });
+  privateManagementHeaders(opened);
   assert.equal(opened.status, 200); assert.deepEqual(new Uint8Array(await opened.arrayBuffer()), pdf);
   assert.match(opened.headers.get("cache-control"), /no-store/);
   assert.ok(Number(opened.headers.get("x-vault-expires-at")) > Date.now());

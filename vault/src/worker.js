@@ -10,7 +10,7 @@ import { pdfPreparationAssets } from './pdf-preparation-assets.generated.js';
 import { handleCanary } from './canary-management.js';
 export { VaultDocument } from './document.js';
 
-export default {
+const application = {
   async fetch(request, env) {
     try {
       const url = new URL(request.url);
@@ -81,5 +81,15 @@ export default {
         path === '/viewer.js' ? [passwordPath ? viewer.passwordJs : viewer.js, 'text/javascript; charset=utf-8'] : [viewer.css, 'text/css; charset=utf-8'];
       return new Response(body, { headers: { ...HEADERS, 'content-type': mime } });
     } catch (error) { return failure(error); }
+  },
+};
+
+export default {
+  async fetch(request, env) {
+    const response = await application.fetch(request, env);
+    if (new URL(request.url).protocol === 'https:') return response;
+    const result = new Response(response.body, response);
+    result.headers.delete('strict-transport-security');
+    return result;
   },
 };

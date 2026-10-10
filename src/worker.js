@@ -9,6 +9,8 @@ const headers = {
   "access-control-allow-headers": "authorization, content-type",
   "access-control-allow-methods": "GET, POST, OPTIONS",
   "cache-control": "no-store",
+  "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  "strict-transport-security": "max-age=86400",
 };
 const quiet = () => new Response(null, { status: 204, headers });
 const reply = (body, status = 200) => new Response(body, { status, headers });
@@ -69,7 +71,7 @@ async function legacyEvents(env, token, limit) {
   return { events, truncated: more };
 }
 
-export default {
+const application = {
   async fetch(request, env) {
     const url = new URL(request.url);
     // Check the request URL before auth, storage or notification work.
@@ -175,5 +177,16 @@ export default {
       console.error("kanariya_record_failed");
     }
     return quiet();
+  },
+};
+
+export default {
+  async fetch(request, env) {
+    const response = await application.fetch(request, env);
+    if (new URL(request.url).protocol === 'https:') return response;
+    // RFC 6797 forbids sending HSTS over plaintext, including local development.
+    const result = new Response(response.body, response);
+    result.headers.delete('strict-transport-security');
+    return result;
   },
 };

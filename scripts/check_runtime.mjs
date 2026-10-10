@@ -153,6 +153,15 @@ async function checkRuntime() {
   }
 
   const secureOrigin = "https://kanariya-runtime.test";
+  for (const [method, path, status] of [["GET", "/admin/tokens", 403], ["OPTIONS", "/admin/tokens", 204], ["GET", "/canary/invalid/extra", 204], ["POST", "/canary/invalid/extra", 405]]) {
+    const response = await request(`${secureOrigin}${path}`, { method });
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get("content-security-policy"), "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
+    assert.equal(response.headers.get("strict-transport-security"), "max-age=86400");
+    assert.equal(response.headers.get("access-control-allow-origin"), "*");
+    if (status === 204) assert.equal(await response.text(), "");
+  }
+  checks.push("CSP and host-only HSTS cover private denials, CORS preflight and quiet Canary responses");
   for (const [method, path] of [["POST", "/admin/tokens"], ["GET", "/admin/sign?token=transport-fixture"], ["GET", "/canary/transport-fixture"], ["OPTIONS", "/admin/tokens"]]) {
     const response = await request(`http://kanariya-runtime.test${path}`, {
       method,
@@ -165,6 +174,7 @@ async function checkRuntime() {
     assert.equal(response.status, 400);
     assert.equal(await response.text(), "HTTPS required");
     assert.equal(response.headers.get("location"), null);
+    assert.equal(response.headers.get("strict-transport-security"), null);
   }
   assert.equal((await adminJson("/admin/tokens")).tokens.length, 0);
   assert.equal((await eventsFor("transport-fixture")).length, 0);

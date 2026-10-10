@@ -40,6 +40,7 @@ describe("HTTPS transport", () => {
     expect(await response.text()).toBe("HTTPS required");
     expect(response.headers.get("location")).toBeNull();
     expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("strict-transport-security")).toBeNull();
   });
 
   it.each(["localhost.example.test", "127.0.0.1.example.test", "0.0.0.0", "192.168.1.5"])("rejects HTTP for non-loopback host %s", async host => {
@@ -66,6 +67,7 @@ describe("HTTPS transport", () => {
       body: JSON.stringify({ name: "Local synthetic token" }),
     }), s.env);
     expect(response.status).toBe(201);
+    expect(response.headers.get("strict-transport-security")).toBeNull();
     const token = await response.json();
     expect(token.url).toBe(`${origin}/canary/${token.token}`);
     expect((await send(s, requestHit(token.url))).status).toBe(204);

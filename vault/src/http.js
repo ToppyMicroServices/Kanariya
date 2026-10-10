@@ -6,6 +6,7 @@ export const HEADERS = {
   'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff', 'x-frame-options': 'SAMEORIGIN',
   'cross-origin-resource-policy': 'same-origin',
   'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
+  'strict-transport-security': 'max-age=86400',
   'permissions-policy': 'camera=(), microphone=(), geolocation=()',
 };
 export function json(value, status = 200, headers = {}) {

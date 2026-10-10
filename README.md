@@ -100,6 +100,10 @@ python3 -m http.server 8080 --directory public
 
 Open `http://127.0.0.1:8080`, then connect to the local Worker. GitHub Pages can serve the `docs` directory; the API continues to run on Cloudflare Workers. Review `docs/CNAME` before publishing a fork.
 
+The Studio's meta CSP authorizes only the exact inline script and stylesheet hashes. When either changes, update both HTML copies and their hashes; `npm test` checks for drift. Connections retain the existing HTTPS and loopback HTTP API settings. The CSP permits the HTTP scheme because browsers do not support IPv6 literal CSP host sources; the application still rejects public HTTP API URLs. Meta CSP cannot set `frame-ancestors` or HSTS.
+
+The Canary API and Vault send enforced CSP and `Strict-Transport-Security: max-age=86400` on their HTTPS application responses, including errors. HTTP responses omit HSTS. HSTS applies to the response host, without `includeSubDomains` or preload. It does not repair a certificate or protect the first HTTP visit. The static Studio's host must supply its own HSTS response header; publishing this HTML to GitHub Pages does not add that header. Provider-generated Access, redirect and WAF responses require separate deployment checks.
+
 ## API
 
 After the transport check, all `/admin/*` operations require `Authorization: Bearer <ADMIN_KEY>`. A missing server key or missing/incorrect bearer token returns `403`. The previous `ALLOW_PUBLIC_EXPORT` and `ALLOW_PUBLIC_SIGN` settings are ignored. CORS preflight `OPTIONS` requests expose no administrative data and do not require the key.
