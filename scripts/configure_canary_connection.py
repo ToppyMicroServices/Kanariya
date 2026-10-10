@@ -150,10 +150,28 @@ def root_endpoints(api):
     return {"endpointsSha256": digest({"subdomain": subdomain, "assignedDomains": assigned, "routes": routes})}
 
 
-def snapshot(api, script, expected_active, expected_latest, vault, active_present, latest_present):
+def placement_diagnostic(settings):
+    if "placement" not in settings:
+        return {"shape": "absent"}
+    value = settings["placement"]
+    if value is None:
+        return {"shape": "null"}
+    if not isinstance(value, dict):
+        return {"shape": "invalid_non_object"}
+    known_fields = {"mode", "hint", "target", "region", "hostname", "host", "last_analyzed_at", "status"}
+    mode = value.get("mode")
+    return {"shape": "empty_object" if not value else "object",
+            "mode": mode if isinstance(mode, str) and mode in {"smart", "off", "targeted"} else
+                    "absent" if "mode" not in value else "unrecognized",
+            "fields": sorted(set(value) & known_fields), "unknownFieldCount": len(set(value) - known_fields)}
+
+
+def snapshot(api, script, expected_active, expected_latest, vault, active_present, latest_present, observe_placement=None):
     require(active(api, script) == expected_active and latest(api, script) == expected_latest, "version_drift")
     settings = api(script + "/settings")
     require(isinstance(settings, dict), "settings_metadata_invalid")
+    if observe_placement:
+        observe_placement("vault" if vault else "canary", placement_diagnostic(settings))
     fingerprint, present, types = checked_rows(settings.get("bindings"), vault)
     require(present in (active_present, latest_present), "approved_binding_presence_changed")
     stable = {key: item for key, item in settings.items() if key not in ("bindings", "annotations")}
@@ -167,10 +185,14 @@ def snapshot(api, script, expected_active, expected_latest, vault, active_presen
     require(active(api, script) == expected_active and latest(api, script) == expected_latest,
             "state_changed_during_readback")
     upload_settings = {}
-    if stable.get("placement") is not None:
-        require(isinstance(stable["placement"], dict) and stable["placement"].get("mode") == "smart",
+    placement = stable.get("placement")
+    # Root snapshots only precede a secret PUT; no placement field is uploaded.
+    # Wrangler 4.58.0 omits placement when it is inactive. Never send "off" or
+    # an empty object to the Version Upload API, which documents mode "smart".
+    if vault and placement not in (None, {}, {"mode": "off"}):
+        require(isinstance(placement, dict) and placement.get("mode") == "smart",
                 "placement_upload_contract_unknown")
-        upload_settings["placement"] = copy.deepcopy(stable["placement"])
+        upload_settings["placement"] = copy.deepcopy(placement)
     return {"settingsSha256": digest(stable), "preservedBindingsSha256": fingerprint,
             "activeDetail": old, "latestDetail": new, "sourceSha256": digest(body),
             "bindingTypes": types, **endpoints}, body, upload_settings
@@ -210,17 +232,28 @@ def configure(api, report, report_path, execute=False):
         report.update(phase=phase, **fields)
         release.evidence(report_path, report)
 
+    def observe_placement(worker, observed):
+        report.setdefault("observedPlacement", {})[worker] = observed
+        release.evidence(report_path, report)
+
+    def checked_snapshot(script, expected_active, expected_latest, vault, active_present, latest_present):
+        return snapshot(api, script, expected_active, expected_latest, vault, active_present, latest_present,
+                        observe_placement)
+
     save("read_only_preflight")
     vault_base, root_base = active(api, release.SCRIPT), active(api, ROOT)
     require(latest(api, release.SCRIPT) == vault_base and latest(api, ROOT) == root_base,
             "active_is_not_latest_upload")
     # Determine only the approved additions' metadata, then validate every
     # existing binding, source module, runtime setting and endpoint.
-    vault_rows = api(release.SCRIPT + "/settings").get("bindings")
+    vault_settings = api(release.SCRIPT + "/settings")
+    require(isinstance(vault_settings, dict), "settings_metadata_invalid")
+    observe_placement("vault", placement_diagnostic(vault_settings))
+    vault_rows = vault_settings.get("bindings")
     _, has_binding, _ = checked_rows(vault_rows, True)
     has_key = secret_present(api)
-    vault_baseline, body, upload_settings = snapshot(api, release.SCRIPT, vault_base, vault_base, True, has_binding, has_binding)
-    root_baseline, _, _ = snapshot(api, ROOT, root_base, root_base, False, has_key, has_key)
+    vault_baseline, body, upload_settings = checked_snapshot(release.SCRIPT, vault_base, vault_base, True, has_binding, has_binding)
+    root_baseline, _, _ = checked_snapshot(ROOT, root_base, root_base, False, has_key, has_key)
     save("preflight_verified", vaultBaseVersion=vault_base, rootBaseVersion=root_base,
          vaultBaseline=vault_baseline, rootBaseline=root_baseline,
          canaryBindingState="already_present" if has_binding else "absent",
@@ -228,9 +261,9 @@ def configure(api, report, report_path, execute=False):
     if not execute:
         save("dry_run_complete", status="reviewed_not_executed")
         return report
-    unchanged(snapshot(api, ROOT, root_base, root_base, False, has_key, has_key)[0], root_baseline)
+    unchanged(checked_snapshot(ROOT, root_base, root_base, False, has_key, has_key)[0], root_baseline)
     require(secret_present(api) is has_key, "source_key_presence_changed")
-    unchanged(snapshot(api, release.SCRIPT, vault_base, vault_base, True, has_binding, has_binding)[0], vault_baseline)
+    unchanged(checked_snapshot(release.SCRIPT, vault_base, vault_base, True, has_binding, has_binding)[0], vault_baseline)
     vault_current = vault_base
     if not has_binding:
         payload, boundary = multipart(body, vault_baseline["latestDetail"]["runtime"],
@@ -242,16 +275,16 @@ def configure(api, report, report_path, execute=False):
         require(vault_current != vault_base, "new_version_not_created")
         save("binding_uploaded_not_active", vaultUploadedVersion=vault_current, remoteMutations=1,
              canaryBindingState="uploaded_not_active")
-        unchanged(snapshot(api, release.SCRIPT, vault_base, vault_current, True, False, True)[0], vault_baseline)
+        unchanged(checked_snapshot(release.SCRIPT, vault_base, vault_current, True, False, True)[0], vault_baseline)
         save("binding_verified_not_active")
-        unchanged(snapshot(api, release.SCRIPT, vault_base, vault_current, True, False, True)[0], vault_baseline)
+        unchanged(checked_snapshot(release.SCRIPT, vault_base, vault_current, True, False, True)[0], vault_baseline)
         save("binding_activation_attempt_started", remoteMutations=None)
         api(release.SCRIPT + "/deployments", method="POST", data={"strategy": "percentage",
             "versions": [{"version_id": vault_current, "percentage": 100}]})
         save("binding_activation_acknowledged", remoteMutations=2, canaryBindingState="activation_acknowledged")
-        unchanged(snapshot(api, release.SCRIPT, vault_current, vault_current, True, True, True)[0], vault_baseline)
+        unchanged(checked_snapshot(release.SCRIPT, vault_current, vault_current, True, True, True)[0], vault_baseline)
         save("binding_active_verified", canaryBindingState="active_verified", vaultActiveVersion=vault_current)
-    unchanged(snapshot(api, ROOT, root_base, root_base, False, has_key, has_key)[0], root_baseline)
+    unchanged(checked_snapshot(ROOT, root_base, root_base, False, has_key, has_key)[0], root_baseline)
     require(secret_present(api) is has_key, "source_key_presence_changed")
     if not has_key:
         completed = report["remoteMutations"]
@@ -270,11 +303,11 @@ def configure(api, report, report_path, execute=False):
         root_current = active(api, ROOT)
         require(root_current != root_base and latest(api, ROOT) == root_current,
                 "source_key_version_activation_unverified")
-        unchanged(snapshot(api, ROOT, root_current, root_current, False, True, True)[0], root_baseline)
+        unchanged(checked_snapshot(ROOT, root_current, root_current, False, True, True)[0], root_baseline)
         save("source_key_active_verified", sourceKeyState="created_active_verified", rootActiveVersion=root_current)
     else:
         report["rootActiveVersion"] = root_base
-    unchanged(snapshot(api, release.SCRIPT, vault_current, vault_current, True, True, True)[0], vault_baseline)
+    unchanged(checked_snapshot(release.SCRIPT, vault_current, vault_current, True, True, True)[0], vault_baseline)
     save("connection_configuration_verified", status="passed", vaultActiveVersion=vault_current,
          sourceAndOtherConfigurationPreserved=True, canaryBindingConfigured=True, sourceKeyConfigured=True)
     return report
@@ -298,7 +331,7 @@ def main(argv=None):
         created = True
         result = configure(API(), report, args.report, args.execute)
         print(json.dumps({key: result[key] for key in ("status", "phase", "remoteMutations",
-                          "canaryBindingState", "sourceKeyState")}))
+                          "canaryBindingState", "sourceKeyState", "observedPlacement")}))
         return 0
     except Exception as error:
         reason = str(error) if isinstance(error, SafeFailure) else "unexpected_error_details_redacted"
@@ -311,7 +344,7 @@ def main(argv=None):
             except Exception:
                 pass
         print(json.dumps({key: report[key] for key in ("status", "phase", "reason", "remoteMutations",
-                          "canaryBindingState", "sourceKeyState")}))
+                          "canaryBindingState", "sourceKeyState", "observedPlacement") if key in report}))
         return 1
 
 

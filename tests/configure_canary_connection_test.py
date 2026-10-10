@@ -95,7 +95,13 @@ class FakeAPI:
                 worker["rows"][VAULT_NEW].extend(copy.deepcopy(metadata["bindings"]))
                 worker["sources"][VAULT_NEW] = b"changed" if self.failure == "uploaded_source" else body
                 worker["latest"] = VAULT_NEW
-                worker["settings"]["placement"] = copy.deepcopy(metadata.get("placement"))
+                if "placement" in metadata:
+                    worker["settings"]["placement"] = copy.deepcopy(metadata["placement"])
+                elif (isinstance(worker["settings"].get("placement"), dict) and
+                      worker["settings"]["placement"].get("mode") == "smart"):
+                    worker["settings"]["placement"] = {}
+                if self.failure == "inactive_placement_drift":
+                    worker["settings"]["placement"] = {"mode": "off"}
                 if self.failure == "uploaded_binding":
                     next(row for row in worker["rows"][VAULT_NEW] if row["name"] == "CANARY_ADMIN")["service"] = "other"
                 return {"id": VAULT_NEW}
@@ -351,6 +357,55 @@ class ConnectionTests(unittest.TestCase):
         next(row for row in api.workers[connection.ROOT]["rows"][ROOT_BASE] if row["name"] == "IP_HMAC_KEY")["type"] = "plain_text"
         self.assertEqual(self.run_connection(api)[0], 1)
         self.assertEqual(api.mutations, [])
+
+    def test_supported_inactive_placement_is_preserved_without_an_upload_field(self):
+        for placement in (None, {}, {"mode": "off"}, "absent"):
+            with self.subTest(placement=placement):
+                api = FakeAPI()
+                settings = api.workers[release.SCRIPT]["settings"]
+                if placement == "absent":
+                    settings.pop("placement")
+                else:
+                    settings["placement"] = copy.deepcopy(placement)
+                self.assertEqual(self.run_connection(api)[0], 0)
+                self.assertNotIn("placement", api.upload["metadata"])
+                if placement == "absent":
+                    self.assertNotIn("placement", settings)
+                else:
+                    self.assertEqual(settings["placement"], placement)
+                self.report_path.unlink()
+
+    def test_root_placement_is_only_fingerprinted_because_root_receives_no_bundle_upload(self):
+        api = FakeAPI()
+        api.workers[connection.ROOT]["settings"]["placement"] = {"mode": "targeted", "host": SECRET_MARKER}
+        status, _, _, output = self.run_connection(api)
+        self.assertEqual(status, 0)
+        self.assertEqual(self.report()["observedPlacement"]["canary"]["mode"], "targeted")
+        self.assertNotIn(SECRET_MARKER, output + self.report_path.read_text())
+
+    def test_unknown_vault_placement_stops_read_only_and_saves_only_finite_shape_diagnostics(self):
+        for placement in ({"mode": SECRET_MARKER, SECRET_MARKER: SECRET_MARKER},
+                          {"mode": "targeted", "host": SECRET_MARKER}, {"mode": "off", "host": SECRET_MARKER},
+                          [], SECRET_MARKER):
+            with self.subTest(shape=type(placement).__name__):
+                api = FakeAPI()
+                api.workers[release.SCRIPT]["settings"]["placement"] = placement
+                status, _, random_bytes, output = self.run_connection(api)
+                self.assertEqual(status, 1)
+                self.assertEqual(api.mutations, [])
+                random_bytes.assert_not_called()
+                self.assertEqual(self.report()["reason"], "placement_upload_contract_unknown")
+                self.assertIn("vault", self.report()["observedPlacement"])
+                self.assertNotIn(SECRET_MARKER, output + self.report_path.read_text())
+                self.report_path.unlink()
+
+    def test_inactive_placement_representation_drift_still_prevents_activation(self):
+        api = FakeAPI(failure="inactive_placement_drift")
+        api.workers[release.SCRIPT]["settings"]["placement"] = {}
+        self.assertEqual(self.run_connection(api)[0], 1)
+        self.assertEqual(len(api.mutations), 1)
+        self.assertEqual(api.workers[release.SCRIPT]["active"], VAULT_BASE)
+        self.assertEqual(self.report()["reason"], "other_configuration_changed")
 
 
 if __name__ == "__main__":
