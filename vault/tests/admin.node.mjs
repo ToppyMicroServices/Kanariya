@@ -194,7 +194,7 @@ test('protected page supports strict CSP and keeps limitations in the collapsed 
   assert.match(html, /href="\/v1\/admin\/assets\/admin.css"/);
   assert.match(html, /src="\/v1\/admin\/assets\/admin.js" type="module"/);
   assert.doesNotMatch(html, /<style|\sstyle=|\son\w+=|<script(?![^>]*src=)/i);
-  assert.match(html, /<details[^>]*><summary>ご案内<\/summary><p>現在はダミーPDFを管理しています/);
+  assert.match(html, /<details[^>]*><summary>ご案内<\/summary><p>現在はダミーPDFを共有しています/);
   assert.doesNotMatch(html, /type="password"|パスワードの変更|アップロード/);
   assert.match(css, /prefers-reduced-motion/); assert.match(css, /@media\(max-width:540px\)/);
 });

@@ -1,4 +1,5 @@
 import { css as viewerCss } from './viewer.js';
+import * as extensions from './admin-extensions.js';
 
 export const html = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#02213b"><title>文書の管理 | ToppyMicroServices</title><link rel="stylesheet" href="/v1/admin/assets/admin.css"></head>
@@ -10,15 +11,17 @@ export const html = `<!doctype html>
 <div class="actions"><button id="copy-link" type="button" disabled>共有リンクをコピー</button><a id="preview" class="button-link" target="_blank" rel="noopener noreferrer" aria-label="閲覧ページを開く（新しいタブ）" aria-disabled="true">閲覧ページを開く</a></div>
 <form id="expiry-form" class="expiry-form"><label for="expires-at">閲覧期限を変更</label><p id="expiry-help" class="form-help">日本時間で指定してください。</p><div class="expiry-controls"><input id="expires-at" type="datetime-local" step="60" required disabled aria-describedby="expiry-help expiry-limit"><button id="save-expiry" type="submit" class="primary" disabled>期限を保存</button></div><p id="expiry-limit" class="form-help"></p></form>
 <div class="sharing-end"><button id="stop-sharing" type="button" class="quiet" disabled>共有を終了</button><div id="stop-confirmation" class="confirmation" hidden><p>共有を終了すると、この文書を新たに開いたり保存したりできなくなります。元に戻すことはできません。</p><div class="actions"><button id="confirm-stop" type="button" class="danger">共有を終了する</button><button id="cancel-stop" type="button">キャンセル</button></div></div></div>
-<details class="management-notes"><summary>ご案内</summary><p>現在はダミーPDFを管理しています。PDFの差し替えは未対応です。</p><p>閲覧期限や共有の終了は、すでに表示・保存された内容を回収するものではありません。</p></details></section><noscript><p class="noscript">文書の管理にはJavaScriptが必要です。</p></noscript></main>
-<footer class="site-footer"><span>ToppyMicroServices OÜ</span><span>Document sharing · Kanariya</span></footer><script src="/v1/admin/assets/admin.js" type="module"></script></body></html>`;
+<details class="management-notes"><summary>ご案内</summary><p>現在はダミーPDFを共有しています。新しいPDFは、非公開の登録候補として保存できます。</p><p>閲覧期限や共有の終了は、すでに表示・保存された内容を回収するものではありません。</p></details></section>${extensions.html}<noscript><p class="noscript">文書の管理にはJavaScriptが必要です。</p></noscript></main>
+<footer class="site-footer"><span>ToppyMicroServices OÜ</span><span>Document sharing · Kanariya</span></footer><script src="/v1/admin/assets/admin.js" type="module"></script><script src="/v1/admin/assets/management.js" type="module"></script></body></html>`;
 
-export const css = viewerCss + `
+export const css = viewerCss + extensions.css + `
 .management-card{margin-top:24px}.document-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}.document-heading h2{margin:0;font-size:19px}.state-label{color:var(--accent);font-size:13px;white-space:nowrap}.document-info{margin:20px 0}.document-info>div{display:grid;grid-template-columns:90px minmax(0,1fr);gap:12px;margin-top:8px}.document-info dt{color:var(--muted);font-size:14px}.document-info dd{margin:0;overflow-wrap:anywhere;font-size:14px;font-variant-numeric:tabular-nums}
 .button-link{display:inline-flex;align-items:center;justify-content:center;min-height:46px;padding:10px 18px;border:1px solid var(--border);border-radius:6px;color:var(--fg);text-decoration:none;font-size:14px;font-weight:700}.button-link:hover{border-color:var(--accent);background:rgba(98,210,255,.08)}.button-link[aria-disabled=true]{opacity:.5;pointer-events:none;cursor:default}
 .expiry-form{margin-top:28px;padding-top:24px;border-top:1px solid var(--border)}.expiry-controls{display:flex;align-items:stretch;gap:12px;max-width:620px}.expiry-controls input{flex:1}.expiry-controls button{flex:none}#expiry-limit{margin-top:8px;font-size:12px;overflow-wrap:anywhere}.sharing-end{margin-top:24px}.confirmation{max-width:700px;margin-top:16px;padding:16px;border:1px solid var(--border);border-radius:6px}.confirmation p{margin:0 0 14px;font-size:14px}.danger{border-color:#ffbac1;color:#ffbac1}.management-notes{margin-top:24px;padding-top:16px;border-top:1px solid var(--border);font-size:13px;color:var(--muted)}.management-notes summary{cursor:pointer;width:fit-content}.management-notes p{max-width:700px;margin:8px 0 0}#error{padding:12px 16px;border-left:2px solid #ffbac1;background:rgba(2,33,59,.45);font-size:14px}.recovery-actions{display:flex;flex-wrap:wrap;align-items:center;gap:12px}.recovery-actions a{font-size:13px}
 @media(max-width:540px){.document-heading{align-items:flex-start}.document-heading h2{font-size:17px}.document-info>div{grid-template-columns:70px minmax(0,1fr);gap:8px}.expiry-controls{flex-direction:column}.expiry-controls button{width:100%}.button-link{padding-inline:14px}.management-notes{font-size:12px}}
 `;
+
+export const managementJs = extensions.js;
 
 export const js = `"use strict";
 const ids=["status","error","reload","owner-page","management","sharing-state","recipient-row","recipient","deadline","copy-link","preview","expiry-form","expires-at","save-expiry","expiry-limit","stop-sharing","stop-confirmation","confirm-stop","cancel-stop"];

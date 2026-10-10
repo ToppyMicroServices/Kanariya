@@ -6,13 +6,20 @@ import { passwordValid, verifyPassword, randomToken, hashToken, readSession, ses
   SESSION_MS, MAX_SESSIONS } from './password.js';
 import { recipientHeaders } from './recipient.js';
 import { PasswordAdmission } from './admission.js';
+import { readContacts, setContacts, MAX_RECIPIENT_REQUEST_BYTES } from './contacts.js';
+import { VaultRegistrations } from './registration.js';
 const DAY = 86400000;
+const LOG_PAGE_SIZE = 50, LOG_SCAN_SIZE = 100, LOG_CURSOR_MS = 600000;
+const LOG_INDEX = /^expiry:(\d{13}):(audit|replay):([0-9a-f-]{36})$/;
+const LOG_ERRORS = new Set(['configuration_changed', 'configuration_error', 'http_error', 'timeout', 'network_error',
+  'email_response_unknown', 'email_rate_limit', 'email_provider_unavailable', 'email_delivery_failed', 'email_provider_error', 'email_timeout_unknown']);
 
 export class VaultDocument {
   constructor(ctx, env) {
     this.ctx = ctx; this.env = env; this.tail = Promise.resolve(); this.alarmRunning = null;
     this.context = `journal:v1:${ctx.id.toString()}`;
     this.admission = new PasswordAdmission(ctx.storage, env, this.context);
+    this.registrations = new VaultRegistrations(ctx, env);
   }
   // Requests and durable state changes are serialized. Network notification delivery
   // intentionally happens outside this queue so owner revocation remains available.
@@ -36,6 +43,7 @@ export class VaultDocument {
     if (Object.hasOwn(state, 'deadline') && (!state.deadline || Array.isArray(state.deadline) ||
         Object.keys(state.deadline).length !== 2 || typeof state.deadline.recordDigest !== 'string' || !/^[0-9a-f]{64}$/.test(state.deadline.recordDigest) ||
         !Number.isSafeInteger(state.deadline.expiresAt) || state.deadline.expiresAt <= 0)) throw new Error('invalid_journal');
+    if (Object.hasOwn(state, 'recipientContacts')) readContacts(state, dummyPin(this.env).digest);
     return state;
   }
   async archive(tx, key, type, id, value, at) {
@@ -104,7 +112,18 @@ export class VaultDocument {
   }
   async fetch(request) {
     try {
-      const ready = await requestBody(request);
+      const url = new URL(request.url);
+      if (url.pathname === '/v1/registrations') return await this.registrations.fetch(request);
+      const match = ACCESS_ROUTE.exec(url.pathname);
+      if (match?.[2] === 'recipients') {
+        const pin = dummyPin(this.env);
+        if (url.origin !== origin(this.env) || url.search || match[1] !== pin.id || !['GET', 'POST'].includes(request.method)) throw new Denied();
+        let subject;
+        try { subject = await identity(request, this.env); } catch { throw new Denied(401, 'unauthenticated'); }
+        if (subject !== this.env.VAULT_OWNER_SUB) throw new Denied();
+        if (request.method === 'POST' && (request.headers.get('origin') !== url.origin || request.headers.get('content-type') !== 'application/json')) throw new Denied();
+      }
+      const ready = await requestBody(request, 5000, match?.[2] === 'recipients' ? MAX_RECIPIENT_REQUEST_BYTES : 2048);
       const prepared = await this.passwordPreflight(ready);
       if (prepared instanceof Response) return prepared;
       return await this.serial(async () => {
@@ -167,9 +186,86 @@ export class VaultDocument {
     try { return parseJSON(await boundedBody(request, max)); }
     catch { throw new Denied(400, 'invalid_request'); }
   }
+  logEvent(event, jobs, id) {
+    if (!event || !UUID.test(event.id) || event.documentId !== id || !Number.isSafeInteger(event.at) || event.at <= 0 ||
+        typeof event.subject !== 'string' || !event.subject || event.subject.length > 256 ||
+        !['requested', 'decrypted', 'failed'].includes(event.outcome) || !Array.isArray(jobs) || jobs.length > 100) throw new Error('invalid_journal');
+    const notifications = jobs.map(job => {
+      if (!job || job.eventId !== event.id || !['webhook', 'slack', 'discord', 'email'].includes(job.target?.type) ||
+          !['pending', 'accepted', 'failed'].includes(job.state) || !Number.isSafeInteger(job.attempts) || job.attempts < 0) throw new Error('invalid_journal');
+      return { type: job.target.type, state: job.state, attempts: job.attempts,
+        error: LOG_ERRORS.has(job.error) ? job.error : null,
+        httpStatus: Number.isInteger(job.httpStatus) && job.httpStatus >= 100 && job.httpStatus <= 599 ? job.httpStatus : null };
+    });
+    return { id: event.id, at: event.at, subject: event.subject, outcome: event.outcome, notifications };
+  }
+  async logs(request, id, key) {
+    const pin = dummyPin(this.env), context = `${this.context}:logs:v1:${id}:${pin.digest}`, now = Date.now();
+    let snapshotAt = now, before = `expiry:${String(now + 30 * DAY + 1).padStart(13, '0')}:`;
+    if (request.method === 'POST') {
+      const input = await this.input(request, 1200);
+      if (!input || Array.isArray(input) || typeof input !== 'object' || Object.keys(input).length !== 1 ||
+          typeof input.cursor !== 'string' || input.cursor.length > 1024) throw new Denied(400, 'invalid_cursor');
+      try {
+        const parts = input.cursor.split('.');
+        if (parts.length !== 2) throw new Error();
+        const cursor = await openJSON({ nonce: parts[0], ciphertext: parts[1] }, key, context);
+        const match = LOG_INDEX.exec(cursor.before);
+        if (Object.keys(cursor).length !== 3 || cursor.version !== 1 || !Number.isSafeInteger(cursor.snapshotAt) ||
+            cursor.snapshotAt <= 0 || cursor.snapshotAt > now || now - cursor.snapshotAt >= LOG_CURSOR_MS ||
+            !match || !UUID.test(match[3]) || Number(match[1]) > cursor.snapshotAt + 30 * DAY) throw new Error();
+        snapshotAt = cursor.snapshotAt; before = cursor.before;
+      } catch { throw new Denied(400, 'invalid_cursor'); }
+    }
+    const state = await this.state(this.ctx.storage, key);
+    if ((state.documentId && state.documentId !== id) || state.events.length > 1000 || state.jobs.length > 4000) throw new Error('invalid_journal');
+    const start = `expiry:${String(now + 1).padStart(13, '0')}:`;
+    if (before <= start) return json({ events: [], nextCursor: null, retentionDays: 30 });
+    const indexed = await this.ctx.storage.list({ prefix: 'expiry:', start,
+      end: before, reverse: true, limit: LOG_SCAN_SIZE });
+    const candidates = [], scanned = [...indexed], oldest = scanned.at(-1)?.[0];
+    const keyFor = event => `expiry:${String(event.at + 30 * DAY).padStart(13, '0')}:audit:${event.id}`;
+    // A page stops at the bounded archive scan window. It cannot skip an older
+    // active event or an unexamined archive merely because replay records mix in.
+    const moreScanned = scanned.length === LOG_SCAN_SIZE && Number(LOG_INDEX.exec(oldest)?.[1]) > now;
+    for (const event of state.events) {
+      if (!Number.isSafeInteger(event.at)) throw new Error('invalid_journal');
+      const index = keyFor(event);
+      if (event.at <= now - 30 * DAY || event.at > snapshotAt || index >= before || (moreScanned && index < oldest)) continue;
+      candidates.push({ index, value: this.logEvent(event, state.jobs.filter(job => job.eventId === event.id), id) });
+    }
+    for (const [index, name] of scanned) {
+      const match = LOG_INDEX.exec(index);
+      if (!match || !UUID.test(match[3]) || name !== `${match[2]}:${match[3]}` || index >= before || Number(match[1]) > snapshotAt + 30 * DAY) throw new Error('invalid_journal');
+      if (Number(match[1]) <= now || match[2] !== 'audit') continue;
+      const box = await this.ctx.storage.get(name);
+      if (!box) throw new Error('invalid_journal');
+      const archived = await openJSON(box, key, `${this.context}:${name}`);
+      if (archived.expiresAt !== Number(match[1]) || archived.event?.at + 30 * DAY !== archived.expiresAt ||
+          archived.event?.id !== match[3]) throw new Error('invalid_journal');
+      candidates.push({ index, value: this.logEvent(archived.event, archived.jobs, id) });
+    }
+    candidates.sort((a, b) => a.index < b.index ? 1 : a.index > b.index ? -1 : 0);
+    if (candidates.some((candidate, index) => index && candidate.index === candidates[index - 1].index)) throw new Error('invalid_journal');
+    const page = candidates.slice(0, LOG_PAGE_SIZE);
+    const nextBefore = candidates.length > LOG_PAGE_SIZE ? page.at(-1).index : moreScanned ? oldest : null;
+    let nextCursor = null;
+    if (nextBefore) {
+      const box = await sealJSON({ version: 1, snapshotAt, before: nextBefore }, key, context);
+      nextCursor = `${box.nonce}.${box.ciphertext}`;
+    }
+    return json({ events: page.map(candidate => candidate.value), nextCursor, retentionDays: 30 });
+  }
   async owner(request, id, action, subject) {
     if (subject !== this.env.VAULT_OWNER_SUB) throw new Denied();
     const keys = await this.keys();
+    if (action === 'logs') return this.logs(request, id, keys.audit);
+    if (action === 'recipients') {
+      const digest = dummyPin(this.env).digest;
+      if (request.method === 'GET') return json(readContacts(await this.state(this.ctx.storage, keys.audit), digest));
+      const input = await this.input(request, MAX_RECIPIENT_REQUEST_BYTES);
+      return json(await this.mutate(id, keys.audit, state => setContacts(state, digest, input)));
+    }
     if (action === 'status') {
       const state = await this.state(this.ctx.storage, keys.audit);
       return json({ revoked: state.revoked, pending: state.jobs.filter(j => j.state === 'pending').length,
@@ -225,9 +321,9 @@ export class VaultDocument {
       passwordEnabled(this.env); accessConfiguration(this.env);
       if (!prepared) throw new Denied();
     }
-    const methods = action === 'status' || action === 'metadata' ? ['GET'] : passwordPath && action === 'session' ? ['POST', 'DELETE'] : ['POST'];
+    const methods = action === 'logs' || action === 'recipients' ? ['GET', 'POST'] : action === 'status' || action === 'metadata' ? ['GET'] : passwordPath && action === 'session' ? ['POST', 'DELETE'] : ['POST'];
     if (!methods.includes(request.method)) throw new Denied(405, 'method_not_allowed');
-    if (!['status', 'metadata'].includes(action) && (request.headers.get('origin') !== origin(this.env) ||
+    if (!(request.method === 'GET' && ['status', 'metadata', 'logs', 'recipients'].includes(action)) && (request.headers.get('origin') !== origin(this.env) ||
         request.headers.get('content-type') !== 'application/json')) throw new Denied();
     if (passwordPath && ['cross-site', 'same-site'].includes(request.headers.get('sec-fetch-site'))) throw new Denied();
     let subject;

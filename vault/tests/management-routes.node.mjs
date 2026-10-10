@@ -31,10 +31,10 @@ async function request(path, subject, options = {}) {
   return worker.fetch(new Request(env.PUBLIC_ORIGIN + path, { method: options.method ?? 'GET',
     headers: { ...headers, ...options.headers } }), env);
 }
-const surfaces = ['/v1/admin', '/v1/admin/assets/admin.js', '/v1/admin/assets/admin.css', '/v1/management'];
+const surfaces = ['/v1/admin', '/v1/admin/assets/admin.js', '/v1/admin/assets/admin.css', '/v1/admin/assets/management.js', '/v1/management'];
 
 test('owner administration surfaces reject anonymous, password-cookie and non-owner identities', async () => {
-  for (const path of surfaces) {
+  for (const path of [...surfaces, '/v1/registrations']) {
     assert.equal((await request(path)).status, 401, path);
     assert.equal((await request(path, null, { headers: { cookie: '__Host-fake=synthetic',
       'cf-access-authenticated-user-email': 'owner@example.test' } })).status, 401, path);
@@ -47,6 +47,7 @@ test('owner page and assets return exact UI with private headers and no document
     ['/v1/admin', admin.html, 'text/html; charset=utf-8'],
     ['/v1/admin/assets/admin.js', admin.js, 'text/javascript; charset=utf-8'],
     ['/v1/admin/assets/admin.css', admin.css, 'text/css; charset=utf-8'],
+    ['/v1/admin/assets/management.js', admin.managementJs, 'text/javascript; charset=utf-8'],
   ]) {
     const response = await request(path, env.VAULT_OWNER_SUB);
     assert.equal(response.status, 200); assert.equal(await response.text(), expected);

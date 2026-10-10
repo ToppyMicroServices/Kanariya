@@ -47,10 +47,49 @@ shortened as well; restoring the document deadline does not extend those session
 The API rejects stale edits, revoked documents and extensions past the sealed
 expiry. Both reader modes enforce the effective deadline on new acquisitions.
 
-Registering or replacing a PDF is not supported by this console. A deadline beyond
-the sealed policy requires a separately prepared and reviewed replacement record,
-with its private R2 object, new UUID and exact ciphertext digest updated together.
-The dummy-only gate remains in place, and real CVs are not admitted.
+The console can now register private PDF candidates, record disclosure contacts,
+and read acquisition logs. Registering a candidate does not change the shared PDF.
+Activating a replacement or extending beyond the sealed policy still requires a
+separately reviewed record, private R2 object, UUID and exact ciphertext digest.
+The dummy-only gate remains in place, and real CVs are not admitted for viewing.
+
+### Private PDF candidates, disclosure contacts and owner logs
+
+The owner's closed panels load their data only when opened. They use the same
+verified owner Access subject as deadline management. Reader identities and
+password sessions cannot use these APIs. Merely reading them does not decrypt
+the shared PDF, enqueue notifications, or change access permissions.
+
+Private registration accepts one PDF of at most 1 MiB and a future Japan-time
+deadline. It encrypts the PDF, filename and policy with the existing independent
+document-key wrapping scheme; registration metadata is encrypted under the audit
+key. R2 stores immutable objects under `staging/`, separate from the active record.
+The encrypted policy grants only the authenticated owner subject. A private
+candidate ID cannot be opened through either public reader mode.
+
+The registry reserves an encrypted durable slot before any R2 write, and limits
+completed and incomplete registrations together to 20 slots. A failed or uncertain
+write retains its slot and private status across restarts. The UI confirms a
+registration by reading its ID back and does not automatically resend an uncertain
+upload. Cleanup, retry and activation of incomplete candidates are not yet exposed
+by the console. Registration checks the PDF header and size; it does not establish
+structural validity, accessibility or the presence of a recipient watermark.
+Review the final PDF using the preparation checks above before any activation.
+
+Disclosure contacts are an encrypted list of up to 50 email addresses, with stale
+edits rejected. They are records of intended recipients, **not email authentication
+or an access allowlist**. They neither change the Access policy nor identify a
+shared-password reader. Effective email-only access needs a separately approved
+reader authentication configuration; administration remains owner Access only.
+
+Owner logs show acquisition attempts from the current dummy document over the
+last 30 days, including the outcome and notification queue/provider acceptance
+state. Each page contains at most 50 events and uses a short-lived encrypted
+cursor. The endpoint reads encrypted active and archived audit entries without
+fetching or decrypting the PDF. Access entries retain their verified subject ID;
+shared-password entries remain unidentified. Provider acceptance does not prove
+mailbox receipt, and a decryption event does not prove the document was read.
+The current event schema does not distinguish display from download.
 
 Revocation stops future acquisitions in both modes. Password mode also polls
 authorization while displaying a document; Access mode does not poll revocation
@@ -206,6 +245,9 @@ Drive remains an encrypted archive. This service uses a private R2 working copy 
 | --- | --- | --- |
 | `/v1/admin` and its assets | GET | Owner Access only; empty management UI, no document decryption |
 | `/v1/management` | GET | Owner only; configured dummy document ID |
+| `/v1/registrations` | GET / POST | Owner only; private candidate list / immutable encrypted registration |
+| `/v1/documents/<uuid>/recipients` | GET / POST | Owner only; encrypted disclosure-contact records, no access grants |
+| `/v1/documents/<uuid>/logs` | GET / POST | Owner only; first / subsequent page of retained acquisition logs |
 | `/` and viewer assets | GET | Valid Access identity; no document decryption |
 | `/v1/documents/<uuid>/open` | POST | Pinned dummy ID and exact ciphertext digest, same-origin JSON `{"requestId":"<fresh-v4-uuid>"}`, document grant and expiry; audited decryption |
 | `/v1/documents/<uuid>/status` | GET | Owner only; counts/outcomes, no personal audit details |

@@ -15,6 +15,7 @@ export default {
       const pin = dummyPin(env);
       const ownerPage = url.pathname === '/v1/admin';
       const ownerAsset = url.pathname === '/v1/admin/assets/admin.js' ? ['js', 'text/javascript; charset=utf-8'] :
+        url.pathname === '/v1/admin/assets/management.js' ? ['managementJs', 'text/javascript; charset=utf-8'] :
         url.pathname === '/v1/admin/assets/admin.css' ? ['css', 'text/css; charset=utf-8'] : null;
       const management = url.pathname === '/v1/management';
       if (ownerPage || ownerAsset || management) {
@@ -26,6 +27,14 @@ export default {
         if (management) return json({ documentId: pin.id });
         const [body, mime] = ownerPage ? [admin.html, 'text/html; charset=utf-8'] : [admin[ownerAsset[0]], ownerAsset[1]];
         return new Response(body, { headers: { ...HEADERS, 'content-type': mime } });
+      }
+      if (url.pathname === '/v1/registrations') {
+        if (!['GET', 'POST'].includes(request.method)) throw new Denied(405, 'method_not_allowed');
+        let subject;
+        try { subject = await identity(request, env); } catch { throw new Denied(401, 'unauthenticated'); }
+        if (typeof env.VAULT_OWNER_SUB !== 'string' || !env.VAULT_OWNER_SUB || env.VAULT_OWNER_SUB.length > 256) throw new Error('configuration');
+        if (subject !== env.VAULT_OWNER_SUB) throw new Denied();
+        return env.VAULT.get(env.VAULT.idFromName('owner-registration:v1')).fetch(request);
       }
       const passwordPath = url.pathname.startsWith('/p/');
       if (passwordPath) { passwordEnabled(env); accessConfiguration(env); }

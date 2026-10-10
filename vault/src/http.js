@@ -1,4 +1,4 @@
-export const ACCESS_ROUTE = /^\/v1\/documents\/([0-9a-f-]{36})\/(open|revoke|status|retry-notifications|metadata|expiry)$/;
+export const ACCESS_ROUTE = /^\/v1\/documents\/([0-9a-f-]{36})\/(open|revoke|status|retry-notifications|metadata|expiry|logs|recipients)$/;
 export const PASSWORD_ROUTE = /^\/p\/([0-9a-f-]{36})\/(open|session|status)$/;
 export const HEADERS = {
   'cache-control': 'private, no-store, max-age=0', 'cdn-cache-control': 'no-store',
@@ -33,10 +33,10 @@ export function passwordEnabled(env) {
 
 // Materialize small public request bodies before entering the per-document state
 // queue. An unauthenticated slow upload must never hold owner revoke/status.
-export async function requestBody(request, timeoutMs = 5000) {
+export async function requestBody(request, timeoutMs = 5000, maxBytes = 2048) {
   if (!request.body || ['GET', 'HEAD'].includes(request.method)) return request;
   const declared = request.headers.get('content-length');
-  if (declared && (!/^\d+$/.test(declared) || Number(declared) > 2048)) throw new Denied(400, 'invalid_request');
+  if (declared && (!/^\d+$/.test(declared) || Number(declared) > maxBytes)) throw new Denied(400, 'invalid_request');
   const reader = request.body.getReader(), chunks = [];
   let length = 0, timer;
   const deadline = new Promise((_, reject) => {
@@ -47,7 +47,7 @@ export async function requestBody(request, timeoutMs = 5000) {
       const { done, value } = await Promise.race([reader.read(), deadline]);
       if (done) break;
       length += value.byteLength;
-      if (length > 2048) throw new Denied(400, 'invalid_request');
+      if (length > maxBytes) throw new Denied(400, 'invalid_request');
       chunks.push(value);
     }
   } catch (error) {
