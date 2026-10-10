@@ -35,7 +35,8 @@ export default {
         const [body, mime] = ownerPage ? [admin.html, 'text/html; charset=utf-8'] : preparationAsset ? [preparationAsset.data, preparationAsset.mime] : [admin[ownerAsset[0]], ownerAsset[1]];
         return new Response(body, { headers: { ...HEADERS, 'content-type': mime } });
       }
-      if (url.pathname === '/v1/registrations') {
+      const replacement = /^\/v1\/registrations\/([0-9a-f-]{36})\/replacement$/.exec(url.pathname);
+      if (url.pathname === '/v1/registrations' || replacement && UUID.test(replacement[1])) {
         if (!['GET', 'POST'].includes(request.method)) throw new Denied(405, 'method_not_allowed');
         let subject;
         try { subject = await identity(request, env); } catch { throw new Denied(401, 'unauthenticated'); }

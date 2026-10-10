@@ -47,10 +47,11 @@ shortened as well; restoring the document deadline does not extend those session
 The API rejects stale edits, revoked documents and extensions past the sealed
 expiry. Both reader modes enforce the effective deadline on new acquisitions.
 
-The console can now register private PDF candidates, record disclosure contacts,
-and read acquisition logs. Registering a candidate does not change the shared PDF.
-Activating a replacement or extending beyond the sealed policy still requires a
-separately reviewed record, private R2 object, UUID and exact ciphertext digest.
+The console can register private PDF candidates, prepare a replacement for review,
+record disclosure contacts, and read acquisition logs. Neither registration nor
+replacement preparation changes the shared PDF. Activating a replacement or
+extending beyond the sealed policy still requires a separately reviewed record,
+private R2 object, UUID and exact ciphertext digest.
 The dummy-only gate remains in place, and real CVs are not admitted for viewing.
 
 ### Private PDF candidates, disclosure contacts and owner logs
@@ -71,8 +72,8 @@ The registry reserves an encrypted durable slot before any R2 write, and limits
 completed and incomplete registrations together to 20 slots. A failed or uncertain
 write retains its slot and private status across restarts. The UI confirms a
 registration by reading its ID back and does not automatically resend an uncertain
-upload. Cleanup, retry and activation of incomplete candidates are not yet exposed
-by the console.
+upload. Cleanup and retry of incomplete registrations are not exposed by the
+console. Publication requires a separate approved pin rotation.
 
 Browser registration asks for an organization and optional contact name, or an
 individual name. Recipient watermarks default to on. A pinned, self-hosted
@@ -89,6 +90,52 @@ not server proof of a watermark or the original file's contents. The browser
 rejects encrypted, signed, interactive and overly complex PDFs. Library checks do
 not replace qpdf/Ghostscript and independent final-PDF render checks before any
 activation. The current public dummy document is not automatically changed.
+
+### Replacement review
+
+For a candidate marked as a replacement of the current document, the owner can
+select **差し替え内容を確認** and explicitly prepare it. The service checks the
+current pinned record, candidate digest, final PDF digest, registration revision
+and deadlines. It creates an immutable encrypted record at the reader's canonical
+R2 path and an encrypted bounded receipt. Readers still cannot access the new ID.
+
+Preparation preserves the current reader authentication mode and grants. For
+password mode, it copies the validated verifier inside the encrypted policy; it
+does not return a password or key to the browser. The new document uses the
+candidate's recipient and expiry. The console shows **公開前の確認待ち** and exports
+only opaque IDs, hashes, deadlines and review state, without recipient names,
+email addresses, filenames or credentials. An uncertain preparation result must
+be checked with a read; the UI does not automatically repeat the write.
+
+Actual publication changes the exact dummy ID and ciphertext digest together.
+It requires approval for the specific synthetic PDF and new pin pair after final
+PDF QA. Preparing a candidate does not classify its contents as dummy data, and
+the dummy-only guard is not removed. Registry history remains readable after a
+reviewed pin rotation. Real CV publication remains outside this rollout.
+
+The operator tool `scripts/rotate_vault_dummy.py` checks the exported review
+JSON, exact final PDF and its QA report. By default it only reads the current
+Cloudflare source, deployment and settings. It does not read R2 objects or
+independently verify the private replacement; that evidence comes from the
+owner-prepared manifest. Use a fresh owner read before an approved activation.
+
+```sh
+python3 scripts/rotate_vault_dummy.py \
+  --plan /path/to/replacement-review.json \
+  --pdf /path/to/verified-synthetic.pdf \
+  --qa-report /path/to/qa-report.json \
+  --report /path/to/new-review-report.json
+```
+
+Activation additionally requires `--execute --approve <exact-plan-SHA-256>`.
+The tool accepts only a reviewed synthetic replacement in password mode and
+preserves source, authentication, secrets and every binding except the two
+dummy pins. It checks the final PDF's structure and all-page render evidence
+from Poppler, PDFKit and PDFium. Keep other deployments paused: the Cloudflare
+deployment API does not provide an atomic compare-and-swap for activation.
+There is no automatic retry or rollback after an uncertain write. Once the
+new pins are verified, the source-only deployment tool's fixed pin baseline
+needs a separately reviewed update before another source release.
 
 ### Canary management
 

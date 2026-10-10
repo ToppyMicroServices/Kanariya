@@ -41,6 +41,7 @@ jobs:
           npm test
           npm --prefix vault test
           python3 -m unittest discover -s tests -p 'deploy_vault_source_test.py'
+          python3 -m unittest discover -s tests -p 'rotate_vault_dummy_test.py'
 
       - name: Run root runtime checks
         run: npm run test:runtime

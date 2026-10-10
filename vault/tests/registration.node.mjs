@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 import { VaultRegistrations, registrationBody, MAX_REGISTRATIONS, MAX_REGISTRATION_BODY } from '../src/registration.js';
-import { MAX_PDF_BYTES, newKey, utf8, b64, importKey, openJSON, readPolicy, decryptDocument, sealJSON } from '../src/crypto.js';
+import { MAX_PDF_BYTES, newKey, utf8, b64, importKey, openJSON, readPolicy, decryptDocument, sealJSON, sealDocument } from '../src/crypto.js';
 
 const originalFetch = globalThis.fetch;
 after(() => { globalThis.fetch = originalFetch; });
@@ -29,12 +29,12 @@ async function fixture() {
     DUMMY_DOCUMENT_ID: crypto.randomUUID(), DUMMY_RECORD_SHA256: 'a'.repeat(64), PASSWORD_READER_ENABLED: '1' };
   const wrap = await importKey(env.VAULT_WRAP_KEY), audit = await importKey(env.VAULT_AUDIT_KEY);
   const ctx = { storage, id: { toString: () => 'owner-registration:v1' } }, context = 'registration:v1:owner-registration:v1';
-  let instance = new VaultRegistrations(ctx, env), reads = 0, writes = 0, notifications = 0;
+  let instance = new VaultRegistrations(ctx, env), reads = 0, writes = 0, notifications = 0, metadataReads = 0;
   const objects = new Map([[`${env.DUMMY_DOCUMENT_ID}.sealed.json`, utf8('SYNTHETIC_EXISTING_PUBLIC_RECORD')]]);
   let putFailure = false, readFailure = false, alteredReadback = false, afterRead = null;
   env.VAULT_DOCUMENTS = {
     async put(name, value, options) {
-      writes++; assert.match(name, /^staging\/[0-9a-f-]{36}\.sealed\.json$/);
+      writes++; assert.match(name, /^(?:staging\/)?[0-9a-f-]{36}\.sealed\.json$/);
       assert.equal(options.onlyIf.get('if-none-match'), '*');
       assert.equal(options.httpMetadata.contentType, 'application/json');
       assert.match(options.httpMetadata.cacheControl, /no-store/);
@@ -45,14 +45,19 @@ async function fixture() {
       objects.set(name, new Uint8Array(value)); return { key: name, size: value.byteLength };
     },
     async get(name) {
-      reads++; assert.match(name, /^staging\/[0-9a-f-]{36}\.sealed\.json$/);
+      reads++; assert.match(name, /^(?:staging\/)?[0-9a-f-]{36}\.sealed\.json$/);
       if (readFailure) throw new Error('synthetic_sensitive_provider_failure');
+      if (!objects.has(name)) return null;
       const body = new Uint8Array(objects.get(name)); if (alteredReadback) body[body.length - 1] ^= 1;
       if (afterRead) await afterRead();
       return { size: body.byteLength, body: new Response(body).body };
     },
     async delete() { throw new Error('unexpected_delete'); }, async list() { throw new Error('unexpected_bucket_list'); },
   };
+  let metadata = { id: env.DUMMY_DOCUMENT_ID, authMode: 'password', expiresAt: Date.now() + 600000, revoked: false };
+  env.VAULT = { idFromName: id => { assert.equal(id, env.DUMMY_DOCUMENT_ID); return id; }, get: () => ({
+    async fetch(request) { metadataReads++; assert.equal(request.method, 'GET'); assert.equal(new URL(request.url).pathname, `/v1/documents/${env.DUMMY_DOCUMENT_ID}/metadata`); return Response.json(metadata); }
+  }) };
   globalThis.fetch = async url => {
     if (String(url) === `${env.ACCESS_ISSUER}/cdn-cgi/access/certs`) return Response.json({ keys: [jwk] });
     notifications++; throw new Error('unexpected_outbound');
@@ -80,6 +85,7 @@ async function fixture() {
   return { env, owner, storage, objects, pdf, input, request, list, state, writeState, makeRequest, wrap, audit, context,
     get instance() { return instance; }, restart() { instance = new VaultRegistrations(ctx, env); },
     get reads() { return reads; }, get writes() { return writes; }, get notifications() { return notifications; },
+    get metadataReads() { return metadataReads; }, get metadata() { return metadata; }, set metadata(value) { metadata = value; },
     set putFailure(value) { putFailure = value; }, set readFailure(value) { readFailure = value; },
     set alteredReadback(value) { alteredReadback = value; }, set afterRead(value) { afterRead = value; } };
 }
@@ -509,4 +515,260 @@ test('owner upload reader rejects a stalled stream without waiting for cancellat
   const request = new Request('https://vault.example.test/v1/registrations', { method: 'POST', body: stream, duplex: 'half' });
   await assert.rejects(registrationBody(request, 10), error => error.status === 408 && error.code === 'request_timeout');
   assert.equal(cancelled, true);
+});
+
+async function replacementFixture(mode = 'password', policyChanges = {}) {
+  const f = await fixture(), currentId = f.env.DUMMY_DOCUMENT_ID;
+  const currentRecord = await sealDocument({ id: currentId, bytes: utf8('%PDF-1.4\nSYNTHETIC_CURRENT_DOCUMENT'),
+    subjects: mode === 'password' ? [] : [f.owner, 'synthetic-approved-access-reader'],
+    expiresAt: Date.now() + 1200000, authMode: mode, ...(mode === 'password' ? { password: 'synthetic-dummy-password' } : {}) }, f.wrap);
+  if (Object.keys(policyChanges).length) {
+    const policy = { ...await readPolicy(currentRecord, currentId, f.wrap), ...policyChanges };
+    currentRecord.policy = await sealJSON(policy, f.wrap, `policy:v2:${currentId}`);
+  }
+  const currentBytes = utf8(JSON.stringify(currentRecord));
+  f.objects.set(`${currentId}.sealed.json`, currentBytes);
+  f.env.DUMMY_RECORD_SHA256 = createHash('sha256').update(currentBytes).digest('hex');
+  const policy = await readPolicy(currentRecord, currentId, f.wrap);
+  f.metadata = { id: currentId, authMode: mode, expiresAt: policy.expiresAt, revoked: false };
+  const candidate = preparedInput(f, { replaceOf: currentId });
+  assert.equal((await f.request({ input: candidate })).status, 201);
+  const path = `/v1/registrations/${candidate.id}/replacement`;
+  const replacementInput = { expectedRevision: 2, currentDocumentId: currentId };
+  return Object.assign(f, { candidate, currentRecord, currentBytes, path, replacementInput,
+    prepare: options => f.request({ path, input: replacementInput, ...options }),
+    review: options => f.request({ path, method: 'GET', ...options }) });
+}
+
+test('private replacement preserves the shared password and candidate PDF without changing live pins or notifying', async () => {
+  const f = await replacementFixture(), pin = [f.env.DUMMY_DOCUMENT_ID, f.env.DUMMY_RECORD_SHA256];
+  const candidateRecord = JSON.parse(Buffer.from(f.objects.get(`staging/${f.candidate.id}.sealed.json`)).toString());
+  const response = await f.prepare(); assert.equal(response.status, 201);
+  const result = await response.json(), m = result.replacement;
+  assert.deepEqual(Object.keys(m).sort(), ['version', 'status', 'id', 'currentDocumentId', 'currentRecordSha256', 'recordSha256',
+    'preparedSha256', 'sourceSha256', 'recipient', 'recipientName', 'watermarkEnabled', 'expiresAt', 'authMode', 'registryRevision', 'createdAt'].sort());
+  assert.equal(m.status, 'prepared_not_active'); assert.equal(m.id, f.candidate.id);
+  assert.equal(m.currentDocumentId, pin[0]); assert.equal(m.currentRecordSha256, pin[1]);
+  assert.equal(m.preparedSha256, f.candidate.preparedSha256); assert.equal(m.sourceSha256, f.candidate.sourceSha256);
+  assert.equal(m.authMode, 'password'); assert.equal(m.expiresAt, f.candidate.expiresAt);
+  assert.equal(m.recipientName, '株式会社ダミー 採用担当'); assert.equal(m.watermarkEnabled, true); assert.equal(m.registryRevision, 2);
+  const canonical = f.objects.get(`${m.id}.sealed.json`), finalRecord = JSON.parse(Buffer.from(canonical).toString());
+  assert.equal(createHash('sha256').update(canonical).digest('hex'), m.recordSha256);
+  assert.deepEqual(finalRecord.document, candidateRecord.document); assert.deepEqual(finalRecord.wrappedKey, candidateRecord.wrappedKey);
+  const currentPolicy = await readPolicy(f.currentRecord, pin[0], f.wrap), finalPolicy = await readPolicy(finalRecord, m.id, f.wrap);
+  assert.deepEqual(finalPolicy.subjects, []); assert.deepEqual(finalPolicy.passwordVerifier, currentPolicy.passwordVerifier);
+  assert.equal(finalPolicy.recipientName, m.recipientName); assert.equal(finalPolicy.expiresAt, m.expiresAt);
+  assert.deepEqual(await decryptDocument(finalRecord, f.wrap, finalPolicy), f.pdf);
+  assert.deepEqual(f.objects.get(`${pin[0]}.sealed.json`), f.currentBytes); assert.deepEqual([f.env.DUMMY_DOCUMENT_ID, f.env.DUMMY_RECORD_SHA256], pin);
+  const receiptBox = await f.storage.get(`encrypted-replacement:${m.id}`);
+  const receipt = await openJSON(receiptBox, f.audit, `${f.context}:replacement:v1:${m.id}`);
+  assert.ok(utf8(JSON.stringify(receipt)).byteLength <= 64 * 1024); assert.equal(Object.hasOwn(receipt, 'record'), false);
+  for (const persisted of [JSON.stringify([...f.storage.map]), Buffer.from(canonical).toString(), JSON.stringify(result)]) {
+    for (const secret of [f.owner, f.env.VAULT_WRAP_KEY, f.env.VAULT_AUDIT_KEY, 'synthetic-dummy-password', 'SYNTHETIC_PRIVATE_REGISTRATION_CONTENT',
+      currentPolicy.passwordVerifier.hash]) assert.ok(!persisted.includes(secret));
+  }
+  for (const secret of ['株式会社ダミー', '採用担当', 'passwordVerifier', 'authMode']) assert.ok(!JSON.stringify([...f.storage.map]).includes(secret));
+  const writes = [f.writes, f.storage.writes];
+  f.restart(); const reviewed = await f.review(); assert.equal(reviewed.status, 200); assert.deepEqual(await reviewed.json(), result);
+  assert.deepEqual([f.writes, f.storage.writes], writes);
+  const repeated = await f.prepare(); assert.equal(repeated.status, 200); assert.deepEqual(await repeated.json(), result);
+  assert.deepEqual([f.writes, f.storage.writes], writes); assert.equal(f.notifications, 0);
+});
+
+test('replacement keeps the exact existing Access reader subjects and does not add the owner to a password grant', async () => {
+  const f = await replacementFixture('access'); assert.equal((await f.prepare()).status, 201);
+  const record = JSON.parse(Buffer.from(f.objects.get(`${f.candidate.id}.sealed.json`)).toString()), policy = await readPolicy(record, f.candidate.id, f.wrap);
+  assert.equal(policy.authMode, 'access'); assert.deepEqual(policy.subjects, [f.owner, 'synthetic-approved-access-reader']);
+  assert.equal(Object.hasOwn(policy, 'passwordVerifier'), false); assert.equal(f.notifications, 0);
+});
+
+test('unprepared owner review does not reserve, write or publish a candidate', async () => {
+  const f = await replacementFixture(), before = [f.writes, f.storage.writes];
+  assert.deepEqual(await (await f.review()).json(), { replacement: null });
+  assert.deepEqual([f.writes, f.storage.writes], before); assert.equal(f.objects.has(`${f.candidate.id}.sealed.json`), false);
+  assert.equal(f.storage.map.has(`encrypted-replacement:${f.candidate.id}`), false); assert.equal(f.notifications, 0);
+});
+
+for (const method of ['GET', 'POST']) for (const subject of [null, 'synthetic-other-reader'])
+test(`replacement ${method} rejects ${subject ? 'another Access reader' : 'anonymous'} before body, keys and storage`, async () => {
+  const f = await replacementFixture(); let keys = 0, storageReads = 0;
+  const previous = [f.reads, f.writes, f.storage.writes, f.metadataReads];
+  for (const name of ['VAULT_WRAP_KEY', 'VAULT_AUDIT_KEY']) { const value = f.env[name]; Object.defineProperty(f.env, name, { get() { keys++; return value; } }); }
+  const get = f.storage.get.bind(f.storage); f.storage.get = async key => { storageReads++; return get(key); };
+  const request = await f.makeRequest({ path: f.path, method, subject, input: f.replacementInput });
+  const guarded = new Proxy(request, { get(target, key) { if (key === 'body') throw new Error('unauthorized_body_read'); return Reflect.get(target, key, target); } });
+  assert.equal((await f.instance.fetch(guarded)).status, subject ? 403 : 401);
+  assert.equal(keys, 0); assert.equal(storageReads, 0); assert.deepEqual([f.reads, f.writes, f.storage.writes, f.metadataReads], previous);
+});
+
+for (const [label, options, status] of [
+  ['wrong origin', { headers: { origin: 'https://other.example.test' } }, 403],
+  ['cross-site', { headers: { 'sec-fetch-site': 'cross-site' } }, 403],
+  ['wrong type', { headers: { 'content-type': 'text/plain' } }, 403],
+  ['query', { path: '/v1/registrations/11111111-1111-4111-8111-111111111111/replacement?key=other' }, 403],
+  ['oversized body', { raw: 'x'.repeat(2049) }, 400],
+  ['extra field', { input: { expectedRevision: 2, currentDocumentId: '11111111-1111-4111-8111-111111111111', authMode: 'password' } }, 400],
+  ['negative revision', { input: { expectedRevision: -1, currentDocumentId: '11111111-1111-4111-8111-111111111111' } }, 400],
+  ['missing current ID', { input: { expectedRevision: 2 } }, 400],
+  ['non-UUID current ID', { input: { expectedRevision: 2, currentDocumentId: 'other' } }, 400],
+  ['wrong current ID', { input: { expectedRevision: 2, currentDocumentId: '11111111-1111-4111-8111-111111111111' } }, 409],
+]) test(`replacement rejects ${label} before encryption, R2 and metadata reads`, async () => {
+  const f = await replacementFixture(), before = [f.reads, f.writes, f.storage.writes, f.metadataReads]; let keys = 0;
+  for (const name of ['VAULT_WRAP_KEY', 'VAULT_AUDIT_KEY']) { const value = f.env[name]; Object.defineProperty(f.env, name, { get() { keys++; return value; } }); }
+  assert.equal((await f.prepare(options)).status, status); assert.equal(keys, 0);
+  assert.deepEqual([f.reads, f.writes, f.storage.writes, f.metadataReads], before);
+});
+
+test('a stale replacement revision fails before reading either encrypted PDF', async () => {
+  const f = await replacementFixture(), before = [f.reads, f.writes, f.storage.writes];
+  const response = await f.prepare({ input: { ...f.replacementInput, expectedRevision: 0 } }); assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: 'registration_changed' }); assert.deepEqual([f.reads, f.writes, f.storage.writes], before);
+});
+
+for (const change of [entry => { for (const field of ['recipient', 'watermarkEnabled', 'sourceSha256', 'preparedSha256', 'preparationVersion']) delete entry[field]; },
+  entry => { entry.replaceOf = null; }, entry => { entry.expiresAt = 1; }])
+test('ineligible or expired candidates cannot create a replacement receipt or object', async () => {
+  const f = await replacementFixture(), state = await f.state(); change(state.documents[0]); await f.writeState(state);
+  const before = [f.writes, f.storage.writes]; const response = await f.prepare(); assert.ok([403, 409].includes(response.status));
+  assert.deepEqual([f.writes, f.storage.writes], before); assert.equal(f.storage.map.has(`encrypted-replacement:${f.candidate.id}`), false);
+});
+
+for (const object of ['current', 'candidate']) test(`a changed ${object} encrypted record cannot be prepared`, async () => {
+  const f = await replacementFixture(), key = object === 'current' ? `${f.env.DUMMY_DOCUMENT_ID}.sealed.json` : `staging/${f.candidate.id}.sealed.json`;
+  const body = f.objects.get(key); body[body.length - 1] ^= 1;
+  const before = [f.writes, f.storage.writes]; const response = await f.prepare(); assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: 'replacement_changed' }); assert.deepEqual([f.writes, f.storage.writes], before);
+});
+
+test('the actual candidate plaintext must match its prepared PDF hash', async () => {
+  const f = await replacementFixture(), state = await f.state(); state.documents[0].preparedSha256 = 'c'.repeat(64); await f.writeState(state);
+  const before = [f.writes, f.storage.writes]; assert.equal((await f.prepare()).status, 409);
+  assert.deepEqual([f.writes, f.storage.writes], before); assert.equal(f.notifications, 0);
+});
+
+for (const changes of [{ subjects: ['synthetic-other-reader'] }, { revoked: true }, { recipientName: '別の開示先' }, { expiresAt: Date.now() + 3600000 }])
+test('candidate policy must match the registered owner-only prepared candidate', async () => {
+  const f = await replacementFixture(), key = `staging/${f.candidate.id}.sealed.json`, record = JSON.parse(Buffer.from(f.objects.get(key)).toString());
+  const policy = { ...await readPolicy(record, f.candidate.id, f.wrap), ...changes };
+  record.policy = await sealJSON(policy, f.wrap, `policy:v2:${f.candidate.id}`);
+  const bytes = utf8(JSON.stringify(record)); f.objects.set(key, bytes);
+  const state = await f.state(); state.documents[0].recordSha256 = createHash('sha256').update(bytes).digest('hex'); await f.writeState(state);
+  const before = [f.writes, f.storage.writes]; assert.equal((await f.prepare()).status, 403); assert.deepEqual([f.writes, f.storage.writes], before);
+});
+
+for (const changes of [{ revoked: true }, { expiresAt: 1 }]) test('revoked or expired sealed reader grants cannot be copied', async () => {
+  const f = await replacementFixture('password', changes), before = [f.writes, f.storage.writes];
+  assert.equal((await f.prepare()).status, 403); assert.deepEqual([f.writes, f.storage.writes], before);
+});
+
+for (const changes of [{ revoked: true }, { expiresAt: 1 }, { id: crypto.randomUUID() }, { authMode: 'access' }])
+test('effective owner metadata must still allow the current reader grant', async () => {
+  const f = await replacementFixture(); f.metadata = { ...f.metadata, ...changes }; const before = [f.writes, f.storage.writes];
+  assert.equal((await f.prepare()).status, 403); assert.deepEqual([f.writes, f.storage.writes], before);
+});
+
+test('canonical collision cannot overwrite another record or produce a successful review manifest', async () => {
+  const f = await replacementFixture(), key = `${f.candidate.id}.sealed.json`, original = utf8('SYNTHETIC_COLLIDING_ENCRYPTED_OBJECT');
+  f.objects.set(key, original); const before = f.writes;
+  assert.equal((await f.prepare()).status, 409); assert.deepEqual(f.objects.get(key), original); assert.equal(f.writes, before);
+  assert.equal((await f.review()).status, 409); assert.equal(f.notifications, 0);
+});
+
+test('uncertain canonical writes retain one encrypted receipt and recover with the same immutable bytes', async () => {
+  const f = await replacementFixture(); f.putFailure = true; assert.equal((await f.prepare()).status, 503);
+  const box = await f.storage.get(`encrypted-replacement:${f.candidate.id}`), receipt = await openJSON(box, f.audit, `${f.context}:replacement:v1:${f.candidate.id}`);
+  assert.ok(receipt.recordSha256); assert.deepEqual(await (await f.review()).json(), { replacement: null });
+  const durableWrites = f.storage.writes; f.restart(); f.putFailure = false;
+  const response = await f.prepare(); assert.equal(response.status, 200); assert.equal((await response.json()).replacement.recordSha256, receipt.recordSha256);
+  assert.equal(f.storage.writes, durableWrites); assert.equal(f.notifications, 0);
+});
+
+test('failed durable receipt reservation performs no canonical R2 write', async () => {
+  const f = await replacementFixture(); f.storage.failWrite = true; const before = f.writes;
+  assert.equal((await f.prepare()).status, 503); assert.equal(f.writes, before); assert.equal(f.objects.has(`${f.candidate.id}.sealed.json`), false);
+});
+
+test('the registration CAS is checked after encrypted source reads and before preparing a canonical object', async () => {
+  const f = await replacementFixture(); let changed = false;
+  f.afterRead = async () => { if (changed) return; changed = true; const state = await f.state();
+    const extra = f.input(); state.documents.push({ id: extra.id, createdAt: Date.now(), expiresAt: extra.expiresAt,
+      size: f.pdf.length, replaceOf: null, status: 'private', fileName: extra.fileName, recordSha256: 'b'.repeat(64) }); state.revision += 2; await f.writeState(state); };
+  const before = [f.writes, f.storage.writes]; assert.equal((await f.prepare()).status, 409); assert.deepEqual([f.writes, f.storage.writes], before);
+  assert.equal(f.objects.has(`${f.candidate.id}.sealed.json`), false);
+});
+
+test('pin drift during preparation cannot reserve or write a new record', async () => {
+  const f = await replacementFixture(); let changed = false;
+  f.afterRead = async () => { if (changed) return; changed = true; f.env.DUMMY_RECORD_SHA256 = 'd'.repeat(64); };
+  const before = [f.writes, f.storage.writes]; assert.equal((await f.prepare()).status, 409); assert.deepEqual([f.writes, f.storage.writes], before);
+});
+
+test('registry historical rows survive actual pin rotation without allowing arbitrary replacement targets', async () => {
+  const f = await replacementFixture(), response = await f.prepare(); assert.equal(response.status, 201);
+  const manifest = (await response.json()).replacement;
+  f.env.DUMMY_DOCUMENT_ID = manifest.id; f.env.DUMMY_RECORD_SHA256 = manifest.recordSha256; f.restart();
+  const list = await f.list(); assert.equal(list.documents[0].id, manifest.id); assert.equal(list.documents[0].replaceOf, manifest.currentDocumentId);
+  assert.equal((await f.prepare()).status, 409);
+  const input = f.input({ expectedRevision: 2, replaceOf: manifest.currentDocumentId }); assert.equal((await f.request({ input })).status, 400);
+  const valid = f.input({ expectedRevision: 2, replaceOf: manifest.id }); assert.equal((await f.request({ input: valid })).status, 201);
+  assert.equal((await f.list()).documents.length, 2); assert.equal(f.notifications, 0);
+});
+
+test('an uncertain receipt can resume after another registration advances the registry', async () => {
+  const f = await replacementFixture(); f.putFailure = true; assert.equal((await f.prepare()).status, 503);
+  const receipt = await openJSON(await f.storage.get(`encrypted-replacement:${f.candidate.id}`), f.audit, `${f.context}:replacement:v1:${f.candidate.id}`);
+  f.putFailure = false; assert.equal((await f.request({ input: f.input({ expectedRevision: 2 }) })).status, 201);
+  const before = f.storage.writes;
+  const resumed = await f.prepare({ input: { ...f.replacementInput, expectedRevision: 4 } }); assert.equal(resumed.status, 200);
+  assert.equal((await resumed.json()).replacement.recordSha256, receipt.recordSha256); assert.equal(f.storage.writes, before);
+  const writes = f.writes; const repeated = await f.prepare({ input: { ...f.replacementInput, expectedRevision: 4 } });
+  assert.equal(repeated.status, 200); assert.equal(f.writes, writes); assert.equal(f.notifications, 0);
+});
+
+test('one MiB replacement keeps its receipt small and the canonical PDF encrypted', async () => {
+  const f = await replacementFixture(), bytes = new Uint8Array(MAX_PDF_BYTES).fill(65); bytes.set(utf8('%PDF-'));
+  const record = await sealDocument({ id: f.candidate.id, bytes, subjects: [f.owner], expiresAt: f.candidate.expiresAt,
+    authMode: 'access', recipientName: '株式会社ダミー 採用担当' }, f.wrap), encrypted = utf8(JSON.stringify(record));
+  f.objects.set(`staging/${f.candidate.id}.sealed.json`, encrypted);
+  const state = await f.state(); state.documents[0].size = bytes.byteLength;
+  state.documents[0].recordSha256 = createHash('sha256').update(encrypted).digest('hex');
+  state.documents[0].preparedSha256 = createHash('sha256').update(bytes).digest('hex'); await f.writeState(state);
+  const response = await f.prepare(); assert.equal(response.status, 201);
+  const box = await f.storage.get(`encrypted-replacement:${f.candidate.id}`); assert.ok(utf8(JSON.stringify(box)).byteLength < 4096);
+  const manifest = (await response.json()).replacement;
+  const final = JSON.parse(Buffer.from(f.objects.get(`${f.candidate.id}.sealed.json`)).toString()), policy = await readPolicy(final, f.candidate.id, f.wrap);
+  assert.deepEqual(await decryptDocument(final, f.wrap, policy), bytes); assert.equal(manifest.preparedSha256, state.documents[0].preparedSha256);
+  assert.equal(f.notifications, 0);
+});
+
+for (const resource of ['R2 response', 'R2 body', 'metadata response', 'metadata body'])
+test(`replacement ${resource} has a five-second deadline and does not prepare after timeout`, async t => {
+  const f = await replacementFixture(), originalTimer = globalThis.setTimeout, armed = [];
+  t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => { armed.push(delay); return originalTimer(callback, delay === 5000 ? 10 : delay, ...args); });
+  let cancelled = false;
+  const stalledBody = () => new ReadableStream({ pull: () => new Promise(() => {}), cancel() { cancelled = true; return new Promise(() => {}); } });
+  if (resource === 'R2 response') f.env.VAULT_DOCUMENTS.get = () => new Promise(() => {});
+  if (resource === 'R2 body') f.env.VAULT_DOCUMENTS.get = async () => ({ size: 100, body: stalledBody() });
+  if (resource === 'metadata response') f.env.VAULT.get = () => ({ fetch: () => new Promise(() => {}) });
+  if (resource === 'metadata body') f.env.VAULT.get = () => ({ fetch: async () => new Response(stalledBody()) });
+  const before = [f.writes, f.storage.writes];
+  try {
+    const response = await f.prepare(); assert.equal(response.status, 408); assert.deepEqual(await response.json(), { error: 'request_timeout' });
+    assert.ok(armed.includes(5000)); assert.deepEqual([f.writes, f.storage.writes], before);
+    if (resource.endsWith('body')) assert.equal(cancelled, true);
+  } finally { t.mock.restoreAll(); }
+});
+
+test('oversized owner metadata fails before a durable receipt or canonical write', async () => {
+  const f = await replacementFixture(); f.env.VAULT.get = () => ({ fetch: async () => Response.json({ ...f.metadata, extra: 'x'.repeat(4096) }) });
+  const before = [f.writes, f.storage.writes]; assert.equal((await f.prepare()).status, 400); assert.deepEqual([f.writes, f.storage.writes], before);
+});
+
+test('a malformed encrypted receipt fails closed and cannot be regenerated or overwritten', async () => {
+  const f = await replacementFixture(); assert.equal((await f.prepare()).status, 201);
+  const key = `encrypted-replacement:${f.candidate.id}`, context = `${f.context}:replacement:v1:${f.candidate.id}`;
+  const receipt = await openJSON(await f.storage.get(key), f.audit, context); receipt.password = 'synthetic-forbidden-secret';
+  f.storage.map.set(key, await sealJSON(receipt, f.audit, context)); const before = [f.writes, f.storage.writes];
+  for (const method of ['GET', 'POST']) { const response = await f.prepare({ method }); assert.equal(response.status, 503); assert.deepEqual(await response.json(), { error: 'unavailable' }); }
+  assert.deepEqual([f.writes, f.storage.writes], before); assert.equal(f.notifications, 0);
 });

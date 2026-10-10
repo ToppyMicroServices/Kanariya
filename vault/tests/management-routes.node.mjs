@@ -42,12 +42,29 @@ const extraAssets = [
 const surfaces = [...extraAssets.map(([path]) => path),'/v1/admin', '/v1/admin/assets/admin.js', '/v1/admin/assets/admin.css', '/v1/admin/assets/management.js', '/v1/management'];
 
 test('owner administration surfaces reject anonymous, password-cookie and non-owner identities', async () => {
-  for (const path of [...surfaces, '/v1/registrations']) {
+  for (const path of [...surfaces, '/v1/registrations', `/v1/registrations/${crypto.randomUUID()}/replacement`]) {
     assert.equal((await request(path)).status, 401, path);
     assert.equal((await request(path, null, { headers: { cookie: '__Host-fake=synthetic',
       'cf-access-authenticated-user-email': 'owner@example.test' } })).status, 401, path);
     assert.equal((await request(path, 'synthetic-reader')).status, 403, path);
   }
+});
+
+test('replacement review routes forward only canonical candidate IDs after owner authentication', async () => {
+  const id = crypto.randomUUID(), path = `/v1/registrations/${id}/replacement`, calls = [];
+  const routed = { ...Object.fromEntries(['PUBLIC_ORIGIN', 'ACCESS_ISSUER', 'ACCESS_AUDIENCE', 'VAULT_OWNER_SUB', 'DUMMY_DOCUMENT_ID', 'DUMMY_RECORD_SHA256', 'PASSWORD_READER_ENABLED'].map(name => [name, env[name]])),
+    VAULT: { idFromName(name) { assert.equal(name, 'owner-registration:v1'); return name; }, get() { return { async fetch(request) { calls.push(request.url); return Response.json({ replacement: null }); } }; } } };
+  // Avoid enumerating the guarded document/key getters on the original fixture.
+  const headers = { 'cf-access-jwt-assertion': await token(env.VAULT_OWNER_SUB) };
+  for (const method of ['GET', 'POST']) {
+    const response = await worker.fetch(new Request(env.PUBLIC_ORIGIN + path, { method, headers }), routed);
+    assert.equal(response.status, 200);
+  }
+  assert.equal(calls.length, 2);
+  for (const invalid of [path + '/', path.replace(id, id.toUpperCase()), path.replace(id, 'a'.repeat(36)), path + '?other=1']) {
+    assert.notEqual((await worker.fetch(new Request(env.PUBLIC_ORIGIN + invalid, { headers }), routed)).status, 200);
+  }
+  assert.equal(calls.length, 2);
 });
 
 test('owner page and assets return exact UI with private headers and no document access', async () => {

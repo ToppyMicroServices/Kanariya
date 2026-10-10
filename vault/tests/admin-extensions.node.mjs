@@ -10,7 +10,8 @@ const now = Date.UTC(2026, 9, 10, 0, 0), future = now + 24 * 3600000;
 const names = ['registration-panel', 'registration-form', 'registration-file', 'registration-expiry', 'registration-replace',
   'recipient-type', 'recipient-organization', 'recipient-person', 'person-label', 'organization-field', 'registration-watermark',
   'prepare-pdf', 'registration-review', 'registration-summary', 'registration-preview',
-  'register-pdf', 'registration-status', 'registration-reload', 'registration-list', 'contacts-panel', 'contacts-form',
+  'register-pdf', 'registration-status', 'registration-reload', 'registration-list', 'replacement-review', 'replacement-summary',
+  'replacement-prepare', 'replacement-reload', 'replacement-save', 'replacement-status', 'contacts-panel', 'contacts-form',
   'contact-emails', 'save-contacts', 'contacts-status', 'contacts-reload', 'logs-panel', 'logs-status', 'log-rows', 'logs-reload', 'logs-next'];
 function deferred() {
   let resolve, reject;
@@ -26,24 +27,36 @@ function documentSummary(overrides = {}) {
   return { id: uploadId, status: 'private', fileName: 'synthetic.pdf', size: 123,
     createdAt: now, expiresAt: future, replaceOf: null, ...overrides };
 }
+function replacementCandidate(overrides = {}) {
+  return documentSummary({ replaceOf: id, recipient: { type: 'organization', organizationName: '株式会社ダミー', personName: null },
+    watermarkEnabled: true, sourceSha256: 'a'.repeat(64), preparedSha256: 'b'.repeat(64), preparationVersion: 1, ...overrides });
+}
+function replacementManifest(overrides = {}) {
+  return { version: 1, status: 'prepared_not_active', id: uploadId, currentDocumentId: id,
+    currentRecordSha256: 'c'.repeat(64), recordSha256: 'd'.repeat(64), preparedSha256: 'b'.repeat(64), sourceSha256: 'a'.repeat(64),
+    recipient: replacementCandidate().recipient, recipientName: '株式会社ダミー', watermarkEnabled: true, expiresAt: future,
+    authMode: 'password', registryRevision: 2, createdAt: now, ...overrides };
+}
 function browser(options = {}) {
   function element() {
     return { textContent: '', value: '', disabled: false, hidden: false, open: false, checked: false, files: [], children: [],
       listeners: new Map(), addEventListener(event, callback) { this.listeners.set(event, callback); },
       replaceChildren(...children) { this.children = children; }, append(...children) { this.children.push(...children); },
+      click() { this.clicked = true; return this.listeners.get('click')?.(); }, remove() { this.removed = true; },
       set innerHTML(_) { throw new Error('untrusted_html_sink'); } };
   }
-  const elements = Object.fromEntries(names.map(name => [name, element()])), events = new Map(), requests = [], timers = new Map(), preparations = [], previews = [], clears = [];
+  const elements = Object.fromEntries(names.map(name => [name, element()])), events = new Map(), requests = [], timers = new Map(), preparations = [], previews = [], clears = [], downloadBlobs = [], revokedDownloads = [], body = element();
   elements['recipient-type'].value = 'organization'; elements['registration-watermark'].checked = true;
-  elements['registration-review'].hidden = true;
+  elements['registration-review'].hidden = true; elements['replacement-review'].hidden = true;
   let timerId = 0;
   const state = { contacts: { revision: 0, emails: [] }, registry: { revision: 0, pending: 0, documents: [] },
-    logs: { events: [], nextCursor: null, retentionDays: 30 }, ...options.state };
+    logs: { events: [], nextCursor: null, retentionDays: 30 }, replacement: null, ...options.state };
   class BrowserDate extends Date { static now() { return now; } }
   const imports = 'import { prepareRegistration, showRegistrationPreview, clearRegistrationPreview } from "/v1/admin/assets/registration-preview.js";\nimport { normalizeRecipientName } from "/v1/admin/assets/recipient.js";\n';
   assert.ok(js.startsWith(imports));
   vm.runInNewContext(js.slice(imports.length), {
-    document: { getElementById: name => elements[name], createElement: () => element() },
+    document: { getElementById: name => elements[name], createElement: () => element(), body },
+    Blob, URL: { createObjectURL(blob) { downloadBlobs.push(blob); return 'blob:synthetic-' + downloadBlobs.length; }, revokeObjectURL(url) { revokedDownloads.push(url); } },
     Date: BrowserDate, Intl, Uint8Array, TextDecoder, AbortController, btoa,
     crypto: { randomUUID: () => uploadId },
     normalizeRecipientName,
@@ -72,6 +85,10 @@ function browser(options = {}) {
         return json(state.contacts);
       }
       if (path.endsWith('/logs')) return json(state.logs);
+      if (path === `/v1/registrations/${uploadId}/replacement`) {
+        if (request.method === 'POST') state.replacement = replacementManifest();
+        return json({ replacement: state.replacement }, request.method === 'POST' ? 201 : 200);
+      }
       if (path === '/v1/registrations') {
         if (request.method === 'POST') {
           const input = JSON.parse(request.body);
@@ -87,9 +104,10 @@ function browser(options = {}) {
       throw new Error('unexpected_request');
     },
   });
-  return { elements, requests, events, state, timers, preparations, previews, clears,
+  return { elements, requests, events, state, timers, preparations, previews, clears, downloadBlobs, revokedDownloads, body,
     async open(section) { const panel = elements[section + '-panel']; panel.open = true; panel.listeners.get('toggle')(); await settled(); },
     click(name) { return elements[name].listeners.get('click')(); },
+    async review(index = 0) { elements['registration-list'].children[index].children[0].click(); await settled(); },
     submit(section) { return elements[section + '-form'].listeners.get('submit')({ preventDefault() {} }); },
     event(name, value = {}) { return events.get(name)(value); },
     select(file = pdfFile()) { elements['registration-file'].files = [file]; elements['registration-expiry'].value = '2026-10-11T09:00'; elements['recipient-organization'].value = '株式会社ダミー'; return file; },
@@ -486,4 +504,173 @@ test('owner extension controls are collapsed, labelled and free from inline scri
   assert.doesNotMatch(html, /<script|\son\w+=|\sstyle=|type="password"|mailto:/i);
   assert.match(html, /登録したPDFは非公開です/); assert.match(html, /本人を確認するものではありません/);
   assert.match(html, /<th scope="col">日時（日本時間）/); assert.match(html, /role="status" aria-live="polite"/);
+});
+
+test('replacement candidate review reads status before an explicit private preparation', async () => {
+  const ui = browser({ state: { registry: { revision: 2, pending: 0, documents: [replacementCandidate()] } } });
+  await settled(); await ui.open('registration');
+  assert.equal(ui.elements['replacement-review'].hidden, true); assert.equal(ui.posts().length, 0);
+  assert.equal(ui.elements['registration-list'].children[0].children[0].textContent, '差し替え内容を確認');
+  await ui.review();
+  assert.equal(ui.requests.at(-1).path, `/v1/registrations/${uploadId}/replacement`);
+  assert.equal(ui.requests.at(-1).request.method, 'GET'); assert.equal(ui.posts().length, 0);
+  assert.equal(ui.elements['replacement-review'].hidden, false); assert.equal(ui.elements['replacement-prepare'].disabled, false);
+  assert.match(ui.elements['replacement-summary'].textContent, /株式会社ダミー.*透かし：あり.*閲覧期限：2026\/10\/11 09:00/);
+  await ui.click('replacement-prepare'); await settled();
+  assert.equal(ui.posts().length, 1); assert.equal(ui.posts()[0].path, `/v1/registrations/${uploadId}/replacement`);
+  assert.deepEqual(JSON.parse(ui.posts()[0].request.body), { expectedRevision: 2, currentDocumentId: id });
+  assert.equal(ui.elements['replacement-status'].textContent, '公開前の確認待ち');
+  assert.equal(ui.elements['replacement-prepare'].hidden, true); assert.equal(ui.elements['replacement-save'].hidden, false);
+  assert.doesNotMatch(ui.elements['replacement-status'].textContent, /公開済み|共有しました/);
+  assert.ok(ui.requests.every(({ path }) => !/\/open$|\/revoke$|\/session$/.test(path)));
+});
+
+test('an existing prepared replacement can save only a nonpersonal review plan', async () => {
+  const ui = browser({ state: { registry: { revision: 2, pending: 0, documents: [replacementCandidate()] }, replacement: replacementManifest() } });
+  await settled(); await ui.open('registration'); await ui.review();
+  assert.equal(ui.posts().length, 0); assert.equal(ui.elements['replacement-status'].textContent, '公開前の確認待ち');
+  await ui.click('replacement-save');
+  assert.equal(ui.downloadBlobs.length, 1); assert.equal(ui.body.children[0].download, `kanariya-replacement-${uploadId}.json`);
+  assert.equal(ui.body.children[0].clicked, true); assert.equal(ui.body.children[0].removed, true);
+  const planText = await ui.downloadBlobs[0].text(), plan = JSON.parse(planText);
+  assert.deepEqual(Object.keys(plan), ['version', 'status', 'id', 'currentDocumentId', 'currentRecordSha256', 'recordSha256',
+    'preparedSha256', 'sourceSha256', 'watermarkEnabled', 'expiresAt', 'authMode', 'registryRevision', 'createdAt']);
+  assert.doesNotMatch(planText, /株式会社|recipient|fileName|emails|passwordVerifier|secret|pdfBase64/);
+  assert.equal(plan.status, 'prepared_not_active'); assert.equal(plan.currentDocumentId, id);
+  ui.event('pagehide');
+  assert.deepEqual(ui.revokedDownloads, ['blob:synthetic-1']);
+  assert.equal(ui.elements['replacement-summary'].textContent, ''); assert.equal(ui.elements['replacement-review'].hidden, true);
+  await ui.click('replacement-save'); assert.equal(ui.downloadBlobs.length, 1);
+});
+
+test('replacement mutations remain disabled while a preparation is pending', async () => {
+  const gate = deferred(), ui = browser({ fetch(path, request) {
+    if (path === '/v1/management') return json({ documentId: id });
+    if (path === '/v1/registrations') return json({ revision: 2, pending: 0, documents: [replacementCandidate()] });
+    return request.method === 'POST' ? gate.promise : json({ replacement: null });
+  } });
+  await settled(); await ui.open('registration'); await ui.review();
+  const pending = ui.click('replacement-prepare');
+  await ui.click('replacement-prepare'); ui.click('replacement-reload'); await ui.review(); ui.select(); await ui.submit('registration');
+  assert.equal(ui.posts().length, 1); assert.equal(ui.elements['replacement-prepare'].disabled, true);
+  assert.equal(ui.elements['registration-reload'].disabled, true); assert.equal(ui.elements['prepare-pdf'].disabled, true);
+  gate.resolve(json({ replacement: replacementManifest() }, 201)); await pending;
+  assert.equal(ui.elements['replacement-status'].textContent, '公開前の確認待ち');
+  assert.equal(ui.elements['registration-reload'].disabled, false);
+});
+
+test('unknown replacement preparation requires a confirming GET and never automatically repeats POST', async () => {
+  let prepared = false;
+  const ui = browser({ fetch(path, request) {
+    if (path === '/v1/management') return json({ documentId: id });
+    if (path === '/v1/registrations') return json({ revision: 2, pending: 0, documents: [replacementCandidate()] });
+    if (request.method === 'POST') throw new Error('PRIVATE_NETWORK_FAILURE');
+    return json({ replacement: prepared ? replacementManifest() : null });
+  } });
+  await settled(); await ui.open('registration'); await ui.review(); await ui.click('replacement-prepare');
+  assert.equal(ui.posts().length, 1); assert.match(ui.elements['replacement-status'].textContent, /準備結果を確認できません/);
+  assert.equal(ui.elements['replacement-prepare'].disabled, true); assert.equal(ui.elements['replacement-save'].hidden, true);
+  await ui.click('replacement-prepare'); assert.equal(ui.posts().length, 1);
+  ui.click('replacement-reload'); await settled();
+  assert.equal(ui.elements['replacement-prepare'].disabled, true); await ui.click('replacement-prepare'); assert.equal(ui.posts().length, 1);
+  prepared = true; ui.click('replacement-reload'); await settled();
+  assert.equal(ui.elements['replacement-status'].textContent, '公開前の確認待ち'); assert.equal(ui.posts().length, 1);
+  assert.equal(ui.elements['replacement-save'].hidden, false); assert.doesNotMatch(ui.elements['replacement-status'].textContent, /PRIVATE_NETWORK_FAILURE/);
+});
+
+for (const status of [401, 403, 409]) test(`replacement preparation status ${status} requires an explicit status read before a retry`, async () => {
+  const ui = browser({ fetch(path, request) {
+    if (path === '/v1/management') return json({ documentId: id });
+    if (path === '/v1/registrations') return json({ revision: 2, pending: 0, documents: [replacementCandidate()] });
+    return request.method === 'POST' ? json({ error: 'PRIVATE_REJECTED_DETAIL' }, status) : json({ replacement: null });
+  } });
+  await settled(); await ui.open('registration'); await ui.review(); await ui.click('replacement-prepare');
+  assert.equal(ui.elements['replacement-prepare'].disabled, true); assert.equal(ui.elements['replacement-save'].hidden, true);
+  assert.match(ui.elements['replacement-status'].textContent, status === 409 ? /変更されています/ : /管理者ログイン/);
+  await ui.click('replacement-prepare'); assert.equal(ui.posts().length, 1);
+  ui.click('replacement-reload'); await settled(); assert.equal(ui.elements['replacement-prepare'].disabled, false);
+  assert.doesNotMatch(ui.elements['replacement-status'].textContent, /PRIVATE_REJECTED_DETAIL/);
+});
+
+test('a replacement status read failure can be retried without causing or enabling a mutation', async () => {
+  let failing = true;
+  const ui = browser({ fetch(path) {
+    if (path === '/v1/management') return json({ documentId: id });
+    if (path === '/v1/registrations') return json({ revision: 2, pending: 0, documents: [replacementCandidate()] });
+    if (failing) throw new Error('PRIVATE_READ_FAILURE');
+    return json({ replacement: null });
+  } });
+  await settled(); await ui.open('registration'); await ui.review();
+  assert.equal(ui.elements['replacement-prepare'].disabled, true); assert.equal(ui.posts().length, 0);
+  await ui.click('replacement-prepare'); assert.equal(ui.posts().length, 0);
+  failing = false; ui.click('replacement-reload'); await settled();
+  assert.equal(ui.elements['replacement-prepare'].disabled, false); assert.equal(ui.posts().length, 0);
+});
+
+test('replacement review rejects malformed or unrelated manifests without exporting them', async () => {
+  for (const overrides of [{ currentDocumentId: uploadId }, { id }, { status: 'active' }, { currentRecordSha256: 'bad' },
+    { sourceSha256: 'f'.repeat(64) }, { watermarkEnabled: false }, { recipientName: '別人' }, { expiresAt: future + 1 },
+    { passwordVerifier: 'SHOULD_NOT_APPEAR' }, { recipient: { type: 'person', organizationName: null, personName: '別人' } }]) {
+    const ui = browser({ state: { registry: { revision: 2, pending: 0, documents: [replacementCandidate()] }, replacement: replacementManifest(overrides) } });
+    await settled(); await ui.open('registration'); await ui.review();
+    assert.equal(ui.elements['replacement-save'].hidden, true); assert.equal(ui.elements['replacement-prepare'].disabled, true);
+    assert.match(ui.elements['replacement-status'].textContent, /確認できません/);
+    await ui.click('replacement-save'); assert.equal(ui.downloadBlobs.length, 0);
+    assert.doesNotMatch(ui.elements['replacement-summary'].textContent, /SHOULD_NOT_APPEAR|別人/);
+    assert.equal(ui.posts().length, 0);
+  }
+});
+
+test('historical candidates and the currently shared registration remain visible without preparation actions', async () => {
+  const historicalId = '42a9a642-b070-4b18-a9a2-e7c11e4fb227';
+  const ui = browser({ state: { registry: { revision: 6, pending: 0, documents: [
+    replacementCandidate({ replaceOf: historicalId }), replacementCandidate({ id, replaceOf: historicalId }), replacementCandidate(),
+  ] } } });
+  await settled(); await ui.open('registration');
+  const rows = ui.elements['registration-list'].children;
+  assert.equal(rows.length, 3); assert.equal(rows[0].children.length, 0); assert.equal(rows[1].children.length, 0);
+  assert.match(rows[0].textContent, /非公開・差し替え候補/); assert.match(rows[1].textContent, /共有中/);
+  assert.doesNotMatch(rows[1].textContent, /差し替え候補/); assert.equal(rows[2].children[0].textContent, '差し替え内容を確認');
+  assert.equal(ui.posts().length, 0);
+});
+
+for (const stage of ['GET', 'POST']) test(`pagehide aborts a replacement ${stage} and late responses cannot restore private review metadata`, async () => {
+  const gate = deferred();
+  const ui = browser({ fetch(path, request) {
+    if (path === '/v1/management') return json({ documentId: id });
+    if (path === '/v1/registrations') return json({ revision: 2, pending: 0, documents: [replacementCandidate()] });
+    return request.method === stage ? gate.promise : json({ replacement: null });
+  } });
+  await settled(); await ui.open('registration');
+  if (stage === 'POST') await ui.review();
+  const pending = stage === 'POST' ? ui.click('replacement-prepare') : ui.review(); await settled();
+  const request = ui.requests.at(-1).request; ui.event('pagehide'); assert.equal(request.signal.aborted, true);
+  gate.resolve(json({ replacement: replacementManifest() })); await pending; await settled();
+  assert.equal(ui.elements['replacement-review'].hidden, true); assert.equal(ui.elements['replacement-summary'].textContent, '');
+  assert.equal(ui.elements['replacement-save'].hidden, true); assert.equal(ui.downloadBlobs.length, 0);
+  ui.event('pageshow', { persisted: true }); await settled();
+  assert.equal(ui.elements['replacement-review'].hidden, true); assert.equal(ui.posts().length, stage === 'POST' ? 1 : 0);
+});
+
+for (const stage of ['GET', 'POST']) test(`a stale replacement ${stage} cannot finish a newer status read after restoration`, async () => {
+  const stale = deferred(), current = deferred(); let reads = 0;
+  const ui = browser({ fetch(path, request) {
+    if (path === '/v1/management') return json({ documentId: id });
+    if (path === '/v1/registrations') return json({ revision: 2, pending: 0, documents: [replacementCandidate()] });
+    if (request.method === 'POST') return stale.promise;
+    if (++reads === 1) return stage === 'GET' ? stale.promise : json({ replacement: null });
+    return current.promise;
+  } });
+  await settled(); await ui.open('registration'); await ui.review();
+  const oldOperation = stage === 'POST' ? ui.click('replacement-prepare') : null; await settled();
+  ui.event('pagehide'); ui.event('pageshow', { persisted: true }); await settled(); await ui.review();
+  assert.equal(ui.elements['replacement-reload'].disabled, true); assert.equal(ui.elements['registration-reload'].disabled, true);
+  stale.resolve(json({ replacement: replacementManifest() })); if (oldOperation) await oldOperation; await settled();
+  assert.equal(ui.elements['replacement-reload'].disabled, true); assert.equal(ui.elements['replacement-save'].hidden, true);
+  assert.equal(ui.elements['registration-reload'].disabled, true); assert.match(ui.elements['replacement-status'].textContent, /確認しています/);
+  current.resolve(json({ replacement: stage === 'POST' ? null : replacementManifest() })); await settled();
+  assert.equal(ui.elements['replacement-reload'].disabled, false);
+  if (stage === 'POST') {
+    assert.equal(ui.elements['replacement-prepare'].disabled, true); await ui.click('replacement-prepare'); assert.equal(ui.posts().length, 1);
+  } else assert.equal(ui.elements['replacement-status'].textContent, '公開前の確認待ち');
 });

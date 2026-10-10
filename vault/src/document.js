@@ -113,7 +113,8 @@ export class VaultDocument {
   async fetch(request) {
     try {
       const url = new URL(request.url);
-      if (url.pathname === '/v1/registrations') return await this.registrations.fetch(request);
+      const replacement = /^\/v1\/registrations\/([0-9a-f-]{36})\/replacement$/.exec(url.pathname);
+      if (url.pathname === '/v1/registrations' || replacement && UUID.test(replacement[1])) return await this.registrations.fetch(request);
       const match = ACCESS_ROUTE.exec(url.pathname);
       if (match?.[2] === 'recipients') {
         const pin = dummyPin(this.env);

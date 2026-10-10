@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
-import { newKey, importKey, sealDocument, sealJSON, openJSON, utf8 } from "../src/crypto.js";
+import { newKey, importKey, sealDocument, sealJSON, openJSON, readPolicy, decryptDocument, utf8 } from "../src/crypto.js";
 
 const exec = promisify(execFile), root = fileURLToPath(new URL("../", import.meta.url));
 const args = parseArgs({ options: { bundle: { type: "string" }, "expected-sha": { type: "string" }, report: { type: "string" } }, allowPositionals: true });
@@ -285,6 +285,29 @@ export class RuntimeDocument extends VaultDocument {
   assert.deepEqual(await (await signed('/v1/management')).json(), { documentId: id });
   assert.equal(await (await bucket.get(`${id}.sealed.json`)).text(), recordBytes); assert.equal(notificationAttempts, 0);
   report.checks.push('replacement_candidate_remains_private_until_separate_activation');
+  const reviewPath = `/v1/registrations/${replacementId}/replacement`;
+  for (const actor of ['', subject]) {
+    assert.equal((await signed(reviewPath, { actor })).status, actor ? 403 : 401);
+    assert.equal((await signed(reviewPath, { actor, method: 'POST', body: { currentDocumentId: id, expectedRevision: replacement.revision } })).status, actor ? 403 : 401);
+  }
+  assert.deepEqual(await (await signed(reviewPath)).json(), { replacement: null });
+  assert.equal((await signed(reviewPath, { method: 'POST', body: { currentDocumentId: id, expectedRevision: replacement.revision - 1 } })).status, 409);
+  const preparedReplacementResponse = await signed(reviewPath, { method: 'POST', body: { currentDocumentId: id, expectedRevision: replacement.revision } });
+  assert.equal(preparedReplacementResponse.status, 201); privateManagementHeaders(preparedReplacementResponse);
+  const preparedReplacement = (await preparedReplacementResponse.json()).replacement;
+  assert.equal(preparedReplacement.status, 'prepared_not_active'); assert.equal(preparedReplacement.id, replacementId);
+  assert.equal(preparedReplacement.currentDocumentId, id); assert.equal(preparedReplacement.currentRecordSha256, env.DUMMY_RECORD_SHA256);
+  assert.equal(preparedReplacement.authMode, 'access'); assert.equal(preparedReplacement.preparedSha256, registrationInput.preparedSha256);
+  const preparedReplacementBytes = await (await bucket.get(`${replacementId}.sealed.json`)).text();
+  assert.equal(createHash('sha256').update(preparedReplacementBytes).digest('hex'), preparedReplacement.recordSha256);
+  const preparedReplacementRecord = JSON.parse(preparedReplacementBytes), preparedReplacementPolicy = await readPolicy(preparedReplacementRecord, replacementId, await importKey(env.VAULT_WRAP_KEY));
+  assert.deepEqual(preparedReplacementPolicy.subjects, [subject, otherSubject]);
+  assert.deepEqual(await decryptDocument(preparedReplacementRecord, await importKey(env.VAULT_WRAP_KEY), preparedReplacementPolicy), candidatePDF);
+  assert.deepEqual((await (await signed(reviewPath)).json()).replacement, preparedReplacement);
+  assert.equal((await signed(reviewPath, { method: 'POST', body: { currentDocumentId: id, expectedRevision: replacement.revision } })).status, 200);
+  assert.equal((await signed(`/v1/documents/${replacementId}/open`, { actor: subject, method: 'POST', body: { requestId: crypto.randomUUID() } })).status, 403);
+  assert.deepEqual(await (await signed('/v1/management')).json(), { documentId: id }); assert.equal(notificationAttempts, 0);
+  report.checks.push('private_replacement_preparation_preserves_access_subjects_and_current_dummy_pin');
   const expiryPath = `/v1/documents/${id}/expiry`, expiryBody = { expiresAt: sealedExpiresAt - 1000, expectedExpiresAt: sealedExpiresAt };
   assert.equal((await signed(expiryPath, { actor: "", method: "POST", body: expiryBody })).status, 401);
   assert.equal((await signed(expiryPath, { actor: subject, method: "POST", body: expiryBody })).status, 403);
@@ -441,6 +464,35 @@ export class RuntimeDocument extends VaultDocument {
   assert.ok(Number(opened.headers.get("x-vault-expires-at")) > Date.now());
   assert.ok(Number(opened.headers.get("x-vault-session-expires-at")) > Date.now());
   report.checks.push("native_scrypt_password_unlock_cookie_and_exact_pdf");
+  const passwordReplacementId = crypto.randomUUID(), passwordReplacementHash = createHash('sha256').update(pdf).digest('hex');
+  const passwordRegistered = await signed(registryPath, { method: 'POST', body: { ...registrationInput,
+    id: passwordReplacementId, pdfBase64: Buffer.from(pdf).toString('base64'), expiresAt: passwordSealedExpiresAt,
+    replaceOf: passwordId, expectedRevision: 0, preparedSha256: passwordReplacementHash, sourceSha256: passwordReplacementHash } });
+  assert.equal(passwordRegistered.status, 201); const passwordRegistry = await passwordRegistered.json();
+  // Observe completion of the earlier synthetic open before attributing effects
+  // to replacement preparation. Its queued notification can finish asynchronously.
+  let passwordBeforeReview;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    passwordBeforeReview = await (await request('status', env.VAULT_OWNER_SUB, crypto.randomUUID(), passwordId)).json();
+    if (passwordBeforeReview.pending === 0 && passwordBeforeReview.providerAccepted === 1) break;
+    await pause(100);
+  }
+  assert.equal(passwordBeforeReview.pending, 0); assert.equal(passwordBeforeReview.providerAccepted, 1);
+  const passwordReviewPath = `/v1/registrations/${passwordReplacementId}/replacement`, beforePreparationNotifications = notificationAttempts;
+  const passwordPreparedResponse = await signed(passwordReviewPath, { method: 'POST', body: { currentDocumentId: passwordId, expectedRevision: passwordRegistry.revision } });
+  assert.equal(passwordPreparedResponse.status, 201); const passwordPrepared = (await passwordPreparedResponse.json()).replacement;
+  assert.equal(passwordPrepared.authMode, 'password'); assert.equal(passwordPrepared.currentRecordSha256, passwordEnv.DUMMY_RECORD_SHA256);
+  const passwordBucket = await mf.getR2Bucket('VAULT_DOCUMENTS');
+  const passwordPreparedRecord = JSON.parse(await (await passwordBucket.get(`${passwordReplacementId}.sealed.json`)).text());
+  const currentPasswordPolicy = await readPolicy(JSON.parse(passwordRecord), passwordId, await importKey(env.VAULT_WRAP_KEY));
+  const newPasswordPolicy = await readPolicy(passwordPreparedRecord, passwordReplacementId, await importKey(env.VAULT_WRAP_KEY));
+  assert.deepEqual(newPasswordPolicy.passwordVerifier, currentPasswordPolicy.passwordVerifier);
+  assert.deepEqual(newPasswordPolicy.subjects, []); assert.deepEqual(await decryptDocument(passwordPreparedRecord, await importKey(env.VAULT_WRAP_KEY), newPasswordPolicy), pdf);
+  for (const secret of [password, JSON.stringify(currentPasswordPolicy.passwordVerifier), env.VAULT_WRAP_KEY]) assert.ok(!JSON.stringify(passwordPrepared).includes(secret));
+  assert.equal((await mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/p/${passwordReplacementId}`)).status, 403);
+  assert.deepEqual(await (await signed('/v1/management')).json(), { documentId: passwordId });
+  assert.equal(notificationAttempts, beforePreparationNotifications);
+  report.checks.push('private_replacement_preparation_preserves_password_verifier_without_exposing_secrets');
   assert.equal((await request("status", "", crypto.randomUUID(), passwordId)).status, 401);
   assert.equal((await request("open", subject, crypto.randomUUID(), passwordId)).status, 403);
   assert.equal((await shared("open", { method: "HEAD", cookie, headers: { range: "bytes=0-9" } })).status, 405);
@@ -514,7 +566,7 @@ export class RuntimeDocument extends VaultDocument {
     report.error ??= 'fixture_outbound_validation_failed'; process.exitCode = 1;
   }
   report.pass = report.status === "passed";
-  report.testCounts = { runtimeChecksExpected: 30, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
+  report.testCounts = { runtimeChecksExpected: 32, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
     bundleChecksPassed: report.checks.filter(check => check === "dry_run_bundle" || check.startsWith("frozen_")).length, totalChecksPassed: report.checks.length };
   await recordReport(); console.log(JSON.stringify(report));
 }
