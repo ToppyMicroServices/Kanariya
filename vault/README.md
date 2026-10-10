@@ -23,6 +23,30 @@ Public request bodies are limited to 2 KiB and five seconds and are read outside
 
 Both modes recheck the deadline immediately before returning plaintext. The viewer also clears canvases at the document deadline; password mode clears at session expiry and checks current authorization every 15 seconds while showing a document. Hidden pages, logout, close and navigation cancel pending display work. These controls cannot retract bytes already delivered, screenshots, saved files or an in-flight network response. A web password is separate from PDF-file encryption; the viewer does not unlock a separately password-encrypted PDF.
 
+### Document and session deadlines
+
+The owner sets `expiresAt` (epoch milliseconds) in the trusted offline preparation
+input when sealing the document. It is the document's last permitted acquisition
+time, enforced by the server on every open, including the viewer's Save action.
+The reader displays this deadline in Japan time. Password mode also displays the
+current session deadline; that session lasts at most five minutes, does not renew
+automatically, and may end before the document deadline. The reader can authenticate
+again while the document remains valid.
+
+There is no owner UI or API for editing `expiresAt`. To change the deadline, prepare
+a replacement dummy record with the desired expiry, then review and update its
+private R2 object, document UUID and exact ciphertext digest together. Use a new
+UUID, preserve the existing service keys and bindings, and verify the replacement
+before sharing its new link. The old link remains valid until its original deadline
+unless the owner explicitly revokes it. This preparation does not upload or deploy
+the replacement automatically and does not admit a real CV.
+
+Revocation stops future acquisitions in both modes. Password mode also polls
+authorization while displaying a document; Access mode does not poll revocation
+after display begins. Neither mode can recall content already received or saved.
+The visible recipient name identifies the intended recipient of a copy, rather
+than proving the identity of the person who holds the shared password.
+
 Password reader API (all responses, including errors, are `no-store`; no cross-origin CORS):
 
 | Path | Method | Effect |
@@ -118,6 +142,11 @@ named document has opened. Saving makes a fresh authenticated `POST /open`,
 with the same expiry, revocation, replay, audit and notification checks as
 viewing. Closing or hiding the page cancels a pending browser save. Legacy
 unnamed records remain viewable and do not expose this save button.
+
+Each stock-viewer display or Save request creates a decryption event, but the
+current audit/notification schema does not distinguish display from download.
+An authorized client can also retain the initial PDF response without invoking
+Save, so the service cannot guarantee an additional event for every saved copy.
 
 `sealDocument()` is a low-level trusted preparation function: its caller must
 provide the already marked PDF. The owner CLI performs the marking itself.
@@ -224,9 +253,16 @@ The display module, worker module and standard fonts are pinned to PDF.js 6.4.29
 
 Six exact renderer/font/license paths under `/pdfjs/` require the same Access and dummy-pin checks as the viewer. Assets come from this Worker, with no CDN. CSP permits a same-origin worker while retaining the existing script/connect restrictions; it does not enable inline scripts or dynamic evaluation. The viewer uses glyph outlines, disables XFA and WASM, and does not install PDF scripting, link, attachment, form or annotation UI.
 
-The current asset set supports the reviewed dummy's Helvetica and Helvetica-Bold text/vector content. Other fonts, CMaps, scanned images and general CV PDFs are not certified by this check. Canvas pages have no selectable/searchable text or screen-reader text layer. Real-CV admission remains disabled independently of this viewer change.
+The current asset set supports the reviewed dummy's Helvetica and Helvetica-Bold text/vector content. Other fonts, CMaps, scanned images and general CV PDFs are not certified by this check. Each canvas page now has a keyboard-accessible **読み上げ用テキスト** disclosure containing plain text extracted by the same pinned PDF.js renderer. The canvas is hidden from assistive technology to avoid duplicate page announcements. Text is inserted with `textContent`, never parsed as HTML, and is cleared with the rendered page at close, expiry, logout, hiding or navigation. Focus returns to the available Open control or password input after those state changes and moves to Open after authentication.
+
+The text alternative preserves PDF.js extraction order and end-of-line markers; it does not reconstruct tagged headings, tables, columns or images. It performs no OCR. Pages with no extractable text say so and ask the reader to request a text version from the owner. Actual VoiceOver behavior and reading order for each final document still require separate verification; this is not a claim of complete PDF accessibility. Real-CV admission remains disabled independently of this viewer change.
 
 The browser accepts at most 1 MiB, 20 pages, 4 million pixels per page and 12 million retained page pixels. Fetch/loading/rendering has a 30-second deadline. These bounds limit retained canvases and ordinary work; they do not establish an absolute PDF parser memory limit. A failure after the server's successful response is reported as a display failure with decryption/notification registration already completed.
+
+Text extraction is streamed and limited to 20,000 items per page and 200,000 UTF-16
+code units across the document. Invalid or over-limit text fails the display and
+clears previously rendered pages. Closing the view cancels the current text stream;
+a late result cannot recreate the text alternative.
 
 Implementation references: [PDF.js rendering example](https://mozilla.github.io/pdf.js/examples/) and [pinned release](https://github.com/mozilla/pdf.js/releases/tag/v6.4.299).
 
