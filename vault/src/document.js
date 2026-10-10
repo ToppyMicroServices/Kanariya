@@ -8,6 +8,7 @@ import { recipientHeaders } from './recipient.js';
 import { PasswordAdmission } from './admission.js';
 import { readContacts, setContacts, MAX_RECIPIENT_REQUEST_BYTES } from './contacts.js';
 import { VaultRegistrations } from './registration.js';
+import { readLinks, listLinks, createLink, revokeLink, getLiveLink } from './links.js';
 const DAY = 86400000;
 const LOG_PAGE_SIZE = 50, LOG_SCAN_SIZE = 100, LOG_CURSOR_MS = 600000;
 const LOG_INDEX = /^expiry:(\d{13}):(audit|replay):([0-9a-f-]{36})$/;
@@ -44,6 +45,7 @@ export class VaultDocument {
         Object.keys(state.deadline).length !== 2 || typeof state.deadline.recordDigest !== 'string' || !/^[0-9a-f]{64}$/.test(state.deadline.recordDigest) ||
         !Number.isSafeInteger(state.deadline.expiresAt) || state.deadline.expiresAt <= 0)) throw new Error('invalid_journal');
     if (Object.hasOwn(state, 'recipientContacts')) readContacts(state, dummyPin(this.env).digest);
+    if (Object.hasOwn(state, 'readerLinks')) readLinks(state, dummyPin(this.env).digest);
     return state;
   }
   async archive(tx, key, type, id, value, at) {
@@ -116,7 +118,7 @@ export class VaultDocument {
       const replacement = /^\/v1\/registrations\/([0-9a-f-]{36})\/replacement$/.exec(url.pathname);
       if (url.pathname === '/v1/registrations' || replacement && UUID.test(replacement[1])) return await this.registrations.fetch(request);
       const match = ACCESS_ROUTE.exec(url.pathname);
-      if (match?.[2] === 'recipients') {
+      if (['recipients', 'links'].includes(match?.[2])) {
         const pin = dummyPin(this.env);
         if (url.origin !== origin(this.env) || url.search || match[1] !== pin.id || !['GET', 'POST'].includes(request.method)) throw new Denied();
         let subject;
@@ -144,8 +146,10 @@ export class VaultDocument {
     if (['cross-site', 'same-site'].includes(request.headers.get('sec-fetch-site')) ||
         (action !== 'status' && (request.headers.get('origin') !== url.origin || request.headers.get('content-type') !== 'application/json'))) throw new Denied();
     const input = action === 'status' ? null : await this.input(request, action === 'session' ? 2048 : 128);
+    const linkLogin = action === 'session' && request.method === 'POST' && Object.hasOwn(input ?? {}, 'linkToken');
     if (action === 'session' && (!input || Array.isArray(input) || typeof input !== 'object' ||
-        (request.method === 'POST' ? Object.keys(input).length !== 1 || !passwordValid(input.password) : Object.keys(input).length))) throw new Denied(400, 'invalid_request');
+        (request.method === 'POST' ? Object.keys(input).length !== 1 ||
+          (linkLogin ? typeof input.linkToken !== 'string' || !/^[0-9a-f]{64}$/.test(input.linkToken) : !passwordValid(input.password)) : Object.keys(input).length))) throw new Denied(400, 'invalid_request');
     if (action === 'open' && (!input || Object.keys(input).length !== 1 || !UUID.test(input.requestId))) throw new Denied(400, 'invalid_request');
     const token = readSession(request, id), logout = action === 'session' && request.method === 'DELETE';
     if (!token && logout) return json({ accepted: true }, 200, { 'set-cookie': sessionCookie(id, '', 0) });
@@ -153,24 +157,37 @@ export class VaultDocument {
     if (action === 'open') await requireNotificationTargets(this.env);
     const source = this.admission.source(request);
     await this.admission.take(source, action === 'session' && request.method === 'POST' ? 'login' : 'request');
+    let linkId, linkHash;
+    if (linkLogin) {
+      linkHash = await hashToken(input.linkToken); input.linkToken = '';
+      linkId = await this.serial(async () => {
+        const audit = await importKey(this.env.VAULT_AUDIT_KEY), state = await this.state(this.ctx.storage, audit);
+        if (state.revoked || state.documentId && state.documentId !== id) throw new Denied();
+        const entry = readLinks(state, pin.digest).entries.find(link => link.hash === linkHash);
+        if (!entry) throw new Denied(401, 'unauthenticated');
+        return getLiveLink(state, pin.digest, entry.id).id;
+      });
+    }
     if (action !== 'session' || logout) {
       const result = await this.serial(async () => {
         const audit = await importKey(this.env.VAULT_AUDIT_KEY), state = await this.state(this.ctx.storage, audit);
         const hash = await hashToken(token);
         const session = state.sessions.find(s => s.hash === hash && s.recordDigest === pin.digest && s.expiresAt > Date.now());
+        if (session) this.sessionContext(request, session);
         if (logout) {
           if (session) await this.mutate(id, audit, latest => { latest.sessions = latest.sessions.filter(s => s.hash !== hash); });
           return json({ accepted: true }, 200, { 'set-cookie': sessionCookie(id, '', 0) });
         }
         if (state.revoked) throw new Denied();
         if (!session) throw new Denied(401, 'unauthenticated');
+        if (session.linkId) getLiveLink(state, pin.digest, session.linkId);
         return null;
       });
       if (result) return result;
     }
     // R2 I/O cannot occupy the owner mutation queue. Authorization, expiry,
     // revocation and the unchanged pin are checked again in handle().
-    return { source, digest: pin.digest, record: await this.record(id, pin.digest), input };
+    return { source, digest: pin.digest, record: await this.record(id, pin.digest), input, linkId, linkHash };
   }
   expiresAt(policy, state) {
     if (!state.deadline) return policy.expiresAt;
@@ -182,6 +199,19 @@ export class VaultDocument {
   live(policy, state, session = null) {
     if (policy.revoked || state.revoked || this.expiresAt(policy, state) <= Date.now()) throw new Denied();
     if (session && session.expiresAt <= Date.now()) throw new Denied(401, 'unauthenticated');
+    if (session?.linkId) getLiveLink(state, dummyPin(this.env).digest, session.linkId);
+  }
+  readerExpiresAt(policy, state, session = null) {
+    return Math.min(this.expiresAt(policy, state), session?.linkId
+      ? getLiveLink(state, dummyPin(this.env).digest, session.linkId).expiresAt : Infinity);
+  }
+  sessionContext(request, session) {
+    const name = 'x-vault-reader-link';
+    // A second tab may replace this document's cookie. Refuse a request rather
+    // than silently attributing it to a different sharing URL or password.
+    if (session.linkId ? request.headers.get(name) !== session.linkId : request.headers.has(name)) {
+      throw new Denied(401, 'unauthenticated');
+    }
   }
   async input(request, max = 128) {
     try { return parseJSON(await boundedBody(request, max)); }
@@ -260,6 +290,30 @@ export class VaultDocument {
   async owner(request, id, action, subject) {
     if (subject !== this.env.VAULT_OWNER_SUB) throw new Denied();
     const keys = await this.keys();
+    if (action === 'links') {
+      const pin = dummyPin(this.env), record = await this.record(id, pin.digest);
+      const policy = await readPolicy(record, id, keys.wrap);
+      const snapshot = state => ({ ...listLinks(state, pin.digest), recipientName: policy.recipientName ?? null,
+        documentExpiresAt: this.expiresAt(policy, state), revoked: policy.revoked || state.revoked,
+        enabled: policy.authMode === 'password' && this.env.PASSWORD_READER_ENABLED === '1' });
+      if (request.method === 'GET') return json(snapshot(await this.state(this.ctx.storage, keys.audit)));
+      const input = await this.input(request, 512);
+      if (!input || !['create', 'revoke'].includes(input.action)) throw new Denied(400, 'invalid_links');
+      passwordEnabled(this.env);
+      if (policy.authMode !== 'password') throw new Denied();
+      if (input.action === 'create') {
+        const result = await this.mutate(id, keys.audit, latest => {
+          this.live(policy, latest);
+          return createLink(latest, pin.digest, input, this.expiresAt(policy, latest));
+        });
+        const { urlToken, ...value } = result;
+        return json({ ...value, url: `${origin(this.env)}/p/${id}#link=${urlToken}` });
+      }
+      return json(await this.mutate(id, keys.audit, latest => {
+        revokeLink(latest, pin.digest, input);
+        return snapshot(latest);
+      }));
+    }
     if (action === 'logs') return this.logs(request, id, keys.audit);
     if (action === 'recipients') {
       const digest = dummyPin(this.env).digest;
@@ -322,9 +376,9 @@ export class VaultDocument {
       passwordEnabled(this.env); accessConfiguration(this.env);
       if (!prepared) throw new Denied();
     }
-    const methods = action === 'logs' || action === 'recipients' ? ['GET', 'POST'] : action === 'status' || action === 'metadata' ? ['GET'] : passwordPath && action === 'session' ? ['POST', 'DELETE'] : ['POST'];
+    const methods = ['logs', 'recipients', 'links'].includes(action) ? ['GET', 'POST'] : action === 'status' || action === 'metadata' ? ['GET'] : passwordPath && action === 'session' ? ['POST', 'DELETE'] : ['POST'];
     if (!methods.includes(request.method)) throw new Denied(405, 'method_not_allowed');
-    if (!(request.method === 'GET' && ['status', 'metadata', 'logs', 'recipients'].includes(action)) && (request.headers.get('origin') !== origin(this.env) ||
+    if (!(request.method === 'GET' && ['status', 'metadata', 'logs', 'recipients', 'links'].includes(action)) && (request.headers.get('origin') !== origin(this.env) ||
         request.headers.get('content-type') !== 'application/json')) throw new Denied();
     if (passwordPath && ['cross-site', 'same-site'].includes(request.headers.get('sec-fetch-site'))) throw new Denied();
     let subject;
@@ -339,7 +393,8 @@ export class VaultDocument {
     } else if (action === 'session') {
       input = prepared.input;
       if (!input || Array.isArray(input) || typeof input !== 'object') throw new Denied(400, 'invalid_request');
-      if (request.method === 'POST' && (Object.keys(input).length !== 1 || !passwordValid(input.password))) throw new Denied(400, 'invalid_request');
+      if (request.method === 'POST' && (Object.keys(input).length !== 1 ||
+          (prepared.linkId ? !UUID.test(prepared.linkId) || !/^[0-9a-f]{64}$/.test(prepared.linkHash) : !passwordValid(input.password)))) throw new Denied(400, 'invalid_request');
       if (request.method === 'DELETE' && Object.keys(input).length) throw new Denied(400, 'invalid_request');
     }
     if (passwordPath) {
@@ -361,18 +416,26 @@ export class VaultDocument {
       }
       this.live(policy, state);
       // The independent source budget was committed before R2 and scrypt.
-      if (!verifyPassword(input.password, policy.passwordVerifier)) throw new Denied(401, 'unauthenticated');
-      input.password = '';
+      let link = null;
+      if (prepared.linkId) {
+        link = getLiveLink(state, pin.digest, prepared.linkId);
+        if (link.hash !== prepared.linkHash) throw new Denied(401, 'unauthenticated');
+      } else {
+        if (!verifyPassword(input.password, policy.passwordVerifier)) throw new Denied(401, 'unauthenticated');
+        input.password = '';
+      }
       const raw = randomToken(), hash = await hashToken(raw);
-      const expiresAt = Math.min(this.expiresAt(policy, state), Date.now() + SESSION_MS);
+      const expiresAt = Math.min(this.expiresAt(policy, state), link?.expiresAt ?? Infinity, Date.now() + SESSION_MS);
+      const issuedSession = { hash, expiresAt, recordDigest: pin.digest, ...(link ? { linkId: link.id } : {}) };
       await this.mutate(id, keys.audit, latest => {
-        this.live(policy, latest);
+        this.live(policy, latest, issuedSession);
         latest.sessions = latest.sessions.filter(s => s.recordDigest === pin.digest);
         if (latest.sessions.length >= MAX_SESSIONS) throw new Denied(429, 'session_limit');
-        latest.sessions.push({ hash, expiresAt, recordDigest: pin.digest });
+        latest.sessions.push(issuedSession);
       });
-      this.live(policy, state, { expiresAt });
-      return json({ expiresAt: this.expiresAt(policy, state), sessionExpiresAt: expiresAt }, 200,
+      this.live(policy, state, issuedSession);
+      return json({ expiresAt: this.readerExpiresAt(policy, state, issuedSession), sessionExpiresAt: expiresAt,
+        ...(link ? { linkId: link.id } : {}) }, 200,
         { 'set-cookie': sessionCookie(id, raw, Math.max(0, Math.floor((expiresAt - Date.now()) / 1000))) });
     }
     this.live(policy, state);
@@ -380,8 +443,10 @@ export class VaultDocument {
       const hash = await hashToken(token);
       session = state.sessions.find(s => s.hash === hash && s.recordDigest === pin.digest && s.expiresAt > Date.now());
       if (!session) throw new Denied(401, 'unauthenticated');
-      subject = 'shared-password'; // No claim of individual identity for a shared credential.
-      if (action === 'status') return json({ expiresAt: this.expiresAt(policy, state), sessionExpiresAt: session.expiresAt });
+      this.sessionContext(request, session);
+      this.live(policy, state, session);
+      subject = session.linkId ? `shared-link:${session.linkId}` : 'shared-password'; // Credential possession is not individual identity.
+      if (action === 'status') return json({ expiresAt: this.readerExpiresAt(policy, state, session), sessionExpiresAt: session.expiresAt });
     } else if (!policy.subjects.includes(subject)) throw new Denied();
     if (request.headers.has('range') || request.headers.has('if-range')) throw new Denied(400, 'range_not_supported');
     const eventId = crypto.randomUUID();
@@ -415,7 +480,7 @@ export class VaultDocument {
     } catch (error) { bytes.fill(0); throw error; }
     return new Response(bytes, { headers: { ...HEADERS, 'content-type': 'application/pdf',
       ...recipientHeaders(policy), 'x-vault-event': eventId,
-      'x-vault-expires-at': String(this.expiresAt(policy, state)),
+      'x-vault-expires-at': String(this.readerExpiresAt(policy, state, session)),
       ...(session ? { 'x-vault-session-expires-at': String(session.expiresAt) } : {}) } });
   }
   async finish(id, key, eventId, outcome) {

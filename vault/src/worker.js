@@ -20,6 +20,7 @@ const application = {
       const ownerAsset = url.pathname === '/v1/admin/assets/admin.js' ? ['js', 'text/javascript; charset=utf-8'] :
         url.pathname === '/v1/admin/assets/management.js' ? ['managementJs', 'text/javascript; charset=utf-8'] :
         url.pathname === '/v1/admin/assets/canary.js' ? ['canaryJs', 'text/javascript; charset=utf-8'] :
+        url.pathname === '/v1/admin/assets/links.js' ? ['linksJs', 'text/javascript; charset=utf-8'] :
         url.pathname === '/v1/admin/assets/admin.css' ? ['css', 'text/css; charset=utf-8'] : null;
       const preparationAsset = Object.hasOwn(pdfPreparationAssets, url.pathname) ? pdfPreparationAssets[url.pathname] :
         url.pathname === '/v1/admin/assets/registration-preview.js' ? { data: registrationPreview.js, mime: 'text/javascript; charset=utf-8' } :

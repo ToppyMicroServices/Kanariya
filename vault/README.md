@@ -1,19 +1,55 @@
 # Kanariya Vault
 
-A document service with per-document Access or shared-password authentication. It decrypts on the server, commits an encrypted audit record and notification job, then returns the document bytes. There is no client key endpoint. This is a separate Worker; the existing public canary endpoint is not an authorization or acknowledgement mechanism.
+A document service with per-document Access or shared-password authentication, plus owner-issued sharing URLs for password documents. It decrypts on the server, commits an encrypted audit record and notification job, then returns the document bytes. There is no client key endpoint. This is a separate Worker; the existing public canary endpoint is not an authorization or acknowledgement mechanism.
 
 ## Two reader modes; owner administration always uses Access
 
 The encrypted version-2 document policy selects exactly one `authMode`:
 
 - `access` is the default, including historical policies with no mode field. It requires a verified Cloudflare Access JWT and an explicitly granted subject. Existing `/#<uuid>` links and `/v1/documents/<uuid>/open` remain supported.
-- `password` requires a 12–256 UTF-8-byte shared password and an empty `subjects` array. Its reader link is `/p/<uuid>`. It does not require the reader to obtain an Access JWT. It is **disabled by default** with `PASSWORD_READER_ENABLED="0"`; only the exact string `"1"` enables these reader routes.
+- `password` uses a 12–256 UTF-8-byte shared password and an empty `subjects` array. Its reader link is `/p/<uuid>`; an owner-issued secret URL can authorize the same document without password entry. Neither path requires the reader to obtain an Access JWT. It is **disabled by default** with `PASSWORD_READER_ENABLED="0"`; only the exact string `"1"` enables these reader routes.
 
-There is no fallback between modes. A password session cannot open an Access document, and an Access JWT cannot substitute for the shared password. Owner status, revocation and notification repair stay under `/v1/documents/...` and always require the verified owner Access subject. Shared access is audited as `shared-password`, not as an identified individual.
+There is no fallback between modes. A password or secret-URL session cannot open an Access document, and an Access JWT cannot authorize a password document. Owner status, revocation and notification repair stay under `/v1/documents/...` and always require the verified owner Access subject. Password access is audited as `shared-password`, not as an identified individual.
+
+### Owner-issued sharing URLs
+
+For a password document, the owner can issue a separate secret URL from the
+closed **閲覧用URL** panel in `/v1/admin`. This adds a password-free way to open
+that document; it does not replace its password or grant access to an Access
+document. Creating a URL still requires the verified owner Access subject.
+The panel shows the document's existing disclosure recipient and lets the owner
+set a URL deadline no later than the current document deadline. Its recipient
+and PDF watermark remain unchanged. A different recipient needs a separately
+prepared document, rather than relabeling an already watermarked PDF.
+
+Each URL contains a random 256-bit secret in the fragment (`#link=...`). The
+fragment is not sent in the initial HTTP request; the viewer clears it from
+the displayed address and exchanges it through a bounded POST only when the
+reader asks to open the document. A GET of the URL does not return PDF bytes or
+create a decryption notification. The explicit open operation retains the
+existing encrypted audit, PDF watermark and notification path.
+
+Anyone who receives or forwards the secret URL can use it while it is valid.
+The disclosure recipient is the intended recipient, not proof of who opened
+the URL. Link acquisitions are logged as `shared-link:<grant UUID>` and shown
+as **本人未確認（共有URL）**. The URL ID links an audit entry to its issued grant;
+it is not the URL secret or a verified reader identity.
+
+Only the secret's hash and bounded grant metadata are retained in the encrypted
+per-document journal. The URL is returned once to the owner and is held only
+in page memory, without browser storage; copy it before closing the page. The
+owner can stop an individual URL without stopping the other URLs or the
+document's password. Grant and document deadlines, revocation and the pinned
+ciphertext digest are rechecked for URL sessions and new document acquisitions.
+Sessions last at most five minutes. Stopping a URL also denies sessions already
+issued through it, but cannot recover PDF bytes already delivered or saved.
+The existing dummy-only gate, private R2 bucket, Access administration and
+notification destinations are unchanged. The console does not send sharing
+emails.
 
 The source-only release preserves the existing deployment configuration. The origin, Access configuration, owner/secrets, exact dummy UUID/ciphertext digest and provider setup must remain valid. The dummy-only gate is unchanged; real CVs remain excluded. Before any new installation, review the Access application routing: `/` and `/v1/*` must remain protected, while only the separate `/p/*` reader surface may be reachable without a reader JWT. Do not turn off Access for the whole hostname. Use a dedicated origin without an existing service worker or cache rules that override the no-store headers. No Access policy, secret, bucket or live document is provisioned by these scripts or by the main repository workflow.
 
-For offline preparation, the trusted stdin object accepted by `seal-document.mjs` adds `authMode`. Password mode uses `authMode:"password"`, `subjects:[]`, and `password`; Access mode uses `authMode:"access"` (or omission), `subjects`, and no password. Do not put credentials in command arguments, shell history, URLs, logs or checked-in files. Use the existing trusted secret-store bridge. Prefer a long randomly generated password or passphrase; communicate it separately from the document link.
+For offline preparation, the trusted stdin object accepted by `seal-document.mjs` adds `authMode`. Password mode uses `authMode:"password"`, `subjects:[]`, and `password`; Access mode uses `authMode:"access"` (or omission), `subjects`, and no password. Do not put preparation passwords or encryption keys in command arguments, shell history, URLs, logs or checked-in files. Use the existing trusted secret-store bridge. Prefer a long randomly generated password or passphrase; communicate it separately from the document link.
 
 Only a salted scrypt verifier is stored inside the encrypted policy. The fixed [OWASP scrypt profile](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html#scrypt) is N=16384, r=8, p=5, with a 32-byte salt and 32-byte output. Native [`node:crypto`](https://developers.cloudflare.com/workers/runtime-apis/nodejs/crypto/) needs `nodejs_compat` in the Vault configuration. Provisioning validates the exact profile and rejects malformed verifiers or mixed-mode policies. Worker/operator key access remains a trust boundary; this is not end-to-end encryption.
 

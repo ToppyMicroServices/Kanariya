@@ -63,6 +63,7 @@ test('management loads metadata only and presents protected links without decryp
   assert.equal(ui.elements['expires-at'].max, '2026-10-11T15:00');
   assert.match(ui.elements.deadline.textContent, /21:00.*日本時間/);
   assert.equal(ui.elements.preview.href, 'https://vault.example/p/' + id);
+  assert.equal(ui.elements['copy-link'].textContent, 'パスワード用URLをコピー');
   assert.deepEqual(ui.requests.map(({ url }) => url), ['/v1/management', '/v1/documents/' + id + '/metadata']);
   for (const { request } of ui.requests) {
     assert.equal(request.method, 'GET'); assert.equal(request.credentials, 'same-origin');
@@ -75,6 +76,7 @@ test('management loads metadata only and presents protected links without decryp
 test('Access documents retain the existing Access viewer route', async () => {
   const ui = management({ metadata: { authMode: 'access', recipientName: null } }); await settled();
   assert.equal(ui.elements.preview.href, 'https://vault.example/#' + id);
+  assert.equal(ui.elements['copy-link'].textContent, '閲覧ページのURLをコピー');
   assert.equal(ui.elements['recipient-row'].hidden, true);
 });
 
@@ -191,6 +193,9 @@ test('recipient text remains text and pagehide cancels late state updates', asyn
 });
 
 test('protected page supports strict CSP and keeps limitations in the collapsed guidance', () => {
+  assert.match(html, /<span class="service-name"><span>Kanariya<\/span><span class="service-description">\[Document sharing and control\]<\/span><\/span>/);
+  assert.match(html, /© 2026 ToppyMicroServices OÜ/);
+  assert.match(html, /Document sharing and control · Kanariya/);
   assert.match(html, /href="\/v1\/admin\/assets\/admin.css"/);
   assert.match(html, /src="\/v1\/admin\/assets\/admin.js" type="module"/);
   assert.doesNotMatch(html, /<style|\sstyle=|\son\w+=|<script(?![^>]*src=)/i);

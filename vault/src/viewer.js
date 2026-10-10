@@ -1,16 +1,16 @@
 function page(password) {
   const assets = password ? "/p/assets" : "";
   const login = password
-    ? '<form id="unlock-form" method="post" autocomplete="off"><label for="password">閲覧用パスワード</label><p id="password-help" class="form-help">文書提供者から通知されたパスワードを入力してください。</p><div class="unlock-row"><input id="password" type="password" autocomplete="off" aria-describedby="password-help" required><button id="unlock" type="submit" class="primary">認証する</button></div></form>'
+    ? '<form id="unlock-form" method="post" autocomplete="off" hidden><label for="password">閲覧用パスワード</label><p id="password-help" class="form-help">文書提供者から通知されたパスワードを入力してください。</p><div class="unlock-row"><input id="password" type="password" autocomplete="off" aria-describedby="password-help" required><button id="unlock" type="submit" class="primary">認証する</button></div></form>'
     : '<p class="access-note">認証済みアカウントの閲覧権限を確認します。</p>';
   return `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#02213b"><title>保護文書の閲覧 | ToppyMicroServices</title><link rel="stylesheet" href="${assets}/viewer.css"></head>
 <body>
-<header class="site-header"><div class="header-inner"><a class="brand" href="https://www.toppymicros.com/" target="_blank" rel="noopener noreferrer" aria-label="ToppyMicroServicesのサイト（新しいタブ）"><img src="${assets}/brand.png" width="32" height="32" alt=""><span>ToppyMicroServices</span></a><span class="service-name">Kanariya</span></div></header>
+<header class="site-header"><div class="header-inner"><a class="brand" href="https://www.toppymicros.com/" target="_blank" rel="noopener noreferrer" aria-label="ToppyMicroServicesのサイト（新しいタブ）"><img src="${assets}/brand.png" width="32" height="32" alt=""><span>ToppyMicroServices</span></a><span class="service-name"><span>Kanariya</span><span class="service-description">[Document sharing and control]</span></span></div></header>
 <main id="main"><div class="intro"><p class="eyebrow">KANARIYA · DOCUMENT SHARING</p><h1>保護文書の閲覧</h1></div>
-<section class="viewer-card" aria-label="文書へのアクセス">${login}<div class="actions"><button id="open" type="button"${password ? " disabled" : ""} class="primary">文書を開く</button><button id="download" type="button" hidden>PDFを保存</button><button id="close" type="button" hidden>閲覧を終了</button>${password ? '<button id="logout" type="button" class="quiet" hidden>ログアウト</button>' : ""}</div><p id="deadline" class="deadline" aria-live="polite" aria-atomic="true">文書の閲覧期限：${password ? "認証後に表示します。" : "文書を開く際に表示します。"}</p>${password ? '<p id="session-deadline" class="session-deadline" hidden></p>' : ""}<p id="status" role="status" aria-live="polite" aria-atomic="true"></p><div class="viewing-notice"><p>閲覧・保存は、文書提供者への通知対象です。</p><details><summary>ご案内</summary><p>本ページは、文書提供者が指定した開示先向けの閲覧ページです。${password ? "共通パスワード方式では、実際の閲覧者本人を確認するものではありません。" : ""}</p><p>通知には、閲覧・保存のどちらを行ったかは含まれません。</p><p>閲覧期限や共有の終了後は、新たに文書を開いたり保存したりできません。すでに表示・保存された内容は回収できません。</p>${password ? '<p>認証は最長5分間です。文書の閲覧期限内であれば、再びパスワードを入力して閲覧できます。</p>' : '<p>表示中の文書は、共有の終了だけでは直ちに閉じません。</p>'}<p>保存したPDFやスクリーンショットには閲覧期限が適用されず、再び開いても通知されません。</p></details></div></section>
+<section class="viewer-card" aria-label="文書へのアクセス">${login}<div class="actions"><button id="open" type="button"${password ? " disabled" : ""} class="primary">文書を開く</button><button id="download" type="button" hidden>PDFを保存</button><button id="close" type="button" hidden>閲覧を終了</button>${password ? '<button id="logout" type="button" class="quiet" hidden>ログアウト</button>' : ""}</div><p id="deadline" class="deadline" aria-live="polite" aria-atomic="true">文書の閲覧期限：${password ? "認証後に表示します。" : "文書を開く際に表示します。"}</p>${password ? '<p id="session-deadline" class="session-deadline" hidden></p>' : ""}<p id="status" role="status" aria-live="polite" aria-atomic="true"></p><div class="viewing-notice"><p>閲覧・保存は、文書提供者への通知対象です。</p><details><summary>ご案内</summary><p>本ページは、文書提供者が指定した開示先向けの閲覧ページです。${password ? '<span id="identity-note">共通パスワード方式では、実際の閲覧者本人を確認するものではありません。</span>' : ""}</p><p>通知には、閲覧・保存のどちらを行ったかは含まれません。</p><p>閲覧期限や共有の終了後は、新たに文書を開いたり保存したりできません。すでに表示・保存された内容は回収できません。</p>${password ? '<p id="session-note">認証は最長5分間です。文書の閲覧期限内であれば、再びパスワードを入力して閲覧できます。</p>' : '<p>表示中の文書は、共有の終了だけでは直ちに閉じません。</p>'}<p>保存したPDFやスクリーンショットには閲覧期限が適用されず、再び開いても通知されません。</p></details></div></section>
 <div id="document" aria-label="保護文書のページ" hidden></div><noscript><p class="noscript">文書の表示にはJavaScriptが必要です。</p></noscript></main>
-<footer class="site-footer"><span>ToppyMicroServices OÜ</span><span>Document sharing · Kanariya</span></footer><script src="${assets}/viewer.js" type="module"></script></body></html>`;
+<footer class="site-footer"><span>© 2026 ToppyMicroServices OÜ</span><span>Document sharing and control · Kanariya</span></footer><script src="${assets}/viewer.js" type="module"></script></body></html>`;
 }
 export const html = page(false);
 export const passwordHtml = page(true);
@@ -24,7 +24,7 @@ a{color:var(--accent)}button,input,summary{font:inherit}
 a:focus-visible,button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid var(--accent);outline-offset:4px}
 .site-header{border-bottom:1px solid var(--border)}.header-inner{min-height:72px;display:flex;align-items:center;justify-content:space-between;gap:20px}
 .header-inner,main,.site-footer{width:min(calc(100% - 40px),1040px);margin-inline:auto}
-.brand{display:inline-flex;align-items:center;gap:10px;color:var(--fg);font-size:16px;font-weight:800;text-decoration:none;letter-spacing:-.025em}.brand img{display:block;border-radius:6px}.service-name{color:var(--muted);font-size:13px}
+.brand{display:inline-flex;align-items:center;gap:10px;color:var(--fg);font-size:16px;font-weight:800;text-decoration:none;letter-spacing:-.025em}.brand img{display:block;border-radius:6px}.service-name{min-width:0;display:flex;flex-direction:column;align-items:flex-end;color:var(--muted);font-size:13px;line-height:1.5;text-align:right}.service-description{font-size:11px;overflow-wrap:anywhere}
 main{padding-block:40px 48px}.intro{margin-bottom:28px}.eyebrow{margin:0 0 8px;color:var(--accent);font-size:11px;font-weight:700;letter-spacing:.12em}
 h1{margin:0;font-size:clamp(28px,4vw,38px);line-height:1.3;letter-spacing:-.035em}.intro-copy{margin:12px 0 0;color:var(--muted);font-size:15px}
 .viewer-card{padding:24px;border:1px solid var(--border);border-radius:6px;background:var(--surface)}
@@ -38,7 +38,7 @@ button:disabled{opacity:.5;cursor:default}.quiet{color:var(--muted)}.actions{dis
 .viewing-notice{margin-top:20px;padding-top:16px;border-top:1px solid var(--border);color:var(--muted);font-size:13px;line-height:1.8}.viewing-notice h2{margin:0 0 8px;color:var(--fg);font-size:14px;font-weight:700}.viewing-notice p{margin:0}.viewing-notice details{margin-top:8px}.viewing-notice summary{width:fit-content;cursor:pointer}.viewing-notice details p{max-width:700px;margin-top:8px}
 #document{margin-top:24px;padding:20px;border:1px solid var(--border);border-radius:6px;background:#011729}.document-page{margin-bottom:24px}.document-page:last-child{margin-bottom:0}#document canvas{display:block;width:100%;height:auto;margin:0 auto;background:#fff}.page-text{margin-top:12px;padding:12px 16px;border:1px solid var(--border);border-radius:6px;font-size:14px}.page-text summary{cursor:pointer}.text-help{color:var(--muted);font-size:12px}.text-content{white-space:pre-wrap;overflow-wrap:anywhere;unicode-bidi:plaintext}
 .site-footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px 24px;padding-block:20px 28px;border-top:1px solid var(--border);color:var(--muted);font-size:12px}.noscript{padding:16px;border:1px solid var(--border)}
-@media(max-width:540px){.header-inner{min-height:64px;gap:12px}.brand{font-size:14px;gap:8px}.brand img{width:28px;height:28px}.service-name{font-size:12px}main{padding-block:28px 32px}.intro{margin-bottom:22px}.viewer-card{padding:20px}.unlock-row{flex-direction:column}.unlock-row button{width:100%}.actions{gap:8px}.actions button{padding-inline:14px}.intro-copy{font-size:14px}.viewing-notice{font-size:12px}#document{padding:0;border:0;background:transparent}#document canvas{margin-bottom:16px}.site-footer{font-size:11px}}
+@media(max-width:540px){.header-inner{min-height:64px;flex-wrap:wrap;gap:4px 12px;padding-block:12px}.brand{font-size:14px;gap:8px}.brand img{width:28px;height:28px}.service-name{flex-basis:100%;flex-direction:row;flex-wrap:wrap;align-items:baseline;gap:2px 8px;font-size:12px;text-align:left}main{padding-block:28px 32px}.intro{margin-bottom:22px}.viewer-card{padding:20px}.unlock-row{flex-direction:column}.unlock-row button{width:100%}.actions{gap:8px}.actions button{padding-inline:14px}.intro-copy{font-size:14px}.viewing-notice{font-size:12px}#document{padding:0;border:0;background:transparent}#document canvas{margin-bottom:16px}.site-footer{font-size:11px}}
 @media(max-width:420px){.header-inner,main,.site-footer{width:calc(100% - 28px)}.viewer-card{padding:18px}.brand{font-size:13px}.service-name{font-size:11px}}
 @media(prefers-reduced-motion:reduce){button{transition:none}}
 @media print{body{display:none}}
@@ -48,11 +48,26 @@ function script(password) {
   const assets = password ? "/p/assets" : "";
   return `import { getDocument, GlobalWorkerOptions } from "${assets}/pdfjs/pdf.min.mjs";
 "use strict";
-GlobalWorkerOptions.workerSrc="${assets}/pdfjs/pdf.worker.min.mjs";
 const passwordMode=${password},fontPath="${assets}/pdfjs/standard_fonts/";
+const linkMode=passwordMode&&location.hash!=="";
+let linkToken=null,linkRoute=null;
+if(linkMode){
+ const fragment=location.hash;
+ try{
+  history.replaceState(null,"",location.pathname+location.search);
+  if(location.hash!=="")throw new Error();
+  if(/^#link=[0-9a-f]{64}$/.test(fragment)){linkToken=fragment.slice(6);linkRoute=location.pathname+location.search;}
+ }catch{linkToken=null;}
+}
+GlobalWorkerOptions.workerSrc="${assets}/pdfjs/pdf.worker.min.mjs";
 const openButton=document.getElementById("open"),closeButton=document.getElementById("close"),downloadButton=document.getElementById("download"),status=document.getElementById("status"),pages=document.getElementById("document");
 const deadline=document.getElementById("deadline"),sessionDeadline=document.getElementById("session-deadline");
 const form=document.getElementById("unlock-form"),passwordInput=document.getElementById("password"),unlockButton=document.getElementById("unlock"),logoutButton=document.getElementById("logout");
+if(linkMode){
+ const identityNote=document.getElementById("identity-note"),sessionNote=document.getElementById("session-note");
+ if(identityNote)identityNote.textContent="共有リンク方式では、実際の閲覧者本人を確認するものではありません。";
+ if(sessionNote)sessionNote.textContent="認証は最長5分間です。文書の閲覧期限内であれば、再び「文書を開く」を選択して閲覧できます。";
+}
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_BYTES=1048576,MAX_PAGES=20,MAX_PAGE_PIXELS=4000000,MAX_TOTAL_PIXELS=12000000,MAX_TIMER=2147483647;
 const MAX_TEXT_CHARS=200000,MAX_TEXT_ITEMS=20000;
@@ -70,14 +85,15 @@ function dateLabel(value){
  try{return new Intl.DateTimeFormat("ja-JP",{timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"}).format(value)+"（日本時間）";}
  catch{return "日時を表示できません。";}
 }
-function focusControl(){if(!document.hidden)(passwordMode&&!auth?passwordInput:openButton)?.focus({preventScroll:true});}
+function forgetLink(){linkToken=null;linkRoute=null;}
+function focusControl(){if(!document.hidden)(passwordMode&&!linkMode&&!auth?passwordInput:openButton)?.focus({preventScroll:true});}
 function controls(){
  const documentExpiry=passwordMode?auth?.expiresAt:active?.documentExpiresAt;
- deadline.textContent="文書の閲覧期限："+(documentExpiry?dateLabel(documentExpiry):passwordMode?"認証後に表示します。":"文書を開く際に表示します。");
+ deadline.textContent="文書の閲覧期限："+(documentExpiry?dateLabel(documentExpiry):passwordMode&&!linkMode?"認証後に表示します。":"文書を開く際に表示します。");
  if(sessionDeadline){sessionDeadline.hidden=!auth;sessionDeadline.textContent=auth?"認証の有効期限："+dateLabel(auth.sessionExpiresAt):"";}
- openButton.disabled=Boolean(pending||(active&&active.busy)||(passwordMode&&!auth));closeButton.hidden=!active;
+ openButton.disabled=Boolean(pending||(active&&active.busy)||(passwordMode&&!auth&&!(linkMode&&linkToken&&linkRoute===route())));closeButton.hidden=!active;
  downloadButton.hidden=!active?.downloadFilename;downloadButton.disabled=Boolean(pending||active?.busy);
- if(passwordMode){form.hidden=Boolean(auth);unlockButton.disabled=Boolean(pending);passwordInput.disabled=Boolean(pending);logoutButton.hidden=!auth&&pending?.kind!=="logout";logoutButton.disabled=Boolean(pending);}
+ if(passwordMode){form.hidden=linkMode||Boolean(auth);unlockButton.disabled=linkMode||Boolean(pending);passwordInput.disabled=linkMode||Boolean(pending);logoutButton.hidden=!auth&&pending?.kind!=="logout";logoutButton.disabled=Boolean(pending);}
 }
 function release(session){
  if(!session)return;session.controller.abort();clearTimeout(session.timer);clearTimeout(session.expiryTimer);clearTimeout(session.pollTimer);clearTimeout(session.statusTimer);
@@ -98,7 +114,7 @@ function reset(lock=false){
  controls();focusControl();
 }
 function expire(){reset(true);status.textContent="閲覧期限またはセッションの有効期限が切れたため、表示を閉じました。";}
-function changed(){reset(true);status.textContent="文書リンクが変わりました。開く文書をご確認ください。";}
+function changed(){forgetLink();reset(true);status.textContent=linkMode?"文書リンクが変わりました。共有リンクを開き直してください。":"文書リンクが変わりました。開く文書をご確認ください。";}
 function current(token,isPending=false){
  if((isPending?pending:active)!==token||generation!==token.generation||token.controller.signal.aborted)return false;
  if(route()!==token.route){changed();return false;}
@@ -121,7 +137,10 @@ function armExpiry(session){
  clearTimeout(session.expiryTimer);
  session.expiryTimer=setTimeout(()=>{if(!current(session))return;armExpiry(session);},Math.min(MAX_TIMER,Math.max(0,session.expiresAt-Date.now())));
 }
-function requestOptions(token,method,body){return {method,credentials:"same-origin",cache:"no-store",redirect:"error",signal:token.controller.signal,...(body===undefined?{}:{headers:{"content-type":"application/json"},body})};}
+function requestOptions(token,method,body){
+ const headers={...(body===undefined?{}:{"content-type":"application/json"}),...(token.linkId?{"x-vault-reader-link":token.linkId}:{})};
+ return {method,credentials:"same-origin",cache:"no-store",redirect:"error",signal:token.controller.signal,...(Object.keys(headers).length?{headers}:{}),...(body===undefined?{}:{body})};
+}
 async function pageText(page,session){
  const reader=page.streamTextContent({includeMarkedContent:false}).getReader();session.textReader=reader;
  const parts=[];let items=0;
@@ -163,7 +182,7 @@ async function checkStatus(session){
 closeButton.addEventListener("click",()=>{reset();status.textContent="表示を閉じました。";});
 downloadButton.addEventListener("click",async()=>{
  const session=active;if(pending||!session||session.busy||!session.downloadFilename||!current(session))return;
- const request={kind:"download",id:session.id,route:route(),controller:new AbortController(),generation,expiresAt:session.expiresAt,timer:null};
+ const request={kind:"download",id:session.id,linkId:session.linkId,route:route(),controller:new AbortController(),generation,expiresAt:session.expiresAt,timer:null};
  pending=request;controls();status.textContent="権限を確認してPDFを準備しています…";
  request.timer=setTimeout(()=>{if(current(request,true)){reset(true);status.textContent="PDFの保存が時間内に開始できませんでした。";}},30000);
  let bytes=null,url=null,link=null;
@@ -185,8 +204,8 @@ downloadButton.addEventListener("click",async()=>{
  }catch{if(current(request,true)){reset(true);status.textContent="PDFを保存できませんでした。もう一度文書を開いてください。";}}
  finally{bytes?.fill(0);link?.remove();if(url)revokeDownload(url);clearTimeout(request.timer);}
 });
-addEventListener("pagehide",()=>reset(true));
-addEventListener("pageshow",event=>{if(event.persisted)reset(true);});
+addEventListener("pagehide",()=>{forgetLink();reset(true);});
+addEventListener("pageshow",event=>{if(event.persisted){forgetLink();reset(true);if(linkMode)status.textContent="共有リンクを開き直してください。";}});
 addEventListener("hashchange",changed);addEventListener("popstate",changed);
 // Same-document history changes do not emit popstate until Back/Forward.
 if(typeof history!=="undefined")for(const method of ["pushState","replaceState"]){
@@ -196,7 +215,7 @@ if(typeof history!=="undefined")for(const method of ["pushState","replaceState"]
 document.addEventListener("visibilitychange",()=>{if(document.hidden){reset(true);status.textContent="ページが非表示になったため、表示を閉じました。";}});
 if(passwordMode){
  form.addEventListener("submit",async event=>{
-  event.preventDefault();if(pending||auth||document.hidden){passwordInput.value="";return;}
+  event.preventDefault();if(linkMode||pending||auth||document.hidden){passwordInput.value="";return;}
   const id=documentId();if(!id){passwordInput.value="";status.textContent="文書リンクを確認してください。";return;}
   let body=JSON.stringify({password:passwordInput.value});passwordInput.value="";
   reset(true);const request={kind:"unlock",id,route:route(),controller:new AbortController(),generation,timer:null};pending=request;controls();status.textContent="閲覧用パスワードを確認しています…";
@@ -210,23 +229,42 @@ if(passwordMode){
   finally{body=null;clearTimeout(request.timer);}
  });
  logoutButton.addEventListener("click",async()=>{
-  if(pending)return;const id=auth?.id||documentId();reset(true);if(!id)return;
-  const request={kind:"logout",id,route:route(),controller:new AbortController(),generation,timer:null};pending=request;controls();status.textContent="ログアウトしています…";
-  request.timer=setTimeout(()=>{if(current(request,true)){reset(true);status.textContent="表示は閉じましたが、ログアウトを確認できませんでした。";}},30000);
+  if(pending)return;const id=auth?.id||documentId(),linkId=auth?.linkId;forgetLink();reset(true);if(!id)return;
+  const request={kind:"logout",id,linkId,route:route(),controller:new AbortController(),generation,timer:null};pending=request;controls();status.textContent="ログアウトしています…";
+  request.timer=setTimeout(()=>{if(current(request,true)){reset(true);status.textContent=linkMode?"表示は閉じましたが、ログアウトを確認できませんでした。共有リンクを開き直してください。":"表示は閉じましたが、ログアウトを確認できませんでした。";}},30000);
   try{
    const response=await fetch("/p/"+id+"/session",requestOptions(request,"DELETE","{}"));if(!current(request,true))return;if(!response.ok)throw new Error();
-   pending=null;controls();focusControl();status.textContent="ログアウトしました。";
-  }catch{if(current(request,true)){reset(true);status.textContent="表示は閉じましたが、ログアウトを確認できませんでした。";}}
+   pending=null;controls();focusControl();status.textContent=linkMode?"ログアウトしました。共有リンクを開き直してください。":"ログアウトしました。";
+  }catch{if(current(request,true)){reset(true);status.textContent=linkMode?"表示は閉じましたが、ログアウトを確認できませんでした。共有リンクを開き直してください。":"表示は閉じましたが、ログアウトを確認できませんでした。";}}
   finally{clearTimeout(request.timer);}
  });
 }
 controls();
+if(linkMode&&!linkToken)status.textContent="共有リンクを確認し、開き直してください。";
+async function unlockLink(id){
+ if(!linkToken||linkRoute!==route()){forgetLink();reset(true);status.textContent="共有リンクを開き直してください。";return false;}
+ reset(true);const request={kind:"link-unlock",id,route:route(),controller:new AbortController(),generation,timer:null};pending=request;controls();status.textContent="閲覧権限を確認しています…";
+ let body=JSON.stringify({linkToken});
+ request.timer=setTimeout(()=>{if(current(request,true)){reset(true);status.textContent="共有リンクを確認できませんでした。文書提供者にお問い合わせください。";}},30000);
+ try{
+  const fetching=fetch("/p/"+id+"/session",requestOptions(request,"POST",body));body=null;
+  const response=await fetching;if(!current(request,true))return false;
+  const result=await jsonResponse(response);if(!current(request,true))return false;
+  if(typeof result?.linkId!=="string"||!UUID.test(result.linkId))throw new Error();
+  const value=times(result);
+  auth={id,linkId:result.linkId,route:request.route,...value};pending=null;armAuth();controls();return true;
+ }catch{if(current(request,true)){reset(true);status.textContent="共有リンクを確認できませんでした。文書提供者にお問い合わせください。";}return false;}
+ finally{body=null;clearTimeout(request.timer);}
+}
 openButton.addEventListener("click",async()=>{
- const id=documentId();if(!id){reset(passwordMode);status.textContent="文書リンクを確認してください。";return;}
+ const id=documentId();if(!id){forgetLink();reset(passwordMode);status.textContent="文書リンクを確認してください。";return;}
  if(document.hidden||pending)return;
+ if(linkMode&&linkRoute!==route()){forgetLink();reset(true);status.textContent="共有リンクを開き直してください。";return;}
+ if(passwordMode&&auth&&Math.min(auth.expiresAt,auth.sessionExpiresAt)<=Date.now()){expire();if(!linkMode)return;}
+ if(linkMode&&!auth&&!await unlockLink(id))return;
  if(passwordMode&&(!auth||auth.id!==id||auth.route!==route())){reset(true);status.textContent="閲覧用パスワードによる認証を行ってください。";return;}
  if(passwordMode&&Math.min(auth.expiresAt,auth.sessionExpiresAt)<=Date.now()){expire();return;}
- reset();const session={id,route:route(),controller:new AbortController(),generation,canvases:new Set(),textNodes:new Set(),textReader:null,textChars:0,loading:null,render:null,data:null,timer:null,expiryTimer:null,pollTimer:null,statusTimer:null,expiresAt:passwordMode?Math.min(auth.expiresAt,auth.sessionExpiresAt):null,busy:true};active=session;
+ reset();const session={id,linkId:auth?.linkId,route:route(),controller:new AbortController(),generation,canvases:new Set(),textNodes:new Set(),textReader:null,textChars:0,loading:null,render:null,data:null,timer:null,expiryTimer:null,pollTimer:null,statusTimer:null,expiresAt:passwordMode?Math.min(auth.expiresAt,auth.sessionExpiresAt):null,busy:true};active=session;
  controls();status.textContent="権限を確認しています…";
  let registered=false;
  session.timer=setTimeout(()=>{if(current(session)){reset(passwordMode);status.textContent=registered?"閲覧の記録と通知の受付は完了しましたが、表示が時間内に完了しませんでした。":"処理が時間内に完了しませんでした。サービスの状態をご確認ください。";}},30000);

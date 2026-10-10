@@ -200,6 +200,21 @@ test('malformed log states and invalid bootstrap IDs do not display trusted evid
   assert.equal(invalid.requests.length, 1); assert.equal(invalid.elements['register-pdf'].disabled, true); assert.equal(invalid.elements['save-contacts'].disabled, true);
 });
 
+test('link acquisitions keep the reader unidentified and expose only the non-secret URL ID', async () => {
+  const ui = browser({ state: { logs: { retentionDays: 30, nextCursor: null, events: [
+    { id: uploadId, at: now, subject: 'shared-link:' + id, outcome: 'decrypted', notifications: [{ state: 'accepted' }] },
+  ] } } }); await settled(); await ui.open('logs');
+  const identity = ui.elements['log-rows'].children[0].children[1];
+  assert.equal(identity.textContent, '本人未確認（共有URL）');
+  assert.equal(identity.children[0].textContent, 'URL ID: ' + id);
+  assert.doesNotMatch(identity.textContent, /Access認証済み/);
+  for (const subject of ['shared-link:', 'shared-link:<img src=x>', 'shared-link:' + 'a'.repeat(64)]) {
+    ui.state.logs.events[0].subject = subject; ui.click('logs-reload'); await settled();
+    assert.equal(ui.elements['log-rows'].children.length, 0);
+    assert.match(ui.elements['logs-status'].textContent, /読み込めません/);
+  }
+});
+
 test('private registration sends one bounded PDF with Japan time and optional replacement metadata', async () => {
   const ui = browser(); await settled(); await ui.open('registration');
   const file = ui.select(); ui.elements['registration-replace'].checked = true;

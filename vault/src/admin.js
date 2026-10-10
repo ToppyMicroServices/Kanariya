@@ -1,10 +1,11 @@
 import { css as viewerCss } from './viewer.js';
 import * as extensions from './admin-extensions.js';
 import * as canary from './canary-admin.js';
+import * as links from './link-admin.js';
 
 export const html = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#02213b"><title>文書の管理 | ToppyMicroServices</title><link rel="stylesheet" href="/v1/admin/assets/admin.css"></head>
-<body><header class="site-header"><div class="header-inner"><a class="brand" href="https://www.toppymicros.com/" target="_blank" rel="noopener noreferrer" aria-label="ToppyMicroServicesのサイト（新しいタブ）"><img src="/brand.png" width="32" height="32" alt=""><span>ToppyMicroServices</span></a><span class="service-name">Kanariya</span></div></header>
+<body><header class="site-header"><div class="header-inner"><a class="brand" href="https://www.toppymicros.com/" target="_blank" rel="noopener noreferrer" aria-label="ToppyMicroServicesのサイト（新しいタブ）"><img src="/brand.png" width="32" height="32" alt=""><span>ToppyMicroServices</span></a><span class="service-name"><span>Kanariya</span><span class="service-description">[Document sharing and control]</span></span></div></header>
 <main><div class="intro"><p class="eyebrow">KANARIYA · DOCUMENT SHARING</p><h1>文書の管理</h1></div>
 <p id="status" role="status" aria-live="polite" aria-atomic="true">文書の情報を読み込んでいます…</p><p id="error" role="alert" hidden></p><div class="recovery-actions"><button id="reload" type="button" class="quiet" hidden>再読み込み</button><a id="owner-page" href="/v1/admin" hidden>管理ページを開き直す</a></div>
 <section id="management" class="viewer-card management-card" aria-label="共有文書の設定" hidden><div class="document-heading"><h2>管理対象のPDF</h2><span id="sharing-state" class="state-label"></span></div>
@@ -12,10 +13,10 @@ export const html = `<!doctype html>
 <div class="actions"><button id="copy-link" type="button" disabled>共有リンクをコピー</button><a id="preview" class="button-link" target="_blank" rel="noopener noreferrer" aria-label="閲覧ページを開く（新しいタブ）" aria-disabled="true">閲覧ページを開く</a></div>
 <form id="expiry-form" class="expiry-form"><label for="expires-at">閲覧期限を変更</label><p id="expiry-help" class="form-help">日本時間で指定してください。</p><div class="expiry-controls"><input id="expires-at" type="datetime-local" step="60" required disabled aria-describedby="expiry-help expiry-limit"><button id="save-expiry" type="submit" class="primary" disabled>期限を保存</button></div><p id="expiry-limit" class="form-help"></p></form>
 <div class="sharing-end"><button id="stop-sharing" type="button" class="quiet" disabled>共有を終了</button><div id="stop-confirmation" class="confirmation" hidden><p>共有を終了すると、この文書を新たに開いたり保存したりできなくなります。元に戻すことはできません。</p><div class="actions"><button id="confirm-stop" type="button" class="danger">共有を終了する</button><button id="cancel-stop" type="button">キャンセル</button></div></div></div>
-<details class="management-notes"><summary>ご案内</summary><p>現在はダミーPDFを共有しています。新しいPDFは、非公開の登録候補として保存できます。</p><p>閲覧期限や共有の終了は、すでに表示・保存された内容を回収するものではありません。</p></details></section>${extensions.html}${canary.html}<noscript><p class="noscript">文書の管理にはJavaScriptが必要です。</p></noscript></main>
-<footer class="site-footer"><span>ToppyMicroServices OÜ</span><span>Document sharing · Kanariya</span></footer><script src="/v1/admin/assets/admin.js" type="module"></script><script src="/v1/admin/assets/management.js" type="module"></script><script src="/v1/admin/assets/canary.js" type="module"></script></body></html>`;
+<details class="management-notes"><summary>ご案内</summary><p>現在はダミーPDFを共有しています。新しいPDFは、非公開の登録候補として保存できます。</p><p>閲覧期限や共有の終了は、すでに表示・保存された内容を回収するものではありません。</p></details></section>${links.html}${extensions.html}${canary.html}<noscript><p class="noscript">文書の管理にはJavaScriptが必要です。</p></noscript></main>
+<footer class="site-footer"><span>© 2026 ToppyMicroServices OÜ</span><span>Document sharing and control · Kanariya</span></footer><script src="/v1/admin/assets/admin.js" type="module"></script><script src="/v1/admin/assets/management.js" type="module"></script><script src="/v1/admin/assets/canary.js" type="module"></script><script src="/v1/admin/assets/links.js" type="module"></script></body></html>`;
 
-export const css = viewerCss + extensions.css + `
+export const css = viewerCss + extensions.css + links.css + `
 .management-card{margin-top:24px}.document-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}.document-heading h2{margin:0;font-size:19px}.state-label{color:var(--accent);font-size:13px;white-space:nowrap}.document-info{margin:20px 0}.document-info>div{display:grid;grid-template-columns:90px minmax(0,1fr);gap:12px;margin-top:8px}.document-info dt{color:var(--muted);font-size:14px}.document-info dd{margin:0;overflow-wrap:anywhere;font-size:14px;font-variant-numeric:tabular-nums}
 .button-link{display:inline-flex;align-items:center;justify-content:center;min-height:46px;padding:10px 18px;border:1px solid var(--border);border-radius:6px;color:var(--fg);text-decoration:none;font-size:14px;font-weight:700}.button-link:hover{border-color:var(--accent);background:rgba(98,210,255,.08)}.button-link[aria-disabled=true]{opacity:.5;pointer-events:none;cursor:default}
 .expiry-form{margin-top:28px;padding-top:24px;border-top:1px solid var(--border)}.expiry-controls{display:flex;align-items:stretch;gap:12px;max-width:620px}.expiry-controls input{flex:1}.expiry-controls button{flex:none}#expiry-limit{margin-top:8px;font-size:12px;overflow-wrap:anywhere}.sharing-end{margin-top:24px}.confirmation{max-width:700px;margin-top:16px;padding:16px;border:1px solid var(--border);border-radius:6px}.confirmation p{margin:0 0 14px;font-size:14px}.danger{border-color:#ffbac1;color:#ffbac1}.management-notes{margin-top:24px;padding-top:16px;border-top:1px solid var(--border);font-size:13px;color:var(--muted)}.management-notes summary{cursor:pointer;width:fit-content}.management-notes p{max-width:700px;margin:8px 0 0}#error{padding:12px 16px;border-left:2px solid #ffbac1;background:rgba(2,33,59,.45);font-size:14px}.recovery-actions{display:flex;flex-wrap:wrap;align-items:center;gap:12px}.recovery-actions a{font-size:13px}
@@ -24,6 +25,7 @@ export const css = viewerCss + extensions.css + `
 
 export const managementJs = extensions.js;
 export const canaryJs = canary.js;
+export const linksJs = links.js;
 
 export const js = `"use strict";
 const ids=["status","error","reload","owner-page","management","sharing-state","recipient-row","recipient","deadline","copy-link","preview","expiry-form","expires-at","save-expiry","expiry-limit","stop-sharing","stop-confirmation","confirm-stop","cancel-stop"];
@@ -56,6 +58,7 @@ function controls(){
 function render(){
  clearTimeout(expiryTimer);if(!metadata){el.management.hidden=true;controls();return;}
  el.management.hidden=false;el["sharing-state"].textContent=metadata.revoked?"共有終了":metadata.expiresAt<=Date.now()?"閲覧期限切れ":"共有中";
+ el["copy-link"].textContent=metadata.authMode==="password"?"パスワード用URLをコピー":"閲覧ページのURLをコピー";
  el["recipient-row"].hidden=!metadata.recipientName;el.recipient.textContent=metadata.recipientName||"";el.deadline.textContent=dateLabel(metadata.expiresAt);
  el["expires-at"].value=localDate(metadata.expiresAt);el["expires-at"].min=localDate(Math.ceil((Date.now()+1)/60000)*60000);el["expires-at"].max=localDate(metadata.sealedExpiresAt);
  el["expiry-limit"].textContent="設定できる最終日時："+dateLabel(metadata.sealedExpiresAt);

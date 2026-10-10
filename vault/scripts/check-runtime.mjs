@@ -164,7 +164,7 @@ export class RuntimeDocument extends VaultDocument {
   }
   for (const [path, mime] of [["/v1/admin", "text/html; charset=utf-8"], ["/v1/admin/assets/admin.js", "text/javascript; charset=utf-8"],
     ["/v1/admin/assets/admin.css", "text/css; charset=utf-8"],
-    ...["canary.js", "registration-preview.js", "pdf-preparation-worker.js", "pdf-lib.mjs", "pdf-preparation.mjs", "recipient.js"].map(name => ["/v1/admin/assets/" + name, "text/javascript; charset=utf-8"]),
+    ...["canary.js", "links.js", "registration-preview.js", "pdf-preparation-worker.js", "pdf-lib.mjs", "pdf-preparation.mjs", "recipient.js"].map(name => ["/v1/admin/assets/" + name, "text/javascript; charset=utf-8"]),
     ["/v1/admin/assets/pdf-lib-LICENSE.md", "text/plain; charset=utf-8"]]) {
     const anonymous = await signed(path, { actor: "" });
     const reader = await signed(path, { actor: subject });
@@ -183,6 +183,12 @@ export class RuntimeDocument extends VaultDocument {
   assert.equal((await signed('/v1/admin/assets/management.js', { actor: subject })).status, 403);
   assert.equal(managementScript.status, 200); privateManagementHeaders(managementScript); assert.ok((await managementScript.text()).length > 100);
   report.checks.push("management_html_and_assets_require_owner_with_strict_csp");
+  const accessLinksPath = `/v1/documents/${id}/links`;
+  assert.equal((await signed(accessLinksPath, { actor: '' })).status, 401);
+  assert.equal((await signed(accessLinksPath, { actor: subject })).status, 403);
+  assert.equal((await (await signed(accessLinksPath)).json()).enabled, false);
+  assert.equal((await signed(accessLinksPath, { method: 'POST', body: { action: 'create', expectedRevision: 0, expiresAt: sealedExpiresAt } })).status, 403);
+  report.checks.push('reader_links_require_owner_and_cannot_bypass_access_policy');
   for (const action of ['canary', 'canary-logs']) {
     const path = `/v1/documents/${id}/${action}`;
     assert.equal((await signed(path, { actor: '' })).status, 401);
@@ -448,9 +454,11 @@ export class RuntimeDocument extends VaultDocument {
     } });
   await mf.ready;
   await (await mf.getR2Bucket("VAULT_DOCUMENTS")).put(`${passwordId}.sealed.json`, passwordRecord);
+  const readerContexts = new Map();
   async function shared(action, { method = action === "status" ? "GET" : "POST", cookie = "", body, headers = {} } = {}) {
     return mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/p/${passwordId}/${action}`, { method,
-      headers: { origin: env.PUBLIC_ORIGIN, "content-type": "application/json", "cf-connecting-ip": "192.0.2.1", cookie, ...headers },
+      headers: { origin: env.PUBLIC_ORIGIN, "content-type": "application/json", "cf-connecting-ip": "192.0.2.1", cookie,
+        ...(readerContexts.has(cookie) ? { 'x-vault-reader-link': readerContexts.get(cookie) } : {}), ...headers },
       ...(method === "GET" || method === "HEAD" ? {} : { body: JSON.stringify(body ?? (action === "open" ? { requestId: crypto.randomUUID() } : {})) }),
       signal: AbortSignal.timeout(10000) });
   }
@@ -540,6 +548,72 @@ export class RuntimeDocument extends VaultDocument {
   assert.equal((await shared("status", { cookie: freshCookie, headers: freshSource })).status, 200);
   assert.equal(await (await (await mf.getR2Bucket("VAULT_DOCUMENTS")).get(`${passwordId}.sealed.json`)).text(), passwordRecord);
   report.checks.push("restored_document_deadline_does_not_extend_old_password_session");
+  const readerLinksPath = `/v1/documents/${passwordId}/links`, readerSource = { 'cf-connecting-ip': '198.51.100.6' };
+  const beforeLinks = await (await signed(`/v1/documents/${passwordId}/logs`)).json();
+  let linkRevision = 0;
+  const linkSecrets = [];
+  async function issueLink(expiresAt) {
+    const response = await signed(readerLinksPath, { method: 'POST', body: { action: 'create', expiresAt, expectedRevision: linkRevision } });
+    assert.equal(response.status, 200); privateManagementHeaders(response);
+    const value = await response.json(); linkRevision = value.revision;
+    const raw = /^#link=([0-9a-f]{64})$/.exec(new URL(value.url).hash)?.[1]; assert.ok(raw);
+    assert.equal(new URL(value.url).origin, env.PUBLIC_ORIGIN); assert.equal(new URL(value.url).pathname, `/p/${passwordId}`);
+    linkSecrets.push(raw);
+    return { ...value.link, raw };
+  }
+  const firstLink = await issueLink(Date.now() + 60000), secondLink = await issueLink(Date.now() + 60000);
+  const linkShell = await mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/p/${passwordId}`);
+  assert.equal(linkShell.status, 200); privateManagementHeaders(linkShell);
+  const shellBody = await linkShell.text(); assert.ok(!shellBody.includes(firstLink.raw)); assert.ok(!shellBody.includes(recipientName));
+  assert.deepEqual(await (await signed(`/v1/documents/${passwordId}/logs`)).json(), beforeLinks);
+  const linkSnapshot = await (await signed(readerLinksPath)).json();
+  assert.equal(linkSnapshot.recipientName, recipientName); assert.equal(linkSnapshot.links.length, 2);
+  for (const raw of linkSecrets) assert.ok(!JSON.stringify(linkSnapshot).includes(raw));
+  const linkUnlock = await shared('session', { body: { linkToken: firstLink.raw }, headers: readerSource });
+  assert.equal(linkUnlock.status, 200); privateManagementHeaders(linkUnlock);
+  const linkCookie = linkUnlock.headers.get('set-cookie').split(';')[0]; linkSecrets.push(linkCookie.split('=')[1]);
+  readerContexts.set(linkCookie, firstLink.id);
+  const linkTimes = await linkUnlock.json(); assert.equal(linkTimes.linkId, firstLink.id); assert.equal(linkTimes.expiresAt, firstLink.expiresAt);
+  assert.ok(linkTimes.sessionExpiresAt <= firstLink.expiresAt);
+  assert.equal((await shared('open', { body: { requestId: crypto.randomUUID() }, headers: readerSource })).status, 401);
+  const linkOpened = await shared('open', { cookie: linkCookie, headers: readerSource });
+  assert.equal(linkOpened.status, 200); assert.deepEqual(new Uint8Array(await linkOpened.arrayBuffer()), pdf);
+  assert.equal(Number(linkOpened.headers.get('x-vault-expires-at')), firstLink.expiresAt);
+  assert.equal(decodeURIComponent(linkOpened.headers.get('x-vault-download-filename')), `CV_${recipientName}.pdf`);
+  report.checks.push('native_reader_url_exchange_explicit_pdf_open_and_fixed_recipient');
+  const linkLogs = await (await signed(`/v1/documents/${passwordId}/logs`)).json();
+  assert.ok(linkLogs.events.some(event => event.subject === `shared-link:${firstLink.id}` && event.outcome === 'decrypted'));
+  for (const raw of linkSecrets) assert.ok(!JSON.stringify(linkLogs).includes(raw));
+  const stoppedLink = await signed(readerLinksPath, { method: 'POST', body: { action: 'revoke', linkId: firstLink.id, expectedRevision: linkRevision } });
+  assert.equal(stoppedLink.status, 200); linkRevision = (await stoppedLink.json()).revision;
+  assert.equal((await shared('status', { cookie: linkCookie, headers: readerSource })).status, 401);
+  assert.equal((await shared('session', { body: { linkToken: firstLink.raw }, headers: readerSource })).status, 401);
+  const secondUnlock = await shared('session', { body: { linkToken: secondLink.raw }, headers: readerSource });
+  assert.equal(secondUnlock.status, 200);
+  const secondCookie = secondUnlock.headers.get('set-cookie').split(';')[0]; linkSecrets.push(secondCookie.split('=')[1]);
+  readerContexts.set(secondCookie, secondLink.id);
+  assert.equal((await shared('status', { cookie: secondCookie, headers: readerSource })).status, 200);
+  assert.equal((await shared('status', { cookie: freshCookie, headers: freshSource })).status, 200);
+  report.checks.push('native_per_link_revocation_invalidates_cookie_without_stopping_other_readers');
+  assert.equal((await shared('status', { cookie: secondCookie, headers: { ...readerSource, 'x-vault-reader-link': firstLink.id } })).status, 401);
+  assert.equal((await shared('open', { cookie: secondCookie, headers: { ...readerSource, 'x-vault-reader-link': '' } })).status, 401);
+  assert.equal((await shared('session', { method: 'DELETE', cookie: secondCookie, headers: { ...readerSource, 'x-vault-reader-link': firstLink.id } })).status, 401);
+  assert.equal((await shared('status', { cookie: freshCookie, headers: { ...freshSource, 'x-vault-reader-link': firstLink.id } })).status, 401);
+  assert.equal((await shared('status', { cookie: secondCookie, headers: readerSource })).status, 200);
+  report.checks.push('native_shared_cookie_cannot_switch_reader_url_context');
+  const expiringLink = await issueLink(Date.now() + 1000);
+  const expiringUnlock = await shared('session', { body: { linkToken: expiringLink.raw }, headers: readerSource });
+  assert.equal(expiringUnlock.status, 200);
+  const expiringCookie = expiringUnlock.headers.get('set-cookie').split(';')[0]; linkSecrets.push(expiringCookie.split('=')[1]);
+  readerContexts.set(expiringCookie, expiringLink.id);
+  await pause(Math.max(0, expiringLink.expiresAt - Date.now() + 100));
+  assert.equal((await shared('status', { cookie: expiringCookie, headers: readerSource })).status, 401);
+  assert.equal((await shared('session', { body: { linkToken: expiringLink.raw }, headers: readerSource })).status, 401);
+  for (const path of await files(passwordPersist)) {
+    const bytes = await readFile(path);
+    for (const secret of linkSecrets) assert.ok(!bytes.includes(Buffer.from(secret)));
+  }
+  report.checks.push('native_reader_url_deadline_and_hash_only_encrypted_storage');
   assert.equal((await request("revoke", env.VAULT_OWNER_SUB, crypto.randomUUID(), passwordId)).status, 200);
   assert.equal((await shared("status", { cookie })).status, 403);
   assert.equal((await shared("open", { cookie })).status, 403);
@@ -572,7 +646,7 @@ export class RuntimeDocument extends VaultDocument {
     report.error ??= 'fixture_outbound_validation_failed'; process.exitCode = 1;
   }
   report.pass = report.status === "passed";
-  report.testCounts = { runtimeChecksExpected: 32, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
+  report.testCounts = { runtimeChecksExpected: 37, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
     bundleChecksPassed: report.checks.filter(check => check === "dry_run_bundle" || check.startsWith("frozen_")).length, totalChecksPassed: report.checks.length };
   await recordReport(); console.log(JSON.stringify(report));
 }

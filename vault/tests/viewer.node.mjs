@@ -17,7 +17,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 function viewer(options = {}) {
-  const elements = Object.fromEntries(["open", "close", "download", "status", "deadline", "session-deadline", "document", "unlock-form", "password", "unlock", "logout"].map(id => [id, {
+  const elements = Object.fromEntries(["open", "close", "download", "status", "deadline", "session-deadline", "document", "unlock-form", "password", "unlock", "logout", "identity-note", "session-note"].map(id => [id, {
     hidden: id === "close" || id === "document", disabled: false, textContent: "", value: "",
     clientWidth: options.clientWidth ?? 1000, children: [], listeners: new Map(),
     addEventListener(name, fn) { this.listeners.set(name, fn); },
@@ -28,11 +28,15 @@ function viewer(options = {}) {
   const events = new Map(), requests = [], loadingTasks = [], renderTasks = [], canvases = [], pdfPages = [];
   const downloads = [], objectURLs = new Map(), textElements = [];
   const stageStarts = new Map(), timers = new Map(), scheduledTimers = [];
-  const id = randomUUID(), now = options.now ?? 1800000000000;
-  const location = { hash: options.passwordMode ? "" : "#" + id, pathname: options.passwordMode ? "/p/" + id : "/", search: "" }, globalWorkerOptions = {};
+  const id = randomUUID(), linkId = options.linkId ?? randomUUID(), now = options.now ?? 1800000000000;
+  const location = { hash: options.fragment ?? (options.passwordMode ? "" : "#" + id), pathname: options.passwordMode ? "/p/" + id : "/", search: "" }, globalWorkerOptions = {};
   const clock = { now };
+  const historyCalls = [];
   const history = Object.fromEntries(["pushState", "replaceState"].map(method => [method, function (_state, _unused, url) {
     assert.equal(this, history); if (url === undefined) return;
+    historyCalls.push({ method, url });
+    if (options.historyReplaceFails && method === "replaceState") throw new Error("synthetic history failure");
+    if (options.historyReplaceIgnored && method === "replaceState") return;
     const next = new URL(url, "https://viewer.example" + location.pathname + location.search + location.hash);
     location.pathname = next.pathname; location.search = next.search; location.hash = next.hash;
   }]));
@@ -48,7 +52,7 @@ function viewer(options = {}) {
     return node;
   }, addEventListener: (name, fn) => events.set(name, fn) };
   function sessionResponse(settings = {}) {
-    return { ok: settings.ok ?? true, headers: new Headers({ "content-type": "application/json", ...settings.headers }), json: () => Promise.resolve(settings.value ?? { expiresAt: clock.now + 600000, sessionExpiresAt: clock.now + 300000 }) };
+    return { ok: settings.ok ?? true, headers: new Headers({ "content-type": "application/json", ...settings.headers }), json: () => Promise.resolve(settings.value ?? { expiresAt: clock.now + 600000, sessionExpiresAt: clock.now + 300000, ...(options.fragment?.startsWith("#link=") ? { linkId } : {}) }) };
   }
   let timerId = 0, pageCount = 0;
   function stage(name) {
@@ -142,7 +146,7 @@ function viewer(options = {}) {
   });
   return {
     ...elements, location, requests, loadingTasks, renderTasks, canvases, pdfPages, timers, scheduledTimers, downloads, objectURLs, textElements,
-    globalWorkerOptions, response, sessionResponse, browserDocument, clock, id, history,
+    globalWorkerOptions, response, sessionResponse, browserDocument, clock, id, linkId, history, historyCalls,
     wait: name => {
       if (!stageStarts.has(name)) stageStarts.set(name, deferred());
       return stageStarts.get(name).promise;
@@ -364,11 +368,15 @@ test("an old queued timeout callback cannot close a newer open", async () => {
 test("both pages state copy limitations and keep Access and shared-password entry points distinct", () => {
   assert.match(html, /認証済みアカウント/); assert.doesNotMatch(html, /unlock-form/);
   assert.match(passwordHtml, /閲覧用パスワード/); assert.match(passwordHtml, /id="unlock-form"/);
+  assert.match(passwordHtml, /id="unlock-form"[^>]* hidden>/, "link recipients must not see a password prompt before the module initializes");
   assert.match(passwordHtml, /type="password" autocomplete="off"/);
   assert.match(passwordHtml, /id="open" type="button" disabled/);
   assert.match(passwordHtml, /src="\/p\/assets\/viewer.js"/);
   assert.match(passwordHtml, /href="\/p\/assets\/viewer.css"/);
   for (const source of [html, passwordHtml]) {
+    assert.match(source, /<span class="service-name"><span>Kanariya<\/span><span class="service-description">\[Document sharing and control\]<\/span><\/span>/);
+    assert.match(source, /© 2026 ToppyMicroServices OÜ/);
+    assert.match(source, /Document sharing and control · Kanariya/);
     assert.match(source, /保存したPDFやスクリーンショットには閲覧期限が適用されず、再び開いても通知されません/);
     assert.match(source, /通知には、閲覧・保存のどちらを行ったかは含まれません/);
     assert.match(source, /すでに表示・保存された内容は回収できません/);
@@ -792,4 +800,199 @@ test("logout clears extracted text and session time and returns focus to the ena
   await v.logOutDocument(); assertClosed(v, true);
   assert.equal(v["session-deadline"].hidden, true); assert.equal(v["session-deadline"].textContent, "");
   assert.equal(v.password.disabled, false); assert.equal(v.browserDocument.activeElement, v.password);
+});
+
+const syntheticLinkToken = "ab".repeat(32);
+const syntheticLinkId = "dc6ab455-370c-4526-897e-441bbf4f9990";
+const linkViewer = options => viewer({ passwordMode: true, fragment: "#link=" + syntheticLinkToken, linkId: syntheticLinkId, ...options });
+
+test("a secret link removes its fragment before any request and waits for explicit Open", async () => {
+  const v = linkViewer();
+  assert.deepEqual(v.historyCalls, [{ method: "replaceState", url: "/p/" + v.id }]);
+  assert.equal(v.location.hash, ""); assert.equal(v.requests.length, 0); assert.equal(v.loadingTasks.length, 0);
+  assert.equal(v["unlock-form"].hidden, true); assert.equal(v.password.disabled, true); assert.equal(v.open.disabled, false);
+  assert.match(v["identity-note"].textContent, /共有リンク方式では、実際の閲覧者本人を確認するものではありません/);
+  assert.match(v["session-note"].textContent, /再び「文書を開く」を選択/);
+  assert.doesNotMatch(v.deadline.textContent, /パスワード|認証後/);
+  await v.unlockDocument("unused-password");
+  assert.equal(v.password.value, ""); assert.equal(v.requests.length, 0);
+});
+
+test("secret-link Open exchanges only its in-memory token before the audited PDF POST", async () => {
+  const v = linkViewer(); await v.openDocument();
+  assert.equal(v.requests.length, 2);
+  const exchange = v.requests[0], opening = v.requests[1];
+  assert.equal(exchange.url, "/p/" + v.id + "/session");
+  assert.deepEqual(JSON.parse(exchange.options.body), { linkToken: syntheticLinkToken });
+  assert.equal(exchange.options.method, "POST"); assert.equal(exchange.options.credentials, "same-origin");
+  assert.equal(exchange.options.cache, "no-store"); assert.equal(exchange.options.redirect, "error");
+  assert.equal(exchange.options.headers["content-type"], "application/json");
+  assert.equal(exchange.options.headers["x-vault-reader-link"], undefined);
+  assert.equal(opening.url, "/p/" + v.id + "/open"); assert.equal(opening.options.method, "POST");
+  assert.equal(opening.options.headers["x-vault-reader-link"], v.linkId);
+  assert.deepEqual(Object.keys(JSON.parse(opening.options.body)), ["requestId"]);
+  assert.ok(v.requests.every(request => !request.url.includes(syntheticLinkToken)));
+  assert.equal(v.location.hash, ""); assert.equal(v.document.hidden, false); assert.equal(v.logout.hidden, false);
+});
+
+for (const fragment of ["#link=", "#link=" + "a".repeat(63), "#link=" + "A".repeat(64), "#link=" + syntheticLinkToken + "&other=1", "#link=%61".repeat(32), "#other=value"]) {
+  test(`malformed secret fragment ${fragment.slice(0, 20)} never falls back to password or an existing cookie`, async () => {
+    const v = linkViewer({ fragment }); await v.openDocument(); await v.unlockDocument();
+    assert.equal(v.location.hash, ""); assert.equal(v.requests.length, 0); assert.equal(v.loadingTasks.length, 0);
+    assert.equal(v["unlock-form"].hidden, true); assert.equal(v.password.disabled, true); assert.equal(v.open.disabled, true);
+    assert.match(v.status.textContent, /共有リンク/); assert.doesNotMatch(v.status.textContent, /パスワード/);
+  });
+}
+
+for (const setting of ["historyReplaceFails", "historyReplaceIgnored"]) {
+  test(`secret-link Open stays disabled if ${setting} prevents URL cleanup`, async () => {
+    const v = linkViewer({ [setting]: true }); await v.openDocument(); await v.unlockDocument();
+    assert.equal(v.requests.length, 0); assert.equal(v.open.disabled, true); assert.equal(v["unlock-form"].hidden, true);
+  });
+}
+
+test("a plain UUID page keeps its password entry and never tries secret-link authentication", async () => {
+  const v = viewer({ passwordMode: true });
+  assert.equal(v.historyCalls.length, 0); assert.equal(v.requests.length, 0); assert.equal(v.open.disabled, true);
+  assert.equal(v["unlock-form"].hidden, false); await v.openDocument(); assert.equal(v.requests.length, 0);
+});
+
+for (const failure of ["expired", "revoked", "network", "missing-expiry", "expired-session"]) {
+  test(`a ${failure} link exchange never opens or parses a PDF`, async () => {
+    const v = linkViewer({ fetchResult: (_n, _r, response) => failure === "network" ? Promise.reject(new Error("synthetic")) : Promise.resolve(response(
+      ["expired", "revoked"].includes(failure) ? { ok: false } : failure === "missing-expiry" ? { value: { linkId: syntheticLinkId } } : { value: { expiresAt: 1800000600000, sessionExpiresAt: 1800000000000, linkId: syntheticLinkId } }
+    )) });
+    await v.openDocument(); assert.equal(v.requests.length, 1); assert.equal(v.loadingTasks.length, 0);
+    assertClosed(v); assert.equal(v["unlock-form"].hidden, true); assert.equal(v.timers.size, 0);
+    assert.match(v.status.textContent, /共有リンクを確認できませんでした/);
+  });
+}
+
+test("link session expiry closes content but explicit Open can obtain a fresh bounded session", async () => {
+  const v = linkViewer(); await v.openDocument();
+  v.advance(300000); await v.fireTimer(300000); assertClosed(v);
+  await v.openDocument(); assert.equal(v.requests.length, 4); assert.equal(v.document.hidden, false);
+  assert.deepEqual(JSON.parse(v.requests[2].options.body), { linkToken: syntheticLinkToken });
+  assert.equal(v.location.hash, "");
+});
+
+test("expired link session is reauthorized on click even before its old timer runs", async () => {
+  const v = linkViewer(); await v.openDocument(); v.advance(300000);
+  await v.openDocument(); assert.equal(v.requests.length, 4); assert.equal(v.document.hidden, false);
+});
+
+for (const event of ["pagehide", "hashchange", "popstate", "pageshow"]) {
+  test(`${event} erases the link and a late exchange cannot restore its authority`, async () => {
+    const late = deferred(), v = linkViewer({ fetchResult: () => late.promise });
+    const opening = v.openDocument(); assert.equal(v.requests.length, 1);
+    if (event === "pageshow") v.event(event, { persisted: true }); else v.event(event);
+    assert.equal(v.requests[0].options.signal.aborted, true);
+    late.resolve(v.sessionResponse()); await opening; await v.openDocument(); await v.unlockDocument();
+    assertClosed(v, true); assert.equal(v.requests.length, 1); assert.equal(v["unlock-form"].hidden, true);
+  });
+}
+
+test("route mismatch erases a pending link even before the navigation event", async () => {
+  const late = deferred(), v = linkViewer({ fetchResult: () => late.promise });
+  const opening = v.openDocument(); v.location.pathname = "/p/" + randomUUID();
+  late.resolve(v.sessionResponse()); await opening; await v.openDocument();
+  assertClosed(v, true); assert.equal(v.requests.length, 1); assert.equal(v.timers.size, 0);
+});
+
+test("a changed path before first Open erases a link before the navigation event", async () => {
+  const v = linkViewer(), original = v.location.pathname;
+  v.location.pathname = "/p/" + randomUUID(); await v.openDocument();
+  v.location.pathname = original; await v.openDocument();
+  assertClosed(v, true); assert.equal(v.requests.length, 0); assert.equal(v["unlock-form"].hidden, true);
+});
+
+test("link logout timeout erases the token and explains how to reenter without password", async () => {
+  const late = deferred(), v = linkViewer({ fetchResult: (_n, pdf, response, url, request) => request.method === "DELETE" ? late.promise : Promise.resolve(url.endsWith("/open") ? pdf() : response()) });
+  await v.openDocument(); const loggingOut = v.logOutDocument(); await v.fireTimer(30000);
+  const status = v.status.textContent; late.resolve(v.sessionResponse()); await loggingOut;
+  assertClosed(v, true); assert.match(v.status.textContent, /共有リンクを開き直してください/); assert.equal(v.status.textContent, status);
+  await v.openDocument(); assert.equal(v.requests.length, 3);
+});
+
+for (const method of ["pushState", "replaceState"]) {
+  test(`${method} erases link authority on later same-document URL changes`, async () => {
+    const v = linkViewer(); await v.openDocument();
+    v.history[method]({}, "", "/p/" + v.id + "#link=" + syntheticLinkToken);
+    assertClosed(v, true); await v.openDocument(); assert.equal(v.requests.length, 2);
+    assert.match(v.status.textContent, /共有リンクを開き直してください/);
+  });
+}
+
+test("a hidden tab wipes content and ignores late exchange, then permits explicit link reopening", async () => {
+  const late = deferred(), v = linkViewer({ fetchResult: (n, pdf, response, url) => n === 1 ? late.promise : Promise.resolve(url.endsWith("/open") ? pdf() : response()) });
+  const opening = v.openDocument(); v.browserDocument.hidden = true; v.event("visibilitychange");
+  assert.equal(v.requests[0].options.signal.aborted, true); late.resolve(v.sessionResponse()); await opening;
+  assertClosed(v); assert.equal(v.loadingTasks.length, 0);
+  v.browserDocument.hidden = false; v.event("visibilitychange"); await v.openDocument();
+  assert.equal(v.requests.length, 3); assert.equal(v.document.hidden, false);
+});
+
+for (const failure of [false, true]) {
+  test(`link logout ${failure ? "failure" : "success"} erases the credential and never shows a password fallback`, async () => {
+    const v = linkViewer({ fetchResult: (_n, pdf, response, url, request) => Promise.resolve(request.method === "DELETE" ? response({ ok: !failure }) : url.endsWith("/open") ? pdf() : response()) });
+    await v.openDocument(); await v.logOutDocument(); assertClosed(v, true);
+    assert.equal(v.requests[2].options.method, "DELETE"); assert.equal(v.requests[2].options.body, "{}");
+    assert.equal(v.requests[2].options.headers["x-vault-reader-link"], v.linkId);
+    assert.equal(v["unlock-form"].hidden, true); assert.match(v.status.textContent, /共有リンクを開き直してください/);
+    await v.openDocument(); await v.unlockDocument(); assert.equal(v.requests.length, 3);
+  });
+}
+
+test("link display polls revocation without sending the original bearer token again", async () => {
+  const v = linkViewer({ fetchResult: (_n, pdf, response, url) => Promise.resolve(url.endsWith("/status") ? response({ ok: false }) : url.endsWith("/open") ? pdf() : response()) });
+  await v.openDocument(); v.advance(15000); await v.fireTimer(15000);
+  assert.equal(v.requests[2].url, "/p/" + v.id + "/status"); assert.equal(v.requests[2].options.method, "GET");
+  assert.equal(v.requests[2].options.headers["x-vault-reader-link"], v.linkId);
+  assert.equal(v.requests[2].options.body, undefined); assertClosed(v); assert.equal(v["unlock-form"].hidden, true);
+});
+
+test("link download uses its current cookie and preserves the recipient filename without retransmitting the link", async () => {
+  const filename = encodeURIComponent("CV_ダミー開示先.pdf");
+  const v = linkViewer({ fetchResult: (_n, pdf, response, url) => Promise.resolve(url.endsWith("/open") ? pdf({ headers: { "x-vault-download-filename": filename } }) : response()) });
+  await v.openDocument(); await v.downloadDocument();
+  assert.equal(v.requests.length, 3); assert.deepEqual(Object.keys(JSON.parse(v.requests[2].options.body)), ["requestId"]);
+  assert.equal(v.requests[2].options.headers["x-vault-reader-link"], v.linkId);
+  assert.equal(v.downloads[0].filename, "CV_ダミー開示先.pdf");
+  assert.ok(v.requests.slice(1).every(request => !request.options.body?.includes(syntheticLinkToken)));
+});
+
+for (const linkId of [undefined, null, "", "not-a-UUID", "dc6ab455-370c-1526-897e-441bbf4f9990", "DC6AB455-370C-4526-897E-441BBF4F9990", 5, { id: syntheticLinkId }]) {
+  test(`secret-link session with malformed context ${JSON.stringify(linkId)} fails before PDF retrieval`, async () => {
+    const v = linkViewer({ fetchResult: (_n, _pdf, response) => Promise.resolve(response({ value: { expiresAt: 1800000600000, sessionExpiresAt: 1800000300000, linkId } })) });
+    await v.openDocument(); assert.equal(v.requests.length, 1); assert.equal(v.loadingTasks.length, 0);
+    assertClosed(v); assert.equal(v["unlock-form"].hidden, true); assert.match(v.status.textContent, /共有リンクを確認できませんでした/);
+  });
+}
+
+test("plain password authentication never adopts a link context field from its response", async () => {
+  const v = viewer({ passwordMode: true, fetchResult: (_n, pdf, response, url) => Promise.resolve(url.endsWith("/open") ? pdf() : response({ value: { expiresAt: 1800000600000, sessionExpiresAt: 1800000300000, linkId: syntheticLinkId } })) });
+  await v.unlockDocument(); await v.openDocument(); await v.logOutDocument();
+  assert.ok(v.requests.every(request => request.options.headers?.["x-vault-reader-link"] === undefined));
+});
+
+test("a late older link exchange cannot replace a newer view's reader context", async () => {
+  const late = deferred(), nextLinkId = randomUUID(), filename = encodeURIComponent("CV_ダミー開示先.pdf");
+  const v = linkViewer({ fetchResult: (n, pdf, response, url) => n === 1 ? late.promise : Promise.resolve(url.endsWith("/open") ? pdf({ headers: { "x-vault-download-filename": filename } }) : response({ value: { expiresAt: 1800000600000, sessionExpiresAt: 1800000300000, linkId: nextLinkId } })) });
+  const oldOpening = v.openDocument(); v.browserDocument.hidden = true; v.event("visibilitychange");
+  v.browserDocument.hidden = false; v.event("visibilitychange"); await v.openDocument();
+  late.resolve(v.sessionResponse()); await oldOpening; await v.downloadDocument(); await v.logOutDocument();
+  assert.equal(v.requests[1].options.headers["x-vault-reader-link"], undefined, "new exchange must not reuse older context");
+  assert.ok(v.requests.slice(2).every(request => request.options.headers["x-vault-reader-link"] === nextLinkId));
+});
+
+test("a replaced shared cookie cannot switch a link viewer's download into another recipient context", async () => {
+  const filename = encodeURIComponent("CV_ダミー開示先.pdf"), expected = syntheticLinkId;
+  let cookieContext = expected;
+  const v = linkViewer({ fetchResult: (_n, pdf, response, url, request) => {
+    if (url.endsWith("/session")) return Promise.resolve(response());
+    return Promise.resolve(pdf({ ok: request.headers?.["x-vault-reader-link"] === cookieContext, headers: { "x-vault-download-filename": filename } }));
+  } });
+  await v.openDocument(); cookieContext = randomUUID(); await v.downloadDocument();
+  assert.equal(v.requests[2].options.headers["x-vault-reader-link"], expected);
+  assert.equal(v.downloads.length, 0); assertClosed(v); assert.equal(v["unlock-form"].hidden, true);
 });

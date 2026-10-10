@@ -34,6 +34,7 @@ async function request(path, subject, options = {}) {
     headers: { ...headers, ...options.headers } }), env);
 }
 const extraAssets = [
+  ['/v1/admin/assets/links.js', admin.linksJs, 'text/javascript; charset=utf-8'],
   ['/v1/admin/assets/canary.js', admin.canaryJs, 'text/javascript; charset=utf-8'],
   ['/v1/admin/assets/registration-preview.js', registrationPreview.js, 'text/javascript; charset=utf-8'],
   ['/v1/admin/assets/pdf-preparation-worker.js', registrationPreview.workerJs, 'text/javascript; charset=utf-8'],
