@@ -53,7 +53,7 @@ jobs:
           set -euo pipefail
           umask 077
           mkdir -p .wrangler/vault-source-release/reports
-          wrangler deploy --dry-run --config vault/wrangler.production.toml --outdir .wrangler/vault-source-release/build
+          wrangler deploy --dry-run --cwd vault --config wrangler.production.toml --outdir "$GITHUB_WORKSPACE/.wrangler/vault-source-release/build"
           KANARIYA_BUNDLE_SHA=$(python3 -c 'import hashlib,pathlib; print(hashlib.sha256(pathlib.Path(".wrangler/vault-source-release/build/worker.js").read_bytes()).hexdigest())')
           printf 'sha256=%s\n' "$KANARIYA_BUNDLE_SHA" >> "$GITHUB_OUTPUT"
           python3 -c 'import hashlib,json,os,pathlib; p=pathlib.Path(".wrangler/vault-source-release/build/worker.js"); pathlib.Path(".wrangler/vault-source-release/reports/build.json").write_text(json.dumps({"commit":os.environ["GITHUB_SHA"],"candidateSha256":hashlib.sha256(p.read_bytes()).hexdigest(),"candidateBytes":p.stat().st_size})+"\n")'
