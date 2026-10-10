@@ -2,17 +2,22 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { parseArgs, promisify } from "node:util";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { newKey, importKey, sealDocument, sealJSON, utf8 } from "../src/crypto.js";
 
 const exec = promisify(execFile), root = fileURLToPath(new URL("../", import.meta.url));
-const report = { status: "running_not_verified", checks: [], realDataUsed: false, liveNotificationsSent: false };
-const reportPath = process.argv[2] ? resolve(process.argv[2]) : null;
+const args = parseArgs({ options: { bundle: { type: "string" }, "expected-sha": { type: "string" }, report: { type: "string" } }, allowPositionals: true });
+const candidatePath = args.values.bundle ? resolve(args.values.bundle) : null;
+const expectedSha256 = args.values["expected-sha"];
+const fixturePath = args.positionals[1] ? resolve(args.positionals[1]) : null;
+const report = { status: "running_not_verified", pass: false, checks: [], realDataUsed: false, liveNotificationsSent: false,
+  compatibilityDate: "2026-01-12", compatibilityFlags: ["nodejs_compat"] };
+const reportPath = args.values.report ? resolve(args.values.report) : args.positionals[0] ? resolve(args.positionals[0]) : null;
 let temporary, mf;
 async function recordReport() { if (reportPath) await writeFile(reportPath, JSON.stringify(report, null, 2)); }
 const pause = ms => new Promise(r => setTimeout(r, ms));
@@ -26,19 +31,34 @@ async function files(path) {
 }
 try {
   await recordReport();
+  assert.ok(args.positionals.length <= 2);
+  assert.ok(!candidatePath || args.positionals.length === 0, "frozen_bundle_accepts_no_external_fixture");
+  assert.ok(candidatePath ? /^[0-9a-f]{64}$/.test(expectedSha256 ?? "") : !expectedSha256, "bundle_and_expected_sha_required_together");
   const npmRoot = (await exec("npm", ["root", "-g"], { timeout: 5000 })).stdout.trim();
   const wrangler = join(npmRoot, "wrangler"), pkg = JSON.parse(await readFile(join(wrangler, "package.json"), "utf8"));
+  const miniflarePkg = JSON.parse(await readFile(join(wrangler, "node_modules/miniflare/package.json"), "utf8"));
+  report.runtime = { node: process.version, wrangler: pkg.version, miniflare: miniflarePkg.version };
   const runtime = await import(pathToFileURL(join(wrangler, "node_modules/miniflare/dist/src/index.js")));
   temporary = await mkdtemp(join(tmpdir(), "kanariya-vault-runtime-"));
-  const build = join(temporary, "build"), persist = join(temporary, "durable-objects");
-  await mkdir(build);
-  await exec(process.execPath, [join(wrangler, typeof pkg.bin === "string" ? pkg.bin : pkg.bin.wrangler),
-    "deploy", "--dry-run", "--outdir", build], { cwd: root, timeout: 25000,
-    env: { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_LOG_PATH: join(temporary, "wrangler.log") } });
-  report.checks.push("dry_run_bundle");
+  const build = candidatePath ? dirname(candidatePath) : join(temporary, "build"), persist = join(temporary, "durable-objects");
+  const candidate = candidatePath ?? join(build, "worker.js");
+  if (candidatePath) {
+    report.candidateSha256 = createHash("sha256").update(await readFile(candidate)).digest("hex");
+    assert.equal(report.candidateSha256, expectedSha256);
+    report.checks.push("frozen_candidate_hash_before_runtime");
+  } else {
+    await mkdir(build);
+    await exec(process.execPath, [join(wrangler, typeof pkg.bin === "string" ? pkg.bin : pkg.bin.wrangler),
+      "deploy", "--dry-run", "--outdir", build], { cwd: root, timeout: 25000,
+      env: { ...process.env, WRANGLER_SEND_METRICS: "false", WRANGLER_LOG_PATH: join(temporary, "wrangler.log") } });
+    report.checks.push("dry_run_bundle");
+  }
   // This local-only wrapper seeds historical encrypted state to exercise storage
   // migration in workerd. It is never included in the deployment bundle.
-  const testWorker = join(build, 'fixture-worker.js');
+  const fixtureModules = join(temporary, "fixture-modules");
+  await mkdir(fixtureModules);
+  await symlink(candidate, join(fixtureModules, "worker.js"));
+  const testWorker = join(fixtureModules, 'fixture-worker.js');
   await writeFile(testWorker, `import worker, { VaultDocument } from './worker.js';
 export default worker;
 export class RuntimeDocument extends VaultDocument {
@@ -54,14 +74,14 @@ export class RuntimeDocument extends VaultDocument {
     VAULT_OWNER_SUB: "synthetic-owner", VAULT_WRAP_KEY: newKey(), VAULT_AUDIT_KEY: newKey(), WEBHOOK_URL: "https://notify.example.test/fixture" };
   const id = crypto.randomUUID(), subject = "synthetic-private-runtime-subject", otherSubject = 'synthetic-other-runtime-subject';
   let pdf = utf8("%PDF-1.4\nSYNTHETIC-RUNTIME-PRIVATE-BODY\n");
-  if (process.argv[3]) {
-    const fixture = await readFile(resolve(process.argv[3]));
+  if (fixturePath) {
+    const fixture = await readFile(fixturePath);
     // Only this reviewed synthetic PDF is allowed through the optional fixture
     // input. A real CV or any other file must never reach the runtime service.
     assert.equal(createHash("sha256").update(fixture).digest("hex"), "abe2ac634b12a6d7558ffe419f7cc311a262afc4fe8ef47b1b747faf7de05429");
     pdf = new Uint8Array(fixture);
   }
-  report.fixture = { kind: process.argv[3] ? "approved_dummy_pdf" : "generated_synthetic_bytes", sha256: createHash("sha256").update(pdf).digest("hex") };
+  report.fixture = { kind: fixturePath ? "approved_dummy_pdf" : "generated_synthetic_bytes", sha256: createHash("sha256").update(pdf).digest("hex") };
   const encrypted = await sealDocument({ id, bytes: pdf, subjects: [subject, otherSubject], expiresAt: Date.now() + 300000 }, await importKey(env.VAULT_WRAP_KEY));
   const recordBytes = JSON.stringify(encrypted);
   env.DUMMY_DOCUMENT_ID = id;
@@ -70,7 +90,7 @@ export class RuntimeDocument extends VaultDocument {
   const token = actor => new SignJWT({ sub: actor }).setProtectedHeader({ alg: "RS256", kid: "runtime" })
     .setIssuer(env.ACCESS_ISSUER).setAudience(env.ACCESS_AUDIENCE).setIssuedAt().setExpirationTime("10m").sign(pair.privateKey);
   const notifications = [], forbidden = [];
-  mf = new runtime.Miniflare({ modules: true, modulesRules: [{ type: 'ESModule', include: ['**/*.js'] }], modulesRoot: build, scriptPath: testWorker,
+  mf = new runtime.Miniflare({ modules: true, modulesRules: [{ type: 'ESModule', include: ['**/*.js'] }], modulesRoot: fixtureModules, scriptPath: testWorker,
     compatibilityDate: "2026-01-12", compatibilityFlags: ["nodejs_compat"], host: "127.0.0.1", port: 0, cf: false,
     log: new runtime.Log(runtime.LogLevel.ERROR), bindings: env,
     durableObjects: { VAULT: { className: "RuntimeDocument", useSQLite: true } }, durableObjectsPersist: persist,
@@ -152,7 +172,7 @@ export class RuntimeDocument extends VaultDocument {
   const passwordEnv = { ...env, PASSWORD_READER_ENABLED: "1", DUMMY_DOCUMENT_ID: passwordId,
     DUMMY_RECORD_SHA256: createHash("sha256").update(passwordRecord).digest("hex") };
   const passwordPersist = join(temporary, "password-durable-objects");
-  mf = new runtime.Miniflare({ modules: true, modulesRoot: build, scriptPath: join(build, "worker.js"),
+  mf = new runtime.Miniflare({ modules: true, modulesRoot: build, scriptPath: candidate,
     compatibilityDate: "2026-01-12", compatibilityFlags: ["nodejs_compat"], host: "127.0.0.1", port: 0, cf: false,
     log: new runtime.Log(runtime.LogLevel.ERROR), bindings: passwordEnv,
     durableObjects: { VAULT: { className: "VaultDocument", useSQLite: true } }, durableObjectsPersist: passwordPersist,
@@ -211,7 +231,12 @@ export class RuntimeDocument extends VaultDocument {
   }
   report.checks.push("password_session_and_document_secrets_not_persisted_in_plaintext");
   assert.deepEqual(forbidden, []); report.checks.push("no_unexpected_outbound");
-  report.status = "passed"; report.runtime = { node: process.version, wrangler: pkg.version };
+  if (candidatePath) {
+    report.candidateSha256After = createHash("sha256").update(await readFile(candidate)).digest("hex");
+    assert.equal(report.candidateSha256After, expectedSha256);
+    report.checks.push("frozen_candidate_hash_unchanged_after_runtime");
+  }
+  report.status = "passed";
 } catch (error) {
   report.error = typeof error?.code === 'string' ? error.code : 'runtime_validation_failed';
   report.status = "failed"; process.exitCode = 1;
@@ -221,5 +246,8 @@ export class RuntimeDocument extends VaultDocument {
   catch { report.status = "cleanup_failed"; process.exitCode = 1; }
   try { if (temporary) await rm(temporary, { recursive: true, force: true }); }
   catch { report.status = "cleanup_failed"; process.exitCode = 1; }
+  report.pass = report.status === "passed";
+  report.testCounts = { runtimeChecksExpected: 16, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
+    bundleChecksPassed: report.checks.filter(check => check === "dry_run_bundle" || check.startsWith("frozen_")).length, totalChecksPassed: report.checks.length };
   await recordReport(); console.log(JSON.stringify(report));
 }

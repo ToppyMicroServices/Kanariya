@@ -1,0 +1,90 @@
+name: Deploy Vault source
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kanariya-vault-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact dispatched commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            vault/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix vault
+          npm install -g wrangler@4.58.0
+
+      - name: Run root and Vault unit tests
+        run: |
+          npm test
+          npm --prefix vault test
+          python3 -m unittest discover -s tests -p 'deploy_vault_source_test.py'
+
+      - name: Run root runtime checks
+        run: npm run test:runtime
+
+      - name: Freeze Vault bundle
+        id: freeze
+        env:
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p .wrangler/vault-source-release/reports
+          wrangler deploy --dry-run --config vault/wrangler.production.toml --outdir .wrangler/vault-source-release/build
+          KANARIYA_BUNDLE_SHA=$(python3 -c 'import hashlib,pathlib; print(hashlib.sha256(pathlib.Path(".wrangler/vault-source-release/build/worker.js").read_bytes()).hexdigest())')
+          printf 'sha256=%s\n' "$KANARIYA_BUNDLE_SHA" >> "$GITHUB_OUTPUT"
+          python3 -c 'import hashlib,json,os,pathlib; p=pathlib.Path(".wrangler/vault-source-release/build/worker.js"); pathlib.Path(".wrangler/vault-source-release/reports/build.json").write_text(json.dumps({"commit":os.environ["GITHUB_SHA"],"candidateSha256":hashlib.sha256(p.read_bytes()).hexdigest(),"candidateBytes":p.stat().st_size})+"\n")'
+
+      - name: Verify exact frozen Vault runtime
+        env:
+          KANARIYA_BUNDLE_SHA: ${{ steps.freeze.outputs.sha256 }}
+        run: |
+          node vault/scripts/check-runtime.mjs \
+            --bundle .wrangler/vault-source-release/build/worker.js \
+            --expected-sha "$KANARIYA_BUNDLE_SHA" \
+            --report .wrangler/vault-source-release/reports/runtime.json
+
+      - name: Deploy source and verify preserved configuration
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          KANARIYA_BUNDLE_SHA: ${{ steps.freeze.outputs.sha256 }}
+        run: |
+          python3 scripts/deploy_vault_source.py \
+            --bundle .wrangler/vault-source-release/build/worker.js \
+            --sha256 "$KANARIYA_BUNDLE_SHA" \
+            --tests .wrangler/vault-source-release/reports/runtime.json \
+            --report .wrangler/vault-source-release/reports/deployment.json
+
+      - name: Save release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vault-source-release-${{ github.sha }}-${{ github.run_id }}
+          path: .wrangler/vault-source-release/reports/*.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30
