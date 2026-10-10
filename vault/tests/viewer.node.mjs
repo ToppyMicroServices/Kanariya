@@ -369,15 +369,18 @@ test("both pages state copy limitations and keep Access and shared-password entr
   assert.match(passwordHtml, /src="\/p\/assets\/viewer.js"/);
   assert.match(passwordHtml, /href="\/p\/assets\/viewer.css"/);
   for (const source of [html, passwordHtml]) {
-    assert.match(source, /保存済みのPDFやスクリーンショットには閲覧期限は適用されず、回収もできません/);
-    assert.match(source, /現行の通知では表示と保存を区別しません/);
-    assert.match(source, /その後の文書取得を停止するもので、すでに受信・保存された内容を回収するものではありません/);
+    assert.match(source, /保存したPDFやスクリーンショットには閲覧期限が適用されず、再び開いても通知されません/);
+    assert.match(source, /通知には、閲覧・保存のどちらを行ったかは含まれません/);
+    assert.match(source, /すでに表示・保存された内容は回収できません/);
     assert.doesNotMatch(source, /PDF暗号化パスワード|type="file"|download=|window.print/);
+    assert.doesNotMatch(source.match(/<div class="intro">.*?<\/div>/)[0], /開示先|本人/);
+    assert.match(source, /<details><summary>ご案内<\/summary><p>本ページは、文書提供者が指定した開示先向けの閲覧ページです。/);
   }
   assert.match(passwordHtml, /実際の閲覧者本人を確認するものではありません/);
   assert.doesNotMatch(html, /共通パスワード方式では/);
-  assert.match(html, /表示中の失効は定期確認しません/);
-  assert.match(passwordHtml, /認証は最長5分間有効です/);
+  assert.match(html, /共有の終了だけでは直ちに閉じません/);
+  assert.match(passwordHtml, /認証は最長5分間です/);
+  for (const source of [html, passwordHtml]) assert.doesNotMatch(source, /復号イベント|現行の通知|定期確認|サーバー|待機列/);
   for (const source of [js, passwordJs]) assert.doesNotMatch(source, /localStorage|sessionStorage|indexedDB|document.cookie|console\./);
 });
 
@@ -678,7 +681,7 @@ test("document deadline is displayed in Japan time, independently of a shorter l
   assert.equal(v["session-deadline"].hidden, true);
   await v.unlockDocument();
   assert.equal(v.deadline.textContent, "文書の閲覧期限：2026/10/09 21:10:00（日本時間）");
-  assert.equal(v["session-deadline"].textContent, "現在の認証の有効期限：2026/10/09 21:05:00（日本時間）。期限後は再度認証してください。");
+  assert.equal(v["session-deadline"].textContent, "認証の有効期限：2026/10/09 21:05:00（日本時間）");
   assert.equal(v["session-deadline"].hidden, false);
   assert.equal(v.browserDocument.activeElement, v.open);
   await v.openDocument();
@@ -727,7 +730,7 @@ for (const passwordMode of [false, true]) {
     for (let index = 0; index < 2; index++) {
       const section = v.document.children[index], details = section.children[1], text = details.children[2];
       assert.equal(details.kind, "details");
-      assert.equal(details.children[0].textContent, `${index + 1}ページ目の読み上げ用テキスト`);
+      assert.equal(details.children[0].textContent, `本文をテキストで読む（${index + 1}ページ目）`);
       assert.equal(text.textContent, `Page ${index + 1}\n<img src=x onerror="alert(1)">`);
       assert.equal(text.children.length, 0); assert.equal(text.attributes.get("dir"), "auto");
       assert.equal(v.pdfPages[index].textReader.released, true);
@@ -740,8 +743,8 @@ test("image-only pages explain that a text version is needed", async () => {
   const v = viewer({ textResult: () => Promise.resolve({ done: false, value: { items: [] } }) });
   await v.openDocument();
   assert.equal(v.document.hidden, false);
-  assert.match(v.textElements[0].textContent, /このページからテキストを取得できません/);
-  assert.match(v.textElements[0].textContent, /文書提供者にテキスト版をお問い合わせください/);
+  assert.match(v.textElements[0].textContent, /本文を文字で表示できません/);
+  assert.match(v.textElements[0].textContent, /テキスト版については、文書提供者にお問い合わせください/);
 });
 
 for (const event of ["close", "pagehide", "hashchange", "popstate", "visibilitychange", "logout", "expiry", "timeout"]) {

@@ -7,8 +7,8 @@ function page(password) {
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#02213b"><title>保護文書の閲覧 | ToppyMicroServices</title><link rel="stylesheet" href="${assets}/viewer.css"></head>
 <body>
 <header class="site-header"><div class="header-inner"><a class="brand" href="https://www.toppymicros.com/" target="_blank" rel="noopener noreferrer" aria-label="ToppyMicroServicesのサイト（新しいタブ）"><img src="${assets}/brand.png" width="32" height="32" alt=""><span>ToppyMicroServices</span></a><span class="service-name">Kanariya</span></div></header>
-<main id="main"><div class="intro"><p class="eyebrow">KANARIYA · DOCUMENT SHARING</p><h1>保護文書の閲覧</h1><p class="intro-copy">本ページは、文書提供者が指定した開示先向けの閲覧ページです。${password ? "共通パスワード方式では、実際の閲覧者本人を確認するものではありません。" : ""}</p></div>
-<section class="viewer-card" aria-label="文書へのアクセス">${login}<div class="actions"><button id="open" type="button"${password ? " disabled" : ""} class="primary">文書を開く</button><button id="download" type="button" hidden>PDFを保存</button><button id="close" type="button" hidden>閲覧を終了</button>${password ? '<button id="logout" type="button" class="quiet" hidden>ログアウト</button>' : ""}</div><p id="deadline" class="deadline" aria-live="polite" aria-atomic="true">文書の閲覧期限：${password ? "認証後に表示します。" : "文書を開く際に表示します。"}</p>${password ? '<p id="session-deadline" class="session-deadline" hidden></p>' : ""}<p id="status" role="status" aria-live="polite" aria-atomic="true"></p><div class="viewing-notice"><h2>閲覧に関するご案内</h2><p>文書を開く操作（画面表示・PDF保存）は復号イベントとして記録され、文書提供者への通知対象となります。現行の通知では表示と保存を区別しません。</p><details><summary>閲覧期限・保存資料の取扱い</summary><p>失効または閲覧期限を過ぎると、本ページから文書を開くことやPDFを保存することはできません。失効および閲覧期限は、その後の文書取得を停止するもので、すでに受信・保存された内容を回収するものではありません。開示先名が設定された文書は、宛名入りのPDFとして保存できます。</p>${password ? '<p>認証は最長5分間有効です。認証の有効期限を過ぎると表示を閉じますが、文書の閲覧期限内であれば再度認証して開くことができます。</p>' : '<p>表示中の失効は定期確認しません。表示は文書の閲覧期限、閲覧の終了、またはページからの離脱時に閉じます。</p>'}<p>保存済みのPDFやスクリーンショットには閲覧期限は適用されず、回収もできません。保存した資料の再閲覧は記録・通知の対象外です。</p></details></div></section>
+<main id="main"><div class="intro"><p class="eyebrow">KANARIYA · DOCUMENT SHARING</p><h1>保護文書の閲覧</h1></div>
+<section class="viewer-card" aria-label="文書へのアクセス">${login}<div class="actions"><button id="open" type="button"${password ? " disabled" : ""} class="primary">文書を開く</button><button id="download" type="button" hidden>PDFを保存</button><button id="close" type="button" hidden>閲覧を終了</button>${password ? '<button id="logout" type="button" class="quiet" hidden>ログアウト</button>' : ""}</div><p id="deadline" class="deadline" aria-live="polite" aria-atomic="true">文書の閲覧期限：${password ? "認証後に表示します。" : "文書を開く際に表示します。"}</p>${password ? '<p id="session-deadline" class="session-deadline" hidden></p>' : ""}<p id="status" role="status" aria-live="polite" aria-atomic="true"></p><div class="viewing-notice"><p>閲覧・保存は、文書提供者への通知対象です。</p><details><summary>ご案内</summary><p>本ページは、文書提供者が指定した開示先向けの閲覧ページです。${password ? "共通パスワード方式では、実際の閲覧者本人を確認するものではありません。" : ""}</p><p>通知には、閲覧・保存のどちらを行ったかは含まれません。</p><p>閲覧期限や共有の終了後は、新たに文書を開いたり保存したりできません。すでに表示・保存された内容は回収できません。</p>${password ? '<p>認証は最長5分間です。文書の閲覧期限内であれば、再びパスワードを入力して閲覧できます。</p>' : '<p>表示中の文書は、共有の終了だけでは直ちに閉じません。</p>'}<p>保存したPDFやスクリーンショットには閲覧期限が適用されず、再び開いても通知されません。</p></details></div></section>
 <div id="document" aria-label="保護文書のページ" hidden></div><noscript><p class="noscript">文書の表示にはJavaScriptが必要です。</p></noscript></main>
 <footer class="site-footer"><span>ToppyMicroServices OÜ</span><span>Document sharing · Kanariya</span></footer><script src="${assets}/viewer.js" type="module"></script></body></html>`;
 }
@@ -74,7 +74,7 @@ function focusControl(){if(!document.hidden)(passwordMode&&!auth?passwordInput:o
 function controls(){
  const documentExpiry=passwordMode?auth?.expiresAt:active?.documentExpiresAt;
  deadline.textContent="文書の閲覧期限："+(documentExpiry?dateLabel(documentExpiry):passwordMode?"認証後に表示します。":"文書を開く際に表示します。");
- if(sessionDeadline){sessionDeadline.hidden=!auth;sessionDeadline.textContent=auth?"現在の認証の有効期限："+dateLabel(auth.sessionExpiresAt)+"。期限後は再度認証してください。":"";}
+ if(sessionDeadline){sessionDeadline.hidden=!auth;sessionDeadline.textContent=auth?"認証の有効期限："+dateLabel(auth.sessionExpiresAt):"";}
  openButton.disabled=Boolean(pending||(active&&active.busy)||(passwordMode&&!auth));closeButton.hidden=!active;
  downloadButton.hidden=!active?.downloadFilename;downloadButton.disabled=Boolean(pending||active?.busy);
  if(passwordMode){form.hidden=Boolean(auth);unlockButton.disabled=Boolean(pending);passwordInput.disabled=Boolean(pending);logoutButton.hidden=!auth&&pending?.kind!=="logout";logoutButton.disabled=Boolean(pending);}
@@ -143,9 +143,9 @@ async function pageText(page,session){
 }
 function textAlternative(text,number,session){
  const details=document.createElement("details"),summary=document.createElement("summary"),help=document.createElement("p"),content=document.createElement("div");
- details.className="page-text";summary.textContent=number+"ページ目の読み上げ用テキスト";
- help.className="text-help";help.textContent="PDFから抽出したテキストです。表や段組みの読み順が異なる場合があります。";
- content.className="text-content";content.setAttribute("dir","auto");content.textContent=text||"このページからテキストを取得できません。文書提供者にテキスト版をお問い合わせください。";
+ details.className="page-text";summary.textContent="本文をテキストで読む（"+number+"ページ目）";
+ help.className="text-help";help.textContent="表や段組みでは、文字の順番がPDFと異なる場合があります。";
+ content.className="text-content";content.setAttribute("dir","auto");content.textContent=text||"本文を文字で表示できません。テキスト版については、文書提供者にお問い合わせください。";
  session.textNodes.add(content);details.append(summary,help,content);return details;
 }
 async function jsonResponse(response){if(!response.ok||!response.headers.get("content-type")?.startsWith("application/json"))throw new Error();return response.json();}
