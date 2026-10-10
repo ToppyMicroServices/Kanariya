@@ -9,9 +9,15 @@ const final = new TextEncoder().encode('%PDF-1.4\nSYNTHETIC_FINAL\n');
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const settled = async () => { for (let count = 0; count < 12; count++) await new Promise(resolve => setImmediate(resolve)); };
+async function ready(promise, stage) {
+  let timer;
+  try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`mock ${stage} stage was not reached`)), 5000); })]); }
+  finally { clearTimeout(timer); }
+}
 
 function browser(options = {}) {
   const canvases = [], drawings = [], workers = [], timers = new Map(), loads = [], renders = [], readers = [], pageCleanups = [];
+  const stages = Object.fromEntries(['png', 'worker', 'loading', 'render', 'text'].map(name => [name, deferred()]));
   let timerId = 0, fileReads = 0;
   class Element {
     constructor(tag) { this.tagName = tag; this.children = []; this.style = {}; this.attributes = {}; this.textContent = ''; this.clientWidth = 800; this.hidden = false; }
@@ -29,6 +35,7 @@ function browser(options = {}) {
         width: element.width, height: element.height }); } };
     element.getContext = () => options.noCanvas ? null : context;
     element.toBlob = callback => {
+      stages.png.resolve();
       if (options.stallPng) return;
       const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
       callback(options.invalidPng ? null : { size: bytes.length, arrayBuffer: async () => bytes.slice().buffer });
@@ -40,6 +47,7 @@ function browser(options = {}) {
     terminate() { this.terminations++; }
     postMessage(input, transfer) {
       this.input = structuredClone(input, { transfer }); this.transferCount = transfer.length; this.savedHandler = this.onmessage;
+      stages.worker.resolve(this);
       if (options.stallWorker) return;
       queueMicrotask(() => {
         if (options.workerError) { this.onerror({ preventDefault() {} }); return; }
@@ -56,20 +64,21 @@ function browser(options = {}) {
       if (options.pagePromise) return options.pagePromise;
       return {
         getViewport({ scale }) { return { width: (options.width ?? 600) * scale, height: (options.height ?? 800) * scale }; },
-        render(settings) { const render = { settings, cancelled: 0, promise: options.renderPromise ?? Promise.resolve(), cancel() { this.cancelled++; } }; renders.push(render); return render; },
+        render(settings) { const render = { settings, cancelled: 0, promise: options.renderPromise ?? Promise.resolve(), cancel() { this.cancelled++; } }; renders.push(render); stages.render.resolve(render); return render; },
         streamTextContent() {
           let read = 0; const reader = { cancelled: 0, released: 0,
             async read() { if (options.textPromise) return options.textPromise; return read++ ? { done: true } : { done: false, value: { items: [{ str: options.text ?? '<img src=x> 合成本文', hasEOL: true }] } }; },
-            cancel() { this.cancelled++; return Promise.resolve(); }, releaseLock() { this.released++; } }; readers.push(reader); return { getReader: () => reader };
+            cancel() { this.cancelled++; return Promise.resolve(); }, releaseLock() { this.released++; } }; readers.push(reader); return { getReader: () => { stages.text.resolve(reader); return reader; } };
         },
         cleanup() { pageCleanups.push(number); },
       };
     } };
-    load.promise = options.loadingPromise ?? Promise.resolve(pdf); return load;
+    load.promise = options.loadingPromise ?? Promise.resolve(pdf); stages.loading.resolve(load); return load;
   }
   const GlobalWorkerOptions = {};
   const context = { document, Worker, getDocument, GlobalWorkerOptions, Uint8Array, TextEncoder, DOMException, AbortController,
-    crypto: globalThis.crypto, devicePixelRatio: 2, queueMicrotask,
+    crypto: options.hashGate ? { subtle: { async digest(...args) { await options.hashGate; return globalThis.crypto.subtle.digest(...args); } } } : globalThis.crypto,
+    devicePixelRatio: 2, queueMicrotask,
     setTimeout(fn, ms) { const id = ++timerId; timers.set(id, { fn, ms }); return id; }, clearTimeout(id) { timers.delete(id); },
     fetch() { throw new Error('unexpected_network'); }, localStorage: new Proxy({}, { get() { throw new Error('unexpected_storage'); } }),
     console: new Proxy({}, { get() { throw new Error('unexpected_log'); } }) };
@@ -77,6 +86,7 @@ function browser(options = {}) {
   const api = vm.runInNewContext(`(()=>{${script}\nreturn {prepareRegistration,showRegistrationPreview,clearRegistrationPreview};})()`, context);
   const file = { size: source.length, async arrayBuffer() { fileReads++; return source.slice().buffer; } };
   return { ...api, file, container: new Element('div'), canvases, drawings, workers, timers, loads, renders, readers, pageCleanups, GlobalWorkerOptions,
+    ready: stage => ready(stages[stage].promise, stage),
     get fileReads() { return fileReads; }, expire() { const entries = [...timers.values()]; for (const entry of entries) { assert.equal(entry.ms, 20000); entry.fn(); } } };
 }
 
@@ -151,12 +161,22 @@ test('abort and timeout terminate the Worker, reject results, and erase a captur
   for (const abort of [true, false]) {
     const ui = browser({ stallWorker: true }), controller = new AbortController();
     const pending = ui.prepareRegistration(ui.file, 'dummy', false, controller.signal); const rejected = assert.rejects(pending, abort ? { name: 'AbortError' } : /pdf_preparation_failed/);
-    await settled(); assert.equal(ui.workers.length, 1); const worker = ui.workers[0];
+    await ui.ready('worker'); assert.equal(ui.workers.length, 1); const worker = ui.workers[0];
     if (abort) controller.abort(); else ui.expire(); await rejected;
     assert.equal(worker.terminations, 1); assert.equal(ui.timers.size, 0);
     const bytes = final.slice(); worker.savedHandler({ data: { bytes, sourceSha256: sha(source), finalSha256: sha(bytes), pages: 2 } });
     assert.ok(bytes.every(value => value === 0));
   }
+});
+
+test('Worker readiness waits for hashing completion instead of assuming event-loop turns are enough', async () => {
+  const gate = deferred(), ui = browser({ hashGate: gate.promise, stallWorker: true }), controller = new AbortController();
+  const pending = ui.prepareRegistration(ui.file, 'dummy', false, controller.signal);
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  await settled(); assert.equal(ui.workers.length, 0);
+  const waiting = ui.ready('worker'); gate.resolve(); await waiting;
+  assert.equal(ui.workers.length, 1); assert.equal(ui.workers[0].input.recipientName, 'dummy');
+  controller.abort(); await rejected; assert.equal(ui.workers[0].terminations, 1); assert.equal(ui.timers.size, 0);
 });
 
 test('timeout also bounds a stalled file read and a stalled PNG conversion', async () => {
@@ -165,7 +185,7 @@ test('timeout also bounds a stalled file read and a stalled PNG conversion', asy
   const rejected = assert.rejects(pending, /pdf_preparation_failed/); ui.expire(); await rejected;
   const late = source.slice(); gate.resolve(late.buffer); await settled(); assert.ok(late.every(value => value === 0)); assert.equal(ui.workers.length, 0);
   const raster = browser({ stallPng: true }), rasterPending = raster.prepareRegistration(raster.file, 'dummy', true);
-  const rasterRejected = assert.rejects(rasterPending, /pdf_preparation_failed/); await settled(); raster.expire(); await rasterRejected;
+  const rasterRejected = assert.rejects(rasterPending, /pdf_preparation_failed/); await raster.ready('png'); raster.expire(); await rasterRejected;
   assert.equal(raster.canvases[0].width, 0); assert.equal(raster.workers.length, 0);
 });
 
@@ -188,7 +208,7 @@ test('preview renders only a final-byte copy, with bounded canvases, safe text, 
 test('abort cancels a pending render, destroys PDF loading, and prevents late DOM insertion', async () => {
   const gate = deferred(), ui = browser({ renderPromise: gate.promise }), controller = new AbortController();
   const pending = ui.showRegistrationPreview(ui.container, { bytes: final.slice(), pages: 2 }, controller.signal);
-  const rejected = assert.rejects(pending, { name: 'AbortError' }); await settled(); assert.equal(ui.renders.length, 1);
+  const rejected = assert.rejects(pending, { name: 'AbortError' }); await ui.ready('render'); assert.equal(ui.renders.length, 1);
   controller.abort(); await rejected; gate.resolve(); await settled();
   assert.ok(ui.renders[0].cancelled >= 1); assert.ok(ui.loads[0].destroyed >= 1); assert.equal(ui.container.children.length, 0);
   assert.equal(ui.timers.size, 0); assert.ok(ui.canvases.every(canvas => canvas.width === 0));
@@ -197,7 +217,7 @@ test('abort cancels a pending render, destroys PDF loading, and prevents late DO
 test('clear cancels a pending text stream and a replacement preview cannot receive old pages', async () => {
   const gate = deferred(), ui = browser({ textPromise: gate.promise });
   const pending = ui.showRegistrationPreview(ui.container, { bytes: final.slice(), pages: 2 });
-  const rejected = assert.rejects(pending, { name: 'AbortError' }); await settled(); assert.equal(ui.readers.length, 1);
+  const rejected = assert.rejects(pending, { name: 'AbortError' }); await ui.ready('text'); assert.equal(ui.readers.length, 1);
   ui.clearRegistrationPreview(ui.container); await rejected; gate.resolve({ done: true }); await settled();
   assert.ok(ui.readers[0].cancelled >= 1); assert.equal(ui.readers[0].released, 1); assert.equal(ui.container.children.length, 0);
   assert.ok(ui.loads[0].destroyed >= 1);
@@ -206,7 +226,7 @@ test('clear cancels a pending text stream and a replacement preview cannot recei
 test('preview timeout and mismatched page counts clear all partial output', async () => {
   const gate = deferred(), ui = browser({ loadingPromise: gate.promise });
   const pending = ui.showRegistrationPreview(ui.container, { bytes: final.slice(), pages: 2 }); const rejected = assert.rejects(pending, /pdf_preparation_failed/);
-  ui.expire(); await rejected; assert.ok(ui.loads[0].destroyed >= 1); assert.equal(ui.container.children.length, 0);
+  await ui.ready('loading'); ui.expire(); await rejected; assert.ok(ui.loads[0].destroyed >= 1); assert.equal(ui.container.children.length, 0);
   const mismatch = browser({ pages: 3 }); await assert.rejects(mismatch.showRegistrationPreview(mismatch.container, { bytes: final.slice(), pages: 2 }), /pdf_preparation_failed/);
   assert.equal(mismatch.container.children.length, 0); assert.ok(mismatch.loads[0].destroyed >= 1);
 });
