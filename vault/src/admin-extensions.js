@@ -120,13 +120,15 @@ el["replacement-save"].addEventListener("click",()=>{
  const url=URL.createObjectURL(new Blob([JSON.stringify(review,null,2)+"\\n"],{type:"application/json"}));downloads.add(url);const link=document.createElement("a");link.href=url;link.download="kanariya-replacement-"+replacementManifest.id+".json";document.body.append(link);link.click();link.remove();setTimeout(()=>{URL.revokeObjectURL(url);downloads.delete(url);},1000);
 });
 const outcome={decrypted:"復号済み",failed:"失敗",requested:"結果未確認"};
+const notificationFailure={email_response_unknown:"送信結果未確認（応答不明）",email_timeout_unknown:"送信結果未確認（時間超過）",timeout:"送信結果未確認（時間超過）",network_error:"送信結果未確認（通信エラー）",email_delivery_failed:"送信失敗（配達エラー）",configuration_changed:"送信停止（通知先変更）",configuration_error:"送信失敗（通知設定）",email_rate_limit:"送信停止（送信上限）",email_provider_unavailable:"送信失敗（サービス一時停止）",http_error:"送信失敗（送信先エラー）",email_provider_error:"送信失敗（原因未確認）"};
+function notificationLabel(n){return n.state==="accepted"?"送信受付済み":n.state==="pending"?"送信待ち":typeof n.error==="string"&&Object.hasOwn(notificationFailure,n.error)?notificationFailure[n.error]:"失敗";}
 function renderLogs(page){
  if(!page||page.retentionDays!==30||!Array.isArray(page.events)||page.events.length>50||!(page.nextCursor===null||typeof page.nextCursor==="string"&&page.nextCursor.length<=2048))throw new Error();
  const rows=[];
  for(const event of page.events){
   if(!UUID.test(event.id)||!Number.isSafeInteger(event.at)||typeof event.subject!=="string"||!event.subject||event.subject.length>256||!Object.hasOwn(outcome,event.outcome)||!Array.isArray(event.notifications)||event.notifications.length>100||event.notifications.some(n=>!n||!["accepted","pending","failed"].includes(n.state)))throw new Error();
   const sharedLink=event.subject.startsWith("shared-link:");if(sharedLink&&!UUID.test(event.subject.slice(12)))throw new Error();
-  const row=document.createElement("tr");for(const text of [dateLabel(event.at),event.subject==="shared-password"?"本人未確認（共通パスワード）":sharedLink?"本人未確認（共有URL）":"Access認証済み",outcome[event.outcome],event.notifications.map(n=>n.state==="accepted"?"送信受付済み":n.state==="failed"?"失敗":"送信待ち").join("・")||"通知なし"]){const cell=document.createElement("td");cell.textContent=text;row.append(cell);}
+  const row=document.createElement("tr");for(const text of [dateLabel(event.at),event.subject==="shared-password"?"本人未確認（共通パスワード）":sharedLink?"本人未確認（共有URL）":"Access認証済み",outcome[event.outcome],event.notifications.map(notificationLabel).join("・")||"通知なし"]){const cell=document.createElement("td");cell.textContent=text;row.append(cell);}
   const eventId=document.createElement("small");eventId.className="log-event";eventId.textContent="イベントID: "+event.id;row.children[2].append(eventId);rows.push(row);
   if(event.subject!=="shared-password"){const identity=document.createElement("small");identity.className="log-event";identity.textContent=sharedLink?"URL ID: "+event.subject.slice(12):"認証ID: "+event.subject;row.children[1].append(identity);}
  }

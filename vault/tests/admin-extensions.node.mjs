@@ -190,6 +190,44 @@ test('log pages keep shared-password identity unknown and distinguish notificati
   assert.deepEqual(JSON.parse(ui.posts()[0].request.body), { cursor: 'opaque-encrypted-cursor' });
 });
 
+test('failed notification diagnostics distinguish unknown results using only fixed labels and no extra requests', async () => {
+  const reasons = [
+    ['email_response_unknown', '送信結果未確認（応答不明）'],
+    ['email_timeout_unknown', '送信結果未確認（時間超過）'],
+    ['timeout', '送信結果未確認（時間超過）'],
+    ['network_error', '送信結果未確認（通信エラー）'],
+    ['email_delivery_failed', '送信失敗（配達エラー）'],
+    ['configuration_changed', '送信停止（通知先変更）'],
+    ['configuration_error', '送信失敗（通知設定）'],
+    ['email_rate_limit', '送信停止（送信上限）'],
+    ['email_provider_unavailable', '送信失敗（サービス一時停止）'],
+    ['http_error', '送信失敗（送信先エラー）'],
+    ['email_provider_error', '送信失敗（原因未確認）'],
+  ];
+  const ui = browser({ state: { logs: { retentionDays: 30, nextCursor: null, events: reasons.map(([error]) => ({
+    id: uploadId, at: now, subject: 'shared-password', outcome: 'decrypted',
+    notifications: [{ type: 'email', state: 'failed', attempts: 8, error, httpStatus: 503 }],
+  })) } } }); await settled(); await ui.open('logs');
+  assert.deepEqual(ui.elements['log-rows'].children.map(row => row.children[3].textContent), reasons.map(([, label]) => label));
+  assert.deepEqual(ui.requests.map(({ path }) => path), ['/v1/management', `/v1/documents/${id}/logs`]);
+  assert.equal(ui.posts().length, 0);
+});
+
+test('notification diagnostics ignore private or malformed errors and leave accepted and pending labels unchanged', async () => {
+  const errors = [undefined, null, 'private-provider-text@example.test', '<img src=x onerror=alert(1)>', '__proto__', 'toString', 503, { message: 'PRIVATE_PROVIDER_TEXT' }];
+  const notifications = errors.map(error => ({ state: 'failed', error })).concat([
+    { state: 'accepted', error: 'email_response_unknown' }, { state: 'pending', error: 'email_delivery_failed' },
+  ]);
+  const ui = browser({ state: { logs: { retentionDays: 30, nextCursor: null, events: [{
+    id: uploadId, at: now, subject: 'shared-password', outcome: 'decrypted', notifications,
+  }] } } }); await settled(); await ui.open('logs');
+  const cell = ui.elements['log-rows'].children[0].children[3];
+  assert.equal(cell.textContent, [...errors.map(() => '失敗'), '送信受付済み', '送信待ち'].join('・'));
+  assert.equal(cell.children.length, 0);
+  assert.doesNotMatch(cell.textContent, /private|PRIVATE|onerror|example\.test|__proto__|toString|503/);
+  assert.equal(ui.requests.length, 2); assert.equal(ui.posts().length, 0);
+});
+
 test('malformed log states and invalid bootstrap IDs do not display trusted evidence', async () => {
   const ui = browser({ state: { logs: { retentionDays: 30, nextCursor: null, events: [
     { id: uploadId, at: now, subject: 'shared-password', outcome: 'decrypted', notifications: [{ state: 'invented' }] },
