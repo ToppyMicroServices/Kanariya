@@ -374,9 +374,9 @@ test("both pages state copy limitations and keep Access and shared-password entr
   assert.match(passwordHtml, /src="\/p\/assets\/viewer.js"/);
   assert.match(passwordHtml, /href="\/p\/assets\/viewer.css"/);
   for (const source of [html, passwordHtml]) {
-    assert.match(source, /<span class="service-name"><span>Kanariya<\/span><span class="service-description">\[Document sharing and control\]<\/span><\/span>/);
+    assert.match(source, /<span class="service-name">Document sharing and control<\/span>/);
     assert.match(source, /© 2026 ToppyMicroServices OÜ/);
-    assert.match(source, /Document sharing and control · Kanariya/);
+    assert.doesNotMatch(source, /kanariya/i);
     assert.match(source, /保存したPDFやスクリーンショットには閲覧期限が適用されず、再び開いても通知されません/);
     assert.match(source, /通知には、閲覧・保存のどちらを行ったかは含まれません/);
     assert.match(source, /すでに表示・保存された内容は回収できません/);
