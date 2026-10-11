@@ -51,7 +51,7 @@ function browser(options = {}) {
       if (options.stallWorker) return;
       queueMicrotask(() => {
         if (options.workerError) { this.onerror({ preventDefault() {} }); return; }
-        const bytes = final.slice(), result = { bytes, sourceSha256: sha(this.input.bytes), finalSha256: sha(bytes), pages: 2, ...options.reply };
+        const bytes = options.preserveBytes ? this.input.bytes.slice() : final.slice(), result = { bytes, sourceSha256: sha(this.input.bytes), finalSha256: sha(bytes), pages: 2, ...options.reply };
         const reply = structuredClone(result, { transfer: [result.bytes.buffer] }); this.lastReply = reply;
         this.onmessage?.({ data: reply });
       });
@@ -76,14 +76,14 @@ function browser(options = {}) {
     load.promise = options.loadingPromise ?? Promise.resolve(pdf); stages.loading.resolve(load); return load;
   }
   const GlobalWorkerOptions = {};
-  const context = { document, Worker, getDocument, GlobalWorkerOptions, Uint8Array, TextEncoder, DOMException, AbortController,
+  const context = { document, Worker, getDocument, GlobalWorkerOptions, Uint8Array, TextEncoder, TextDecoder, DOMException, AbortController,
     crypto: options.hashGate ? { subtle: { async digest(...args) { await options.hashGate; return globalThis.crypto.subtle.digest(...args); } } } : globalThis.crypto,
     devicePixelRatio: 2, queueMicrotask,
     setTimeout(fn, ms) { const id = ++timerId; timers.set(id, { fn, ms }); return id; }, clearTimeout(id) { timers.delete(id); },
     fetch() { throw new Error('unexpected_network'); }, localStorage: new Proxy({}, { get() { throw new Error('unexpected_storage'); } }),
     console: new Proxy({}, { get() { throw new Error('unexpected_log'); } }) };
   const script = js.replace(/^import .*;\n/, '').replace(/export (?=async function|function)/g, '');
-  const api = vm.runInNewContext(`(()=>{${script}\nreturn {prepareRegistration,showRegistrationPreview,clearRegistrationPreview};})()`, context);
+  const api = vm.runInNewContext(`(()=>{${script}\nreturn {prepareRegistration,prepareExternalRegistration,showRegistrationPreview,clearRegistrationPreview};})()`, context);
   const file = { size: source.length, async arrayBuffer() { fileReads++; return source.slice().buffer; } };
   return { ...api, file, container: new Element('div'), canvases, drawings, workers, timers, loads, renders, readers, pageCleanups, GlobalWorkerOptions,
     ready: stage => ready(stages[stage].promise, stage),
@@ -109,6 +109,67 @@ test('preparation transfers only local PDF and a readable gray raster to one sel
 test('disabled watermark still runs PDF preparation without allocating a raster', async () => {
   const ui = browser(); await ui.prepareRegistration(ui.file, '個人ダミー', false);
   assert.equal(ui.canvases.length, 0); assert.equal(ui.workers[0].input.watermarkPng, null); assert.equal(ui.workers[0].transferCount, 1);
+});
+
+const selectedRecipient = { type: 'organization', organizationName: '株式会社ダミー', personName: null };
+function externalMetadata(overrides = {}) {
+  return { version: 1, recipient: selectedRecipient, watermarkEnabled: true, sourceSha256: 'a'.repeat(64), preparedSha256: sha(source), preparationVersion: 1, ...overrides };
+}
+function metadataFile(value = externalMetadata()) {
+  const bytes = new TextEncoder().encode(typeof value === 'string' ? value : JSON.stringify(value));
+  return { size: bytes.length, async arrayBuffer() { return bytes.slice().buffer; } };
+}
+
+test('external preparation preserves exact final bytes, checks their hash, and imports original-source provenance', async () => {
+  const ui = browser({ preserveBytes: true });
+  const result = await ui.prepareExternalRegistration(ui.file, metadataFile(), selectedRecipient, true);
+  assert.deepEqual(result.bytes, source); assert.equal(result.finalSha256, sha(source));
+  assert.equal(result.sourceSha256, 'a'.repeat(64)); assert.equal(result.pages, 2);
+  assert.equal(ui.workers.length, 1); assert.equal(ui.workers[0].input.watermarkEnabled, false);
+  assert.equal(ui.workers[0].input.watermarkPng, null); assert.equal(ui.canvases.length, 0);
+  assert.equal(ui.fileReads, 1); assert.equal(ui.timers.size, 0);
+  const plain = browser({ preserveBytes: true });
+  assert.deepEqual((await plain.prepareExternalRegistration(plain.file, metadataFile(externalMetadata({ watermarkEnabled: false })), selectedRecipient, false)).bytes, source);
+});
+
+test('external metadata is bounded and rejects unknown fields, bad provenance, recipient and watermark mismatches before PDF reads', async () => {
+  for (const metadata of [externalMetadata({ version: 2 }), externalMetadata({ preparationVersion: 2 }), externalMetadata({ fileName: 'application.pdf' }),
+    externalMetadata({ sourceSha256: 'bad' }), externalMetadata({ preparedSha256: 'A'.repeat(64) }), externalMetadata({ watermarkEnabled: false }),
+    externalMetadata({ recipient: { ...selectedRecipient, organizationName: '別の会社' } }),
+    externalMetadata({ recipient: { ...selectedRecipient, emails: ['private@example.test'] } }),
+    externalMetadata({ recipient: { type: 'person', organizationName: '株式会社ダミー', personName: '担当者' } }),
+    externalMetadata({ recipient: { ...selectedRecipient, organizationName: ' dummy\n' } }), 'not-json', '{}', '[]']) {
+    const ui = browser({ preserveBytes: true });
+    await assert.rejects(ui.prepareExternalRegistration(ui.file, metadataFile(metadata), selectedRecipient, true), /pdf_preparation_failed/);
+    assert.equal(ui.fileReads, 0); assert.equal(ui.workers.length, 0); assert.equal(ui.timers.size, 0);
+  }
+  for (const file of [null, { size: 4097, arrayBuffer() { throw new Error('unexpected_read'); } },
+    { size: 1, arrayBuffer() { throw new Error('unexpected_read'); } },
+    { size: 3, arrayBuffer: async () => new Uint8Array([255, 255, 255]).buffer },
+    { ...metadataFile(), size: 2 }]) {
+    const ui = browser({ preserveBytes: true });
+    await assert.rejects(ui.prepareExternalRegistration(ui.file, file, selectedRecipient, true), /pdf_preparation_failed/);
+    assert.equal(ui.fileReads, 0); assert.equal(ui.workers.length, 0);
+  }
+});
+
+test('external mode rejects a mismatched final hash and any byte-changing preparation', async () => {
+  for (const [options, metadata] of [[{ preserveBytes: true }, externalMetadata({ preparedSha256: sha(final) })], [{}, externalMetadata({ preparedSha256: sha(final) })]]) {
+    const ui = browser(options);
+    await assert.rejects(ui.prepareExternalRegistration(ui.file, metadataFile(metadata), selectedRecipient, true), /pdf_preparation_failed/);
+    assert.ok(ui.workers[0].lastReply.bytes.every(byte => byte === 0)); assert.equal(ui.timers.size, 0);
+  }
+});
+
+test('external metadata reads are cancellable, timed out, and erased after a late response', async () => {
+  for (const abort of [true, false]) {
+    const gate = deferred(), ui = browser({ preserveBytes: true }), controller = new AbortController(), file = metadataFile();
+    const pending = ui.prepareExternalRegistration(ui.file, { size: file.size, arrayBuffer: () => gate.promise }, selectedRecipient, true, controller.signal);
+    const rejected = assert.rejects(pending, abort ? { name: 'AbortError' } : /pdf_preparation_failed/);
+    if (abort) controller.abort(); else ui.expire(); await rejected;
+    const bytes = new Uint8Array(await file.arrayBuffer()); gate.resolve(bytes.buffer); await settled();
+    assert.ok(bytes.every(byte => byte === 0)); assert.equal(ui.fileReads, 0); assert.equal(ui.workers.length, 0); assert.equal(ui.timers.size, 0);
+  }
 });
 
 test('long names wrap to at most two lines and never use less than 48 pixels', async () => {

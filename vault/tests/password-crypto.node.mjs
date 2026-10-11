@@ -112,6 +112,18 @@ test("version-2 encryption supports both modes and never persists the raw passwo
   for (const value of [password, policy.passwordVerifier.hash, policy.passwordVerifier.salt, "scrypt", "SYNTHETIC-SECRET-BODY"]) assert.ok(!stored.includes(value));
   assert.deepEqual(await decryptDocument(record, key, policy), bytes);
 });
+test("link-only encryption has no password verifier or Access reader grant", async () => {
+  const options = { id: crypto.randomUUID(), bytes: utf8("%PDF-1.4\nSYNTHETIC_LINK_ONLY\n"),
+    subjects: [], authMode: "link", expiresAt: Date.now() + 60000 };
+  const key = await importKey(newKey()), record = await sealDocument(options, key), policy = await readPolicy(record, options.id, key);
+  assert.equal(policy.authMode, "link"); assert.deepEqual(policy.subjects, []);
+  assert.equal(Object.hasOwn(policy, "passwordVerifier"), false); assert.equal(Object.hasOwn(policy, "password"), false);
+  assert.deepEqual(await decryptDocument(record, key, policy), options.bytes);
+  for (const change of [{ subjects: ["synthetic-reader"] }, { passwordVerifier: verifier }, { password }]) {
+    assert.throws(() => validatePolicy({ ...policy, ...change }), /invalid_policy/);
+    await assert.rejects(() => sealDocument({ ...options, ...change }, key), /invalid_policy/);
+  }
+});
 test("sealing rejects missing grants, externally supplied verifiers, mixed inputs and bad passwords", async () => {
   const options = { id: crypto.randomUUID(), bytes: utf8("%PDF-test"), subjects: ["synthetic-subject"], expiresAt: Date.now() + 60000 };
   const key = await importKey(newKey());

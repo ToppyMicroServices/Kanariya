@@ -1,6 +1,6 @@
 export const js = String.raw`import { getDocument, GlobalWorkerOptions } from "/p/assets/pdfjs/pdf.min.mjs";
 GlobalWorkerOptions.workerSrc="/p/assets/pdfjs/pdf.worker.min.mjs";
-const MAX_BYTES=1048576,MAX_PNG_BYTES=524288,MAX_PAGES=20,MAX_PAGE_PIXELS=4000000,MAX_TOTAL_PIXELS=12000000;
+const MAX_BYTES=1048576,MAX_METADATA_BYTES=4096,MAX_PNG_BYTES=524288,MAX_PAGES=20,MAX_PAGE_PIXELS=4000000,MAX_TOTAL_PIXELS=12000000;
 const MAX_TEXT_CHARS=200000,MAX_TEXT_ITEMS=20000,TIMEOUT=20000,SHA256=/^[0-9a-f]{64}$/;
 const unsafeName=/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\\/:*?"<>|]/u;
 const previews=new WeakMap();
@@ -78,6 +78,33 @@ export async function prepareRegistration(file,recipientName,watermarkEnabled,si
   closed=true;clearTimeout(timer);signal?.removeEventListener("abort",stop);if(worker){worker.onmessage=null;worker.onerror=null;worker.onmessageerror=null;worker.terminate();}
   wipe(bytes);wipe(png);if(!done)wipe(result?.bytes);
  }
+}
+function preparationMetadata(value,selected,watermarkEnabled){
+ const keys=["version","recipient","watermarkEnabled","sourceSha256","preparedSha256","preparationVersion"];
+ if(!value||Array.isArray(value)||Object.keys(value).length!==keys.length||!keys.every(key=>Object.hasOwn(value,key))||value.version!==1||value.preparationVersion!==1||
+  typeof value.watermarkEnabled!=="boolean"||value.watermarkEnabled!==watermarkEnabled||typeof value.sourceSha256!=="string"||!SHA256.test(value.sourceSha256)||typeof value.preparedSha256!=="string"||!SHA256.test(value.preparedSha256))throw failed();
+ const r=value.recipient,rkeys=["type","organizationName","personName"];
+ if(!r||Array.isArray(r)||Object.keys(r).length!==3||!rkeys.every(key=>Object.hasOwn(r,key))||!["organization","person"].includes(r.type)||
+  r.type==="organization"&&r.organizationName===null||r.type==="person"&&(r.organizationName!==null||r.personName===null))throw failed();
+ for(const key of ["organizationName","personName"])if(r[key]!==null&&recipient(r[key])!==r[key])throw failed();
+ if(!selected||rkeys.some(key=>r[key]!==selected[key]))throw failed();
+ recipient([r.organizationName,r.personName].filter(Boolean).join(" "));return value;
+}
+export async function prepareExternalRegistration(file,metadataFile,selected,watermarkEnabled,signal){
+ check(signal);if(!metadataFile||!Number.isSafeInteger(metadataFile.size)||metadataFile.size<2||metadataFile.size>MAX_METADATA_BYTES||typeof metadataFile.arrayBuffer!=="function"||typeof watermarkEnabled!=="boolean")throw failed();
+ const controller=new AbortController(),stop=()=>controller.abort(),timer=setTimeout(stop,TIMEOUT);let metadataBytes=null,result=null,done=false;
+ signal?.addEventListener("abort",stop,{once:true});
+ try{
+  metadataBytes=await bounded(Promise.resolve(metadataFile.arrayBuffer()).then(buffer=>{const value=new Uint8Array(buffer);if(controller.signal.aborted){wipe(value);throw aborted();}return value;}),controller.signal);
+  if(metadataBytes.length!==metadataFile.size)throw failed();
+  const metadata=preparationMetadata(JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(metadataBytes)),selected,watermarkEnabled);check(controller.signal);
+  const name=recipient([selected.organizationName,selected.personName].filter(Boolean).join(" "));
+  result=await prepareRegistration(file,name,false,controller.signal);check(controller.signal);
+  if(result.sourceSha256!==result.finalSha256||result.finalSha256!==metadata.preparedSha256)throw failed();
+  // The final hash is measured here. The original source hash is imported provenance.
+  result.sourceSha256=metadata.sourceSha256;done=true;return result;
+ }catch{if(signal?.aborted)throw aborted();throw failed();}
+ finally{clearTimeout(timer);signal?.removeEventListener("abort",stop);wipe(metadataBytes);if(!done)wipe(result?.bytes);}
 }
 function destroyLoading(session){try{const promise=session.loading?.destroy();if(promise)void promise.catch(()=>{});}catch{}session.loading=null;wipe(session.data);session.data=null;}
 function release(session){

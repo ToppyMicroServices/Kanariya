@@ -358,12 +358,12 @@ export class VaultDocument {
       const policy = await readPolicy(record, id, keys.wrap);
       const snapshot = state => ({ ...listLinks(state, pin.digest), recipientName: policy.recipientName ?? null,
         documentExpiresAt: this.expiresAt(policy, state), revoked: policy.revoked || state.revoked,
-        enabled: policy.authMode === 'password' && this.env.PASSWORD_READER_ENABLED === '1' });
+        enabled: ['password', 'link'].includes(policy.authMode) && this.env.PASSWORD_READER_ENABLED === '1' });
       if (request.method === 'GET') return json(snapshot(await this.state(this.ctx.storage, keys.audit)));
       const input = await this.input(request, 512);
       if (!input || !['create', 'revoke'].includes(input.action)) throw new Denied(400, 'invalid_links');
       passwordEnabled(this.env);
-      if (policy.authMode !== 'password') throw new Denied();
+      if (!['password', 'link'].includes(policy.authMode)) throw new Denied();
       if (input.action === 'create') {
         const result = await this.mutate(id, keys.audit, latest => {
           this.live(policy, latest);
@@ -466,7 +466,8 @@ export class VaultDocument {
     if (prepared && prepared.digest !== pin.digest) throw new Denied();
     const record = prepared ? prepared.record : await this.record(id, pin.digest), keys = await this.keys();
     const policy = await readPolicy(record, id, keys.wrap);
-    if ((policy.authMode ?? 'access') !== (passwordPath ? 'password' : 'access')) throw new Denied();
+    const mode = policy.authMode ?? 'access';
+    if (passwordPath ? !['password', 'link'].includes(mode) : mode !== 'access') throw new Denied();
     let state = await this.state(this.ctx.storage, keys.audit), session = null;
     if (passwordPath && action === 'session') {
       if (request.method === 'DELETE') {
@@ -481,6 +482,7 @@ export class VaultDocument {
         link = getLiveLink(state, pin.digest, prepared.linkId);
         if (link.hash !== prepared.linkHash) throw new Denied(401, 'unauthenticated');
       } else {
+        if (mode !== 'password') throw new Denied();
         if (!verifyPassword(input.password, policy.passwordVerifier)) throw new Denied(401, 'unauthenticated');
         input.password = '';
       }
@@ -503,6 +505,7 @@ export class VaultDocument {
       const hash = await hashToken(token);
       session = state.sessions.find(s => s.hash === hash && s.recordDigest === pin.digest && s.expiresAt > Date.now());
       if (!session) throw new Denied(401, 'unauthenticated');
+      if (mode === 'link' && !session.linkId) throw new Denied(401, 'unauthenticated');
       this.sessionContext(request, session);
       this.live(policy, state, session);
       subject = session.linkId ? `shared-link:${session.linkId}` : 'shared-password'; // Credential possession is not individual identity.

@@ -531,6 +531,34 @@ export class RuntimeDocument extends VaultDocument {
   assert.deepEqual(await (await signed('/v1/management')).json(), { documentId: passwordId });
   assert.equal(notificationAttempts, beforePreparationNotifications);
   report.checks.push('private_replacement_preparation_preserves_password_verifier_without_exposing_secrets');
+  const linkOnlyId = crypto.randomUUID(), linkOnlyRecipient = 'Synthetic URL Only Recipient';
+  const linkOnlyRegistrationResponse = await signed(registryPath, { method: 'POST', body: { ...registrationInput,
+    id: linkOnlyId, pdfBase64: Buffer.from(pdf).toString('base64'), expiresAt: passwordSealedExpiresAt,
+    replaceOf: passwordId, expectedRevision: passwordRegistry.revision,
+    recipient: { type: 'organization', organizationName: linkOnlyRecipient, personName: null },
+    preparedSha256: passwordReplacementHash, sourceSha256: passwordReplacementHash } });
+  assert.equal(linkOnlyRegistrationResponse.status, 201);
+  const linkOnlyRegistry = await linkOnlyRegistrationResponse.json();
+  const linkOnlyReviewPath = `/v1/registrations/${linkOnlyId}/replacement`;
+  const linkOnlyReviewInput = { currentDocumentId: passwordId, expectedRevision: linkOnlyRegistry.revision, authMode: 'link' };
+  const linkOnlyPreparedResponse = await signed(linkOnlyReviewPath, { method: 'POST', body: linkOnlyReviewInput });
+  assert.equal(linkOnlyPreparedResponse.status, 201);
+  const linkOnlyManifest = (await linkOnlyPreparedResponse.json()).replacement;
+  assert.equal(linkOnlyManifest.version, 2); assert.equal(linkOnlyManifest.authMode, 'link');
+  const linkOnlyRecordBytes = await (await passwordBucket.get(`${linkOnlyId}.sealed.json`)).text();
+  assert.equal(createHash('sha256').update(linkOnlyRecordBytes).digest('hex'), linkOnlyManifest.recordSha256);
+  const linkOnlyPolicy = await readPolicy(JSON.parse(linkOnlyRecordBytes), linkOnlyId, await importKey(env.VAULT_WRAP_KEY));
+  assert.equal(linkOnlyPolicy.authMode, 'link'); assert.deepEqual(linkOnlyPolicy.subjects, []);
+  assert.equal(Object.hasOwn(linkOnlyPolicy, 'passwordVerifier'), false);
+  assert.deepEqual(await decryptDocument(JSON.parse(linkOnlyRecordBytes), await importKey(env.VAULT_WRAP_KEY), linkOnlyPolicy), pdf);
+  assert.deepEqual((await (await signed(linkOnlyReviewPath)).json()).replacement, linkOnlyManifest);
+  assert.equal((await signed(linkOnlyReviewPath, { method: 'POST', body: linkOnlyReviewInput })).status, 200);
+  const resumedLinkOnly = await signed(linkOnlyReviewPath, { method: 'POST', body: { currentDocumentId: passwordId, expectedRevision: linkOnlyRegistry.revision } });
+  assert.equal(resumedLinkOnly.status, 200);
+  assert.deepEqual((await resumedLinkOnly.json()).replacement, linkOnlyManifest);
+  assert.equal(await (await passwordBucket.get(`${passwordId}.sealed.json`)).text(), passwordRecord);
+  assert.equal((await mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/p/${linkOnlyId}`)).status, 403);
+  report.checks.push('native_explicit_link_only_replacement_discards_old_password_without_activation');
   assert.equal((await request("status", "", crypto.randomUUID(), passwordId)).status, 401);
   assert.equal((await request("open", subject, crypto.randomUUID(), passwordId)).status, 403);
   assert.equal((await shared("open", { method: "HEAD", cookie, headers: { range: "bytes=0-9" } })).status, 405);
@@ -649,6 +677,88 @@ export class RuntimeDocument extends VaultDocument {
     assert.ok(!bytes.includes(Buffer.from(pdf)));
   }
   report.checks.push("password_session_and_document_secrets_not_persisted_in_plaintext");
+  await mf.dispose(); mf = null;
+  const linkOnlyEnv = { ...env, DUMMY_DOCUMENT_ID: linkOnlyId, DUMMY_RECORD_SHA256: linkOnlyManifest.recordSha256 };
+  const linkOnlyPersist = join(temporary, 'link-only-durable-objects'), linkOnlySecrets = [];
+  mf = new runtime.Miniflare({ modules: true, modulesRoot: build, scriptPath: candidate,
+    compatibilityDate: '2026-01-12', compatibilityFlags: ['nodejs_compat'], host: '127.0.0.1', port: 0, cf: false,
+    log: new runtime.Log(runtime.LogLevel.ERROR), bindings: linkOnlyEnv,
+    durableObjects: { VAULT: { className: 'VaultDocument', useSQLite: true } }, durableObjectsPersist: linkOnlyPersist,
+    r2Buckets: ['VAULT_DOCUMENTS'], outboundService: async request => {
+      if (request.url === env.ACCESS_ISSUER + '/cdn-cgi/access/certs') return new runtime.Response(JSON.stringify({ keys: [jwk] }), { headers: { 'content-type': 'application/json' } });
+      notificationAttempts++;
+      if (request.url !== env.WEBHOOK_URL) { forbidden.push('blocked'); throw new Error('unexpected_network'); }
+      try {
+        const body = await request.text();
+        for (const secret of [...linkOnlySecrets, linkOnlyId, linkOnlyRecipient, password, env.VAULT_WRAP_KEY, env.VAULT_AUDIT_KEY]) assert.ok(!body.includes(secret));
+        assert.ok(!body.includes(Buffer.from(pdf).toString('base64')));
+      } catch { validationErrors.push('fixture_outbound_validation_failed'); throw new Error('fixture_outbound_validation_failed'); }
+      return new runtime.Response(null, { status: 202 });
+    } });
+  await mf.ready;
+  await (await mf.getR2Bucket('VAULT_DOCUMENTS')).put(`${linkOnlyId}.sealed.json`, linkOnlyRecordBytes);
+  async function linkOnlyRequest(action, { method = action === 'status' ? 'GET' : 'POST', cookie = '', linkId, body, headers = {} } = {}) {
+    return mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/p/${linkOnlyId}/${action}`, { method,
+      headers: { origin: env.PUBLIC_ORIGIN, 'content-type': 'application/json', 'cf-connecting-ip': '198.51.100.19', cookie,
+        ...(linkId ? { 'x-vault-reader-link': linkId } : {}), ...headers },
+      ...(method === 'GET' ? {} : { body: JSON.stringify(body ?? (action === 'open' ? { requestId: crypto.randomUUID() } : {})) }),
+      signal: AbortSignal.timeout(10000) });
+  }
+  assert.equal((await signed('/v1/admin')).status, 200);
+  assert.equal((await mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/p/${passwordId}`)).status, 403);
+  assert.equal((await linkOnlyRequest('open')).status, 401);
+  assert.equal((await linkOnlyRequest('session', { body: { password } })).status, 403);
+  assert.equal((await linkOnlyRequest('session', { body: { password: 'another-synthetic-password' } })).status, 403);
+  assert.equal((await request('open', subject, crypto.randomUUID(), linkOnlyId)).status, 403);
+  assert.equal((await linkOnlyRequest('open', { cookie })).status, 401);
+  const onlyLinksPath = `/v1/documents/${linkOnlyId}/links`;
+  assert.equal((await (await signed(onlyLinksPath)).json()).enabled, true);
+  const createOnlyLink = async (revision, expiresAt = passwordSealedExpiresAt) => {
+    const response = await signed(onlyLinksPath, { method: 'POST', body: { action: 'create', expectedRevision: revision, expiresAt } });
+    assert.equal(response.status, 200); const value = await response.json();
+    const raw = /^#link=([0-9a-f]{64})$/.exec(new URL(value.url).hash)?.[1]; assert.ok(raw); linkOnlySecrets.push(raw);
+    return { ...value.link, raw, revision: value.revision };
+  };
+  const onlyLink = await createOnlyLink(0);
+  const onlySessionResponse = await linkOnlyRequest('session', { body: { linkToken: onlyLink.raw } });
+  assert.equal(onlySessionResponse.status, 200);
+  const onlyCookie = onlySessionResponse.headers.get('set-cookie').split(';')[0]; linkOnlySecrets.push(onlyCookie.split('=')[1]);
+  const onlySession = { cookie: onlyCookie, linkId: onlyLink.id };
+  for (const purpose of ['view', 'download']) {
+    const response = await linkOnlyRequest('open', { ...onlySession, body: { requestId: crypto.randomUUID() } });
+    assert.equal(response.status, 200); privateManagementHeaders(response);
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), pdf);
+    if (purpose === 'download') assert.equal(decodeURIComponent(response.headers.get('x-vault-download-filename')), `CV_${linkOnlyRecipient}.pdf`);
+  }
+  const onlyLogs = await (await signed(`/v1/documents/${linkOnlyId}/logs`)).json();
+  assert.ok(onlyLogs.events.some(event => event.subject === `shared-link:${onlyLink.id}` && event.outcome === 'decrypted'));
+  report.checks.push('native_link_only_mode_denies_old_password_access_subject_and_session_but_allows_bearer_pdf');
+  const onlyRevokedResponse = await signed(onlyLinksPath, { method: 'POST', body: { action: 'revoke', linkId: onlyLink.id, expectedRevision: onlyLink.revision } });
+  assert.equal(onlyRevokedResponse.status, 200);
+  assert.equal((await linkOnlyRequest('status', onlySession)).status, 401);
+  assert.equal((await linkOnlyRequest('session', { body: { linkToken: onlyLink.raw } })).status, 401);
+  const onlyExpiring = await createOnlyLink((await onlyRevokedResponse.json()).revision, Date.now() + 1000);
+  const onlyExpiringResponse = await linkOnlyRequest('session', { body: { linkToken: onlyExpiring.raw } });
+  assert.equal(onlyExpiringResponse.status, 200);
+  const onlyExpiringCookie = onlyExpiringResponse.headers.get('set-cookie').split(';')[0]; linkOnlySecrets.push(onlyExpiringCookie.split('=')[1]);
+  await pause(Math.max(0, onlyExpiring.expiresAt - Date.now() + 100));
+  assert.equal((await linkOnlyRequest('status', { cookie: onlyExpiringCookie, linkId: onlyExpiring.id })).status, 401);
+  assert.equal((await linkOnlyRequest('session', { body: { linkToken: onlyExpiring.raw } })).status, 401);
+  const onlyLive = await createOnlyLink(onlyExpiring.revision);
+  const onlyLiveResponse = await linkOnlyRequest('session', { body: { linkToken: onlyLive.raw } });
+  assert.equal(onlyLiveResponse.status, 200);
+  const onlyLiveCookie = onlyLiveResponse.headers.get('set-cookie').split(';')[0]; linkOnlySecrets.push(onlyLiveCookie.split('=')[1]);
+  const onlyLiveSession = { cookie: onlyLiveCookie, linkId: onlyLive.id };
+  assert.equal((await linkOnlyRequest('status', onlyLiveSession)).status, 200);
+  assert.equal((await request('revoke', env.VAULT_OWNER_SUB, crypto.randomUUID(), linkOnlyId)).status, 200);
+  assert.equal((await linkOnlyRequest('open', onlyLiveSession)).status, 403);
+  report.checks.push('native_link_only_revocation_and_expiration_stop_existing_credentials');
+  for (const path of await files(linkOnlyPersist)) {
+    const bytes = await readFile(path);
+    for (const secret of [...linkOnlySecrets, linkOnlyRecipient, password, env.VAULT_WRAP_KEY, env.VAULT_AUDIT_KEY]) assert.ok(!bytes.includes(Buffer.from(secret)));
+    assert.ok(!bytes.includes(Buffer.from(pdf)));
+  }
+  report.checks.push('native_link_only_policy_document_and_bearer_secrets_not_stored_in_plaintext');
   assert.deepEqual(forbidden, []); assert.deepEqual(validationErrors, []); report.checks.push("no_unexpected_outbound");
   if (candidatePath) {
     report.candidateSha256After = createHash("sha256").update(await readFile(candidate)).digest("hex");
@@ -670,7 +780,7 @@ export class RuntimeDocument extends VaultDocument {
     report.error ??= 'fixture_outbound_validation_failed'; process.exitCode = 1;
   }
   report.pass = report.status === "passed";
-  report.testCounts = { runtimeChecksExpected: 38, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
+  report.testCounts = { runtimeChecksExpected: 42, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
     bundleChecksPassed: report.checks.filter(check => check === "dry_run_bundle" || check.startsWith("frozen_")).length, totalChecksPassed: report.checks.length };
   await recordReport(); console.log(JSON.stringify(report));
 }

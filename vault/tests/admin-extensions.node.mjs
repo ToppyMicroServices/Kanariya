@@ -7,11 +7,11 @@ import { normalizeRecipientName } from '../src/recipient.js';
 
 const id = 'd4dbffb4-8567-48c3-94c5-e74aaf3e2291', uploadId = '82afbc08-7a90-4d12-971d-dc3f5b93cbcc';
 const now = Date.UTC(2026, 9, 10, 0, 0), future = now + 24 * 3600000;
-const names = ['registration-panel', 'registration-form', 'registration-file', 'registration-expiry', 'registration-replace',
-  'recipient-type', 'recipient-organization', 'recipient-person', 'person-label', 'organization-field', 'registration-watermark',
+const names = ['registration-panel', 'registration-form', 'registration-mode', 'registration-mode-help', 'registration-file', 'registration-metadata-field', 'registration-metadata', 'registration-expiry', 'registration-replace',
+  'recipient-type', 'recipient-organization', 'recipient-person', 'person-label', 'organization-field', 'registration-watermark', 'registration-watermark-label',
   'prepare-pdf', 'registration-review', 'registration-summary', 'registration-preview',
   'register-pdf', 'registration-status', 'registration-reload', 'registration-list', 'replacement-review', 'replacement-summary',
-  'replacement-prepare', 'replacement-reload', 'replacement-save', 'replacement-status', 'contacts-panel', 'contacts-form',
+  'replacement-link-field', 'replacement-link-mode', 'replacement-auth-help', 'replacement-prepare', 'replacement-reload', 'replacement-save', 'replacement-status', 'replacement-info', 'replacement-info-help', 'replacement-info-json', 'contacts-panel', 'contacts-form',
   'contact-emails', 'save-contacts', 'contacts-status', 'contacts-reload', 'logs-panel', 'logs-status', 'log-rows', 'logs-reload', 'logs-next'];
 function deferred() {
   let resolve, reject;
@@ -46,13 +46,13 @@ function browser(options = {}) {
       set innerHTML(_) { throw new Error('untrusted_html_sink'); } };
   }
   const elements = Object.fromEntries(names.map(name => [name, element()])), events = new Map(), requests = [], timers = new Map(), preparations = [], previews = [], clears = [], downloadBlobs = [], revokedDownloads = [], body = element();
-  elements['recipient-type'].value = 'organization'; elements['registration-watermark'].checked = true;
+  elements['recipient-type'].value = 'organization'; elements['registration-watermark'].checked = true; elements['registration-mode'].value = 'browser';
   elements['registration-review'].hidden = true; elements['replacement-review'].hidden = true;
   let timerId = 0;
   const state = { contacts: { revision: 0, emails: [] }, registry: { revision: 0, pending: 0, documents: [] },
     logs: { events: [], nextCursor: null, retentionDays: 30 }, replacement: null, ...options.state };
   class BrowserDate extends Date { static now() { return now; } }
-  const imports = 'import { prepareRegistration, showRegistrationPreview, clearRegistrationPreview } from "/v1/admin/assets/registration-preview.js";\nimport { normalizeRecipientName } from "/v1/admin/assets/recipient.js";\n';
+  const imports = 'import { prepareRegistration, prepareExternalRegistration, showRegistrationPreview, clearRegistrationPreview } from "/v1/admin/assets/registration-preview.js";\nimport { normalizeRecipientName } from "/v1/admin/assets/recipient.js";\n';
   assert.ok(js.startsWith(imports));
   vm.runInNewContext(js.slice(imports.length), {
     document: { getElementById: name => elements[name], createElement: () => element(), body },
@@ -67,6 +67,12 @@ function browser(options = {}) {
       if (bytes.length !== file.size || new TextDecoder().decode(bytes.subarray(0, 5)) !== '%PDF-') throw new Error('synthetic_preparation_failed');
       const result = new TextEncoder().encode('%PDF-1.4\nSYNTHETIC_PREPARED_BROWSER_ONLY\n');
       return { bytes: result, sourceSha256: createHash('sha256').update(bytes).digest('hex'), finalSha256: createHash('sha256').update(result).digest('hex'), pages: 1 };
+    },
+    async prepareExternalRegistration(file, metadataFile, recipient, watermarkEnabled, signal) {
+      preparations.push({ file, metadataFile, recipient, watermarkEnabled, signal, external: true });
+      if (options.prepareExternal) return options.prepareExternal(file, metadataFile, recipient, watermarkEnabled, signal);
+      const metadata = JSON.parse(new TextDecoder().decode(await metadataFile.arrayBuffer())), bytes = new Uint8Array(await file.arrayBuffer());
+      return { bytes, sourceSha256: metadata.sourceSha256, finalSha256: createHash('sha256').update(bytes).digest('hex'), pages: 1 };
     },
     async showRegistrationPreview(container, result, signal) {
       previews.push({ container, result, signal }); if (options.preview) return options.preview(container, result, signal);
@@ -86,7 +92,7 @@ function browser(options = {}) {
       }
       if (path.endsWith('/logs')) return json(state.logs);
       if (path === `/v1/registrations/${uploadId}/replacement`) {
-        if (request.method === 'POST') state.replacement = replacementManifest();
+        if (request.method === 'POST') state.replacement = replacementManifest(JSON.parse(request.body).authMode === 'link' ? { version: 2, authMode: 'link' } : {});
         return json({ replacement: state.replacement }, request.method === 'POST' ? 201 : 200);
       }
       if (path === '/v1/registrations') {
@@ -112,7 +118,7 @@ function browser(options = {}) {
     event(name, value = {}) { return events.get(name)(value); },
     select(file = pdfFile()) { elements['registration-file'].files = [file]; elements['registration-expiry'].value = '2026-10-11T09:00'; elements['recipient-organization'].value = '株式会社ダミー'; return file; },
     change(name, value) { if (typeof value === 'boolean') elements[name].checked = value; else elements[name].value = value;
-      return elements[name].listeners.get(['registration-file', 'recipient-type', 'registration-watermark', 'registration-replace'].includes(name) ? 'change' : 'input')(); },
+      return elements[name].listeners.get(['registration-mode', 'registration-file', 'registration-metadata', 'recipient-type', 'registration-watermark', 'registration-replace'].includes(name) ? 'change' : 'input')(); },
     posts() { return requests.filter(({ request }) => request.method === 'POST'); },
   };
 }
@@ -283,6 +289,57 @@ test('organization and watermark defaults require a local PDF review before any 
   assert.match(ui.elements['registration-summary'].textContent, /株式会社ダミー.*透かし：あり.*非公開/);
   assert.match(html, /<option value="organization">会社・組織/);
   assert.match(html, /id="registration-watermark" type="checkbox" checked/);
+});
+
+function preparedMetadataFile(file) {
+  const bytes = new TextEncoder().encode(JSON.stringify({ version: 1, recipient: replacementCandidate().recipient, watermarkEnabled: true,
+    sourceSha256: 'a'.repeat(64), preparedSha256: createHash('sha256').update('%PDF-1.4\nSYNTHETIC_BROWSER_ONLY\n').digest('hex'), preparationVersion: 1 }));
+  return { name: 'synthetic-metadata.json', size: bytes.length, arrayBuffer: async () => bytes.slice().buffer };
+}
+
+test('external mode previews and uploads the exact chosen PDF with imported source provenance', async () => {
+  const ui = browser(); await settled(); await ui.open('registration'); const file = ui.select(), metadata = preparedMetadataFile(file);
+  assert.equal(ui.elements['registration-mode'].value, 'browser'); assert.equal(ui.elements['registration-metadata-field'].hidden, true);
+  ui.elements['registration-metadata'].files = [metadata]; ui.change('registration-mode', 'external');
+  assert.equal(ui.elements['registration-metadata-field'].hidden, false); assert.equal(ui.elements['registration-mode-help'].hidden, false);
+  assert.equal(ui.elements['registration-metadata'].required, true); assert.match(ui.elements['registration-watermark-label'].textContent, /選んだPDF/);
+  await ui.submit('registration'); assert.equal(ui.preparations.length, 1); assert.equal(ui.preparations[0].external, true);
+  assert.equal(ui.preparations[0].metadataFile, metadata); assert.equal(ui.preparations[0].watermarkEnabled, true);
+  assert.match(ui.elements['registration-summary'].textContent, /そのまま登録/);
+  assert.equal(new TextDecoder().decode(ui.previews[0].result.bytes), '%PDF-1.4\nSYNTHETIC_BROWSER_ONLY\n');
+  await ui.click('register-pdf'); const input = JSON.parse(ui.posts()[0].request.body);
+  assert.equal(Buffer.from(input.pdfBase64, 'base64').toString(), '%PDF-1.4\nSYNTHETIC_BROWSER_ONLY\n');
+  assert.equal(input.sourceSha256, 'a'.repeat(64)); assert.equal(input.preparedSha256, createHash('sha256').update(Buffer.from(input.pdfBase64, 'base64')).digest('hex'));
+  assert.equal(input.watermarkEnabled, true); assert.equal(input.preparationVersion, 1); assert.equal(Object.hasOwn(input, 'authMode'), false);
+});
+
+test('external mode requires a sidecar and fails closed on metadata preparation errors', async () => {
+  const missing = browser(); await settled(); await missing.open('registration'); missing.select(); missing.change('registration-mode', 'external');
+  await missing.submit('registration'); assert.equal(missing.preparations.length, 0); assert.equal(missing.posts().length, 0);
+  const invalid = browser({ prepareExternal: async () => { throw new Error('PRIVATE_METADATA_DETAIL'); } });
+  await settled(); await invalid.open('registration'); const file = invalid.select(); invalid.elements['registration-metadata'].files = [preparedMetadataFile(file)]; invalid.change('registration-mode', 'external');
+  await invalid.submit('registration'); assert.equal(invalid.elements['registration-review'].hidden, true);
+  assert.equal(invalid.elements['register-pdf'].disabled, true); assert.equal(invalid.posts().length, 0);
+  assert.match(invalid.elements['registration-status'].textContent, /メタデータ/); assert.doesNotMatch(invalid.elements['registration-status'].textContent, /PRIVATE_METADATA_DETAIL/);
+});
+
+test('external review is invalidated by mode, sidecar, PDF, recipient, expiry or watermark changes', async () => {
+  for (const [name, value] of [['registration-mode', 'browser'], ['registration-metadata', ''], ['registration-file', ''],
+    ['recipient-organization', '別の会社'], ['recipient-person', '担当者'], ['registration-expiry', '2026-10-12T09:00'], ['registration-watermark', false]]) {
+    const ui = browser(); await settled(); await ui.open('registration'); const file = ui.select();
+    ui.elements['registration-metadata'].files = [preparedMetadataFile(file)]; ui.change('registration-mode', 'external'); await ui.submit('registration');
+    const bytes = ui.previews[0].result.bytes; assert.ok(bytes.some(byte => byte !== 0)); ui.change(name, value);
+    assert.equal(ui.elements['registration-review'].hidden, true); assert.equal(ui.elements['register-pdf'].disabled, true);
+    assert.ok(bytes.every(byte => byte === 0)); await ui.click('register-pdf'); assert.equal(ui.posts().length, 0);
+  }
+});
+
+test('pagehide clears external sidecar inputs and returns preparation to its default', async () => {
+  const ui = browser(); await settled(); await ui.open('registration'); const file = ui.select();
+  ui.elements['registration-metadata'].files = [preparedMetadataFile(file)]; ui.elements['registration-metadata'].value = 'synthetic-metadata.json';
+  ui.change('registration-mode', 'external'); await ui.submit('registration'); const bytes = ui.previews[0].result.bytes;
+  ui.event('pagehide'); assert.equal(ui.elements['registration-metadata'].value, ''); assert.equal(ui.elements['registration-mode'].value, 'browser');
+  assert.ok(bytes.every(byte => byte === 0)); assert.equal(ui.elements['register-pdf'].disabled, true); assert.equal(ui.posts().length, 0);
 });
 
 test('person recipients send only the normalized person name and an explicit watermark choice', async () => {
@@ -578,6 +635,66 @@ test('replacement candidate review reads status before an explicit private prepa
   assert.ok(ui.requests.every(({ path }) => !/\/open$|\/revoke$|\/session$/.test(path)));
 });
 
+test('URL-only replacement choice is explicit and exports the sealed version 2 mode', async () => {
+  const ui = browser({ state: { registry: { revision: 2, pending: 0, documents: [replacementCandidate()] } } });
+  await settled(); await ui.open('registration'); await ui.review();
+  assert.equal(ui.elements['replacement-link-mode'].checked, false); assert.equal(ui.elements['replacement-link-mode'].disabled, false);
+  ui.elements['replacement-link-mode'].checked = true; await ui.click('replacement-prepare');
+  assert.deepEqual(JSON.parse(ui.posts()[0].request.body), { expectedRevision: 2, currentDocumentId: id, authMode: 'link' });
+  assert.equal(ui.elements['replacement-link-mode'].disabled, true); assert.equal(ui.elements['replacement-link-field'].hidden, true);
+  assert.match(ui.elements['replacement-summary'].textContent, /共有URLのみ（本人未確認）/);
+  await ui.click('replacement-save'); const plan = JSON.parse(await ui.downloadBlobs[0].text());
+  assert.equal(plan.version, 2); assert.equal(plan.authMode, 'link'); assert.equal(plan.status, 'prepared_not_active');
+  assert.equal(Object.keys(plan).length, 15); assert.deepEqual(plan.recipient, replacementCandidate().recipient);
+  assert.equal(plan.recipientName, '株式会社ダミー'); assert.doesNotMatch(JSON.stringify(plan), /password|pdfBase64/);
+  assert.equal(ui.elements['replacement-info'].hidden, false); assert.equal(ui.elements['replacement-info'].open, false);
+  assert.equal(ui.elements['replacement-info-help'].hidden, false);
+  assert.equal(ui.elements['replacement-info-json'].textContent, await ui.downloadBlobs[0].text());
+});
+
+test('an existing version 2 replacement is displayed as immutable without another POST', async () => {
+  const ui = browser({ state: { registry: { revision: 2, pending: 0, documents: [replacementCandidate()] }, replacement: replacementManifest({ version: 2, authMode: 'link' }) } });
+  await settled(); await ui.open('registration'); await ui.review();
+  assert.match(ui.elements['replacement-summary'].textContent, /共有URLのみ/); assert.equal(ui.elements['replacement-link-mode'].disabled, true);
+  await ui.click('replacement-prepare'); assert.equal(ui.posts().length, 0); await ui.click('replacement-save');
+  assert.deepEqual(JSON.parse(await ui.downloadBlobs[0].text()), replacementManifest({ version: 2, authMode: 'link' }));
+  assert.equal(ui.elements['replacement-info-json'].textContent, await ui.downloadBlobs[0].text());
+});
+
+test('replacement confirmation JSON is cleared and collapsed during reads and remains absent on unknown or invalid results', async () => {
+  for (const next of ['absent', 'invalid', 'unknown']) {
+    const gate = deferred(); let reads = 0;
+    const ui = browser({ fetch(path) {
+      if (path === '/v1/management') return json({ documentId: id });
+      if (path === '/v1/registrations') return json({ revision: 2, pending: 0, documents: [replacementCandidate()] });
+      return ++reads === 1 ? json({ replacement: replacementManifest({ version: 2, authMode: 'link' }) }) : gate.promise;
+    } });
+    await settled(); await ui.open('registration'); await ui.review();
+    assert.equal(ui.elements['replacement-info'].hidden, false); assert.equal(ui.elements['replacement-info'].open, false);
+    ui.elements['replacement-info'].open = true; ui.click('replacement-reload'); await settled();
+    assert.equal(ui.elements['replacement-info'].hidden, true); assert.equal(ui.elements['replacement-info'].open, false);
+    assert.equal(ui.elements['replacement-info-json'].textContent, '');
+    if (next === 'unknown') gate.reject(new Error('PRIVATE_RESPONSE_FAILURE'));
+    else gate.resolve(json({ replacement: next === 'absent' ? null : replacementManifest({ authMode: 'link' }) }));
+    await settled(); assert.equal(ui.elements['replacement-info'].hidden, true); assert.equal(ui.elements['replacement-info-json'].textContent, '');
+    assert.equal(ui.downloadBlobs.length, 0); assert.equal(ui.posts().length, 0); assert.equal(ui.requests.length, 4);
+    assert.doesNotMatch(ui.elements['replacement-status'].textContent, /PRIVATE_RESPONSE_FAILURE/);
+  }
+});
+
+test('a replacement POST response cannot silently change the requested access mode', async () => {
+  for (const requestedLink of [true, false]) {
+    const ui = browser({ fetch(path, request) {
+      if (path === '/v1/management') return json({ documentId: id });
+      if (path === '/v1/registrations') return json({ revision: 2, pending: 0, documents: [replacementCandidate()] });
+      return json({ replacement: request.method === 'POST' ? replacementManifest(requestedLink ? {} : { version: 2, authMode: 'link' }) : null });
+    } });
+    await settled(); await ui.open('registration'); await ui.review(); ui.elements['replacement-link-mode'].checked = requestedLink; await ui.click('replacement-prepare');
+    assert.equal(ui.posts().length, 1); assert.equal(ui.elements['replacement-save'].hidden, true); assert.equal(ui.elements['replacement-prepare'].disabled, true);
+    assert.match(ui.elements['replacement-status'].textContent, /準備結果を確認できません/);
+  }
+});
+
 test('an existing prepared replacement can save only a nonpersonal review plan', async () => {
   const ui = browser({ state: { registry: { revision: 2, pending: 0, documents: [replacementCandidate()] }, replacement: replacementManifest() } });
   await settled(); await ui.open('registration'); await ui.review();
@@ -589,10 +706,13 @@ test('an existing prepared replacement can save only a nonpersonal review plan',
   assert.deepEqual(Object.keys(plan), ['version', 'status', 'id', 'currentDocumentId', 'currentRecordSha256', 'recordSha256',
     'preparedSha256', 'sourceSha256', 'watermarkEnabled', 'expiresAt', 'authMode', 'registryRevision', 'createdAt']);
   assert.doesNotMatch(planText, /株式会社|recipient|fileName|emails|passwordVerifier|secret|pdfBase64/);
+  assert.equal(ui.elements['replacement-info'].hidden, false); assert.equal(ui.elements['replacement-info'].open, false);
+  assert.equal(ui.elements['replacement-info-help'].hidden, true); assert.equal(ui.elements['replacement-info-json'].textContent, planText);
   assert.equal(plan.status, 'prepared_not_active'); assert.equal(plan.currentDocumentId, id);
   ui.event('pagehide');
   assert.deepEqual(ui.revokedDownloads, ['blob:synthetic-1']);
   assert.equal(ui.elements['replacement-summary'].textContent, ''); assert.equal(ui.elements['replacement-review'].hidden, true);
+  assert.equal(ui.elements['replacement-info'].hidden, true); assert.equal(ui.elements['replacement-info'].open, false); assert.equal(ui.elements['replacement-info-json'].textContent, '');
   await ui.click('replacement-save'); assert.equal(ui.downloadBlobs.length, 1);
 });
 
@@ -661,12 +781,13 @@ test('a replacement status read failure can be retried without causing or enabli
 });
 
 test('replacement review rejects malformed or unrelated manifests without exporting them', async () => {
-  for (const overrides of [{ currentDocumentId: uploadId }, { id }, { status: 'active' }, { currentRecordSha256: 'bad' },
+  for (const overrides of [{ version: 1, authMode: 'link' }, { version: 2, authMode: 'password' }, { version: 3, authMode: 'link' }, { currentDocumentId: uploadId }, { id }, { status: 'active' }, { currentRecordSha256: 'bad' },
     { sourceSha256: 'f'.repeat(64) }, { watermarkEnabled: false }, { recipientName: '別人' }, { expiresAt: future + 1 },
     { passwordVerifier: 'SHOULD_NOT_APPEAR' }, { recipient: { type: 'person', organizationName: null, personName: '別人' } }]) {
     const ui = browser({ state: { registry: { revision: 2, pending: 0, documents: [replacementCandidate()] }, replacement: replacementManifest(overrides) } });
     await settled(); await ui.open('registration'); await ui.review();
     assert.equal(ui.elements['replacement-save'].hidden, true); assert.equal(ui.elements['replacement-prepare'].disabled, true);
+    assert.equal(ui.elements['replacement-info'].hidden, true); assert.equal(ui.elements['replacement-info-json'].textContent, '');
     assert.match(ui.elements['replacement-status'].textContent, /確認できません/);
     await ui.click('replacement-save'); assert.equal(ui.downloadBlobs.length, 0);
     assert.doesNotMatch(ui.elements['replacement-summary'].textContent, /SHOULD_NOT_APPEAR|別人/);

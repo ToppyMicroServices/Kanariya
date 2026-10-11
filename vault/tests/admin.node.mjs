@@ -15,7 +15,7 @@ function response(value, status = 200, type = 'application/json') {
   return { ok: status >= 200 && status < 300, status, headers: new Headers({ 'content-type': type }), text: async () => JSON.stringify(value) };
 }
 function management(options = {}) {
-  const elements = Object.fromEntries(['status', 'error', 'reload', 'owner-page', 'management', 'sharing-state', 'recipient-row', 'recipient', 'deadline', 'copy-link', 'preview', 'expiry-form', 'expires-at', 'save-expiry', 'expiry-limit', 'stop-sharing', 'stop-confirmation', 'confirm-stop', 'cancel-stop'].map(name => [name, {
+  const elements = Object.fromEntries(['status', 'error', 'reload', 'owner-page', 'management', 'sharing-state', 'recipient-row', 'recipient', 'deadline', 'copy-link', 'preview', 'sharing-link-help', 'expiry-form', 'expires-at', 'save-expiry', 'expiry-limit', 'stop-sharing', 'stop-confirmation', 'confirm-stop', 'cancel-stop'].map(name => [name, {
     textContent: '', value: '', hidden: true, disabled: false, attributes: new Map(), listeners: new Map(),
     addEventListener(event, callback) { this.listeners.set(event, callback); },
     setAttribute(name, value) { this.attributes.set(name, value); },
@@ -78,6 +78,16 @@ test('Access documents retain the existing Access viewer route', async () => {
   assert.equal(ui.elements.preview.href, 'https://vault.example/#' + id);
   assert.equal(ui.elements['copy-link'].textContent, '閲覧ページのURLをコピー');
   assert.equal(ui.elements['recipient-row'].hidden, true);
+});
+
+test('URL-only documents require an issued bearer URL and never copy or open a bare reader address', async () => {
+  const ui = management({ metadata: { authMode: 'link' } }); await settled();
+  assert.equal(ui.elements.management.hidden, false); assert.equal(ui.elements.preview.href, '');
+  assert.equal(ui.elements['copy-link'].disabled, true); assert.equal(ui.elements.preview.attributes.get('aria-disabled'), 'true');
+  assert.equal(ui.elements['copy-link'].textContent, '閲覧用URLを下で発行'); assert.equal(ui.elements['sharing-link-help'].hidden, false);
+  assert.equal(ui.elements['save-expiry'].disabled, false); assert.equal(ui.elements['stop-sharing'].disabled, false);
+  await ui.click('copy-link'); assert.deepEqual(ui.copied, []);
+  assert.equal(ui.requests.length, 2); assert.ok(ui.requests.every(({ request }) => request.method === 'GET'));
 });
 
 test('changing a deadline sends Japan time and the exact previous deadline once', async () => {
@@ -199,7 +209,8 @@ test('protected page supports strict CSP and keeps limitations in the collapsed 
   assert.match(html, /href="\/v1\/admin\/assets\/admin.css"/);
   assert.match(html, /src="\/v1\/admin\/assets\/admin.js" type="module"/);
   assert.doesNotMatch(html, /<style|\sstyle=|\son\w+=|<script(?![^>]*src=)/i);
-  assert.match(html, /<details[^>]*><summary>ご案内<\/summary><p>現在はダミーPDFを共有しています/);
+  assert.match(html, /<details[^>]*><summary>ご案内<\/summary><p>新しいPDFは、非公開の登録候補として保存できます/);
+  assert.doesNotMatch(html, /現在はダミーPDFを共有しています/);
   assert.doesNotMatch(html, /type="password"|パスワードの変更|アップロード/);
   assert.match(css, /prefers-reduced-motion/); assert.match(css, /@media\(max-width:540px\)/);
 });

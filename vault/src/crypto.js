@@ -55,6 +55,8 @@ export function validatePolicy(policy) {
     if (!policy.subjects.length || Object.hasOwn(policy, "passwordVerifier")) throw new Error("invalid_policy");
   } else if (mode === "password") {
     if (policy.subjects.length || !passwordVerifierValid(policy.passwordVerifier)) throw new Error("invalid_policy");
+  } else if (mode === "link") {
+    if (policy.subjects.length || Object.hasOwn(policy, "passwordVerifier")) throw new Error("invalid_policy");
   } else throw new Error("invalid_policy");
   return policy;
 }

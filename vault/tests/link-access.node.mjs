@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 import worker, { VaultDocument } from '../src/worker.js';
-import { newKey, importKey, sealDocument, openJSON, sealJSON, utf8 } from '../src/crypto.js';
+import { newKey, importKey, sealDocument, readPolicy, openJSON, sealJSON, utf8 } from '../src/crypto.js';
 import { hashToken } from '../src/password.js';
 import { MAX_READER_LINKS } from '../src/links.js';
 
@@ -41,7 +41,7 @@ async function fixture({ authMode = 'password', expiresAt = Date.now() + 600000,
     ACCESS_AUDIENCE: 'synthetic-audience', VAULT_WRAP_KEY: newKey(), VAULT_AUDIT_KEY: newKey(), VAULT_OWNER_SUB: 'synthetic-owner',
     PASSWORD_READER_ENABLED: '1', WEBHOOK_URL: 'https://notify.example.test/synthetic-link-path' };
   const wrappingKey = await importKey(env.VAULT_WRAP_KEY), auditKey = await importKey(env.VAULT_AUDIT_KEY);
-  let record = await sealDocument({ id, bytes: pdf, expiresAt, subjects: authMode === 'password' ? [] : [subject], authMode,
+  let record = await sealDocument({ id, bytes: pdf, expiresAt, subjects: authMode === 'access' ? [subject] : [], authMode,
     ...(authMode === 'password' ? { password: PASSWORD } : {}), recipientName }, wrappingKey);
   const pinRecord = () => { env.DUMMY_DOCUMENT_ID = id; env.DUMMY_RECORD_SHA256 = createHash('sha256').update(JSON.stringify(record)).digest('hex'); };
   pinRecord();
@@ -169,6 +169,38 @@ test('a link session requires no password and records a non-identifying link sub
   assert.equal(state.sessions[0].linkId, grant.link.id); assert.ok(state.jobs.length > 0);
   assert.ok(!JSON.stringify(state).includes(grant.token)); assert.ok(!JSON.stringify(state.jobs).includes(grant.token));
   await f.alarm(); assert.equal(f.calls.length, 1); assert.ok(!JSON.stringify(f.calls).includes(grant.token));
+});
+
+test('link-only documents reject password and Access login while bearer viewing and download remain available', async () => {
+  const f = await fixture({ authMode: 'link' }), policy = await readPolicy(f.record, f.id, f.wrappingKey);
+  assert.equal(Object.hasOwn(policy, 'passwordVerifier'), false); assert.deepEqual(policy.subjects, []);
+  const rejected = await f.request('session'); assert.equal(rejected.status, 403); assert.equal(rejected.headers.get('set-cookie'), null);
+  assert.equal((await f.request('open', { access: true, subject: f.subject })).status, 403);
+  assert.equal(f.calls.length, 0); assert.equal(await f.state(), null);
+  const metadata = await f.request('metadata', { access: true, subject: f.env.VAULT_OWNER_SUB });
+  assert.equal(metadata.status, 200); assert.equal((await metadata.json()).authMode, 'link');
+  const grant = await f.create(), session = await f.login(grant.token); f.restart();
+  assert.equal((await f.request('status', { cookie: session.cookie })).status, 200);
+  for (let acquisition = 0; acquisition < 2; acquisition++) {
+    const response = await f.request('open', { cookie: session.cookie }); assert.equal(response.status, 200); privateResponse(response);
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), f.pdf);
+    assert.equal(decodeURIComponent(response.headers.get('x-vault-download-filename')), `CV_${f.recipientName}.pdf`);
+  }
+  assert.ok((await f.state()).events.every(event => event.subject === `shared-link:${grant.link.id}`));
+  assert.equal((await stop(f, grant.link.id, 1)).status, 200);
+  assert.equal((await f.request('status', { cookie: session.cookie })).status, 401);
+  assert.equal((await f.request('session')).status, 403);
+});
+
+test('link-only ciphertext replacement rejects old URL credentials, sessions and password', async () => {
+  const f = await fixture(), grant = await f.create(), linkSession = await f.login(grant.token), passwordSession = await f.login();
+  f.record = await sealDocument({ id: f.id, bytes: f.pdf, subjects: [], authMode: 'link', expiresAt: f.expiresAt,
+    recipientName: f.recipientName }, f.wrappingKey); f.pinRecord(); f.restart();
+  assert.equal((await f.request('session')).status, 403);
+  assert.equal((await f.request('session', { body: JSON.stringify({ linkToken: grant.token }) })).status, 401);
+  for (const session of [linkSession, passwordSession]) assert.equal((await f.request('open', { cookie: session.cookie })).status, 401);
+  const next = await f.create(); assert.notEqual(next.token, grant.token);
+  assert.equal((await f.request('open', { cookie: (await f.login(next.token)).cookie })).status, 200);
 });
 
 test('malformed link credentials are rejected before storage, key imports and document reads', async () => {
@@ -333,8 +365,8 @@ test('the owner inventory stays bounded and stopped links free capacity', async 
   assert.ok(!state.readerLinks.entries.some(entry => entry.id === first.link.id));
 });
 
-test('links require the existing reader switch and dummy pin and cannot bypass either', async () => {
-  const f = await fixture(), grant = await f.create();
+for (const authMode of ['password', 'link']) test(`${authMode} links require the existing reader switch and dummy pin and cannot bypass either`, async () => {
+  const f = await fixture({ authMode }), grant = await f.create();
   for (const request of [{ id: crypto.randomUUID(), body: JSON.stringify({ linkToken: grant.token }) },
     { query: '?link=' + grant.token, body: JSON.stringify({ linkToken: grant.token }) },
     { headers: { origin: 'https://other.example.test' }, body: JSON.stringify({ linkToken: grant.token }) },

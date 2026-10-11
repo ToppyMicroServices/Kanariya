@@ -15,8 +15,10 @@ const PREPARED_RECORD_FIELDS = [...RECORD_FIELDS, ...PREPARATION_FIELDS];
 const RECIPIENT_FIELDS = ['type', 'organizationName', 'personName'];
 const REPLACEMENT_ROUTE = /^\/v1\/registrations\/([0-9a-f-]{36})\/replacement$/;
 const REPLACEMENT_FIELDS = ['expectedRevision', 'currentDocumentId'];
+const LINK_REPLACEMENT_FIELDS = [...REPLACEMENT_FIELDS, 'authMode'];
 const RECEIPT_FIELDS = ['version', 'id', 'currentDocumentId', 'currentRecordSha256', 'candidateRecordSha256',
   'recordSha256', 'registryRevision', 'createdAt', 'policy'];
+const LINK_RECEIPT_FIELDS = [...RECEIPT_FIELDS, 'authMode'];
 const SHA256 = /^[0-9a-f]{64}$/;
 const unsafeName = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\\/]/u;
 const timestamp = value => Number.isSafeInteger(value) && value > 0 && value <= 8640000000000000;
@@ -161,7 +163,9 @@ export class VaultRegistrations {
     const box = await storage.get(`encrypted-replacement:${entry.id}`);
     if (!box) return null;
     const value = await openJSON(box, audit, `${this.context}:replacement:v1:${entry.id}`);
-    if (!exactKeys(value, RECEIPT_FIELDS) || value.version !== 1 || value.id !== entry.id ||
+    const legacy = exactKeys(value, RECEIPT_FIELDS) && value.version === 1;
+    const link = exactKeys(value, LINK_RECEIPT_FIELDS) && value.version === 2 && value.authMode === 'link';
+    if ((!legacy && !link) || value.id !== entry.id ||
         value.currentDocumentId !== entry.replaceOf || !UUID.test(value.currentDocumentId) || value.currentDocumentId === value.id ||
         !SHA256.test(value.currentRecordSha256) || value.candidateRecordSha256 !== entry.recordSha256 ||
         !SHA256.test(value.recordSha256) || !Number.isSafeInteger(value.registryRevision) || value.registryRevision < 2 ||
@@ -171,7 +175,7 @@ export class VaultRegistrations {
   }
   manifest(receipt, entry, policy) {
     const prepared = preparation(entry);
-    return { version: 1, status: 'prepared_not_active', id: entry.id,
+    return { version: receipt.version, status: 'prepared_not_active', id: entry.id,
       currentDocumentId: receipt.currentDocumentId, currentRecordSha256: receipt.currentRecordSha256,
       recordSha256: receipt.recordSha256, preparedSha256: entry.preparedSha256, sourceSha256: entry.sourceSha256,
       recipient: prepared.metadata.recipient, recipientName: prepared.recipientName, watermarkEnabled: entry.watermarkEnabled,
@@ -183,7 +187,9 @@ export class VaultRegistrations {
       const ready = await requestBody(request, 5000, 2048);
       try { input = parseJSON(await boundedBody(new Response(ready.body), 2048)); }
       catch { throw new Denied(400, 'invalid_request'); }
-      if (!exactKeys(input, REPLACEMENT_FIELDS) || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0 ||
+      const legacy = exactKeys(input, REPLACEMENT_FIELDS);
+      const link = exactKeys(input, LINK_REPLACEMENT_FIELDS) && input.authMode === 'link';
+      if ((!legacy && !link) || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0 ||
           !UUID.test(input.currentDocumentId)) throw new Denied(400, 'invalid_request');
       if (input.currentDocumentId !== pin.id) throw new Denied(409, 'replacement_changed');
     }
@@ -200,7 +206,7 @@ export class VaultRegistrations {
         const current = await this.record(`${pin.id}.sealed.json`, pin.digest);
         this.samePin(pin);
         const candidatePolicy = await readPolicy(candidate, id, keys.wrap), currentPolicy = await readPolicy(current, pin.id, keys.wrap);
-        const prepared = preparation(entry), mode = currentPolicy.authMode ?? 'access';
+        const prepared = preparation(entry), currentMode = currentPolicy.authMode ?? 'access';
         if ((candidatePolicy.authMode ?? 'access') !== 'access' || candidatePolicy.subjects.length !== 1 || candidatePolicy.subjects[0] !== subject ||
             candidatePolicy.revoked || candidatePolicy.size !== entry.size || candidatePolicy.expiresAt !== entry.expiresAt ||
             candidatePolicy.recipientName !== prepared.recipientName || currentPolicy.revoked || currentPolicy.expiresAt <= Date.now()) throw new Denied();
@@ -210,7 +216,7 @@ export class VaultRegistrations {
         const metadataBytes = await replacementBytes(metadataResponse, origin(this.env), 4096);
         let metadata;
         try { metadata = parseJSON(metadataBytes); } finally { metadataBytes.fill(0); }
-        if (metadata.id !== pin.id || metadata.authMode !== mode || metadata.revoked !== false || !timestamp(metadata.expiresAt) ||
+        if (metadata.id !== pin.id || metadata.authMode !== currentMode || metadata.revoked !== false || !timestamp(metadata.expiresAt) ||
             metadata.expiresAt <= Date.now() || metadata.expiresAt > currentPolicy.expiresAt) throw new Denied();
         plaintext = await decryptDocument(candidate, keys.wrap, candidatePolicy);
         if (await sha256(plaintext) !== entry.preparedSha256) throw new Denied(409, 'replacement_changed');
@@ -218,7 +224,9 @@ export class VaultRegistrations {
         this.samePin(pin);
         let receipt = await this.receipt(this.ctx.storage, keys.audit, entry, state);
         if (receipt && (receipt.currentDocumentId !== pin.id || receipt.currentRecordSha256 !== pin.digest)) throw new Denied(409, 'replacement_changed');
-        const policy = validatePolicy({ mime: candidatePolicy.mime, size: candidatePolicy.size, subjects: [...currentPolicy.subjects],
+        const mode = receipt?.version === 2 ? receipt.authMode : receipt ? currentMode : input?.authMode ?? currentMode;
+        if (receipt && input?.authMode && input.authMode !== mode) throw new Denied(409, 'replacement_changed');
+        const policy = validatePolicy({ mime: candidatePolicy.mime, size: candidatePolicy.size, subjects: mode === 'link' ? [] : [...currentPolicy.subjects],
           expiresAt: entry.expiresAt, revoked: false, authMode: mode, recipientName: prepared.recipientName,
           ...(mode === 'password' ? { passwordVerifier: currentPolicy.passwordVerifier } : {}) });
         let created = false;
@@ -226,9 +234,10 @@ export class VaultRegistrations {
           if (!input) return json({ replacement: null });
           const record = { version: 2, id, policy: await sealJSON(policy, keys.wrap, `policy:v2:${id}`),
             wrappedKey: candidate.wrappedKey, document: candidate.document };
-          receipt = { version: 1, id, currentDocumentId: pin.id, currentRecordSha256: pin.digest,
+          receipt = { version: mode === 'link' ? 2 : 1, id, currentDocumentId: pin.id, currentRecordSha256: pin.digest,
             candidateRecordSha256: entry.recordSha256, recordSha256: await sha256(utf8(JSON.stringify(record))),
-            registryRevision: state.revision, createdAt: Date.now(), policy: record.policy };
+            registryRevision: state.revision, createdAt: Date.now(), policy: record.policy,
+            ...(mode === 'link' ? { authMode: 'link' } : {}) };
           if (utf8(JSON.stringify(receipt)).byteLength > 64 * 1024) throw new Error('replacement_receipt_limit');
           await this.ctx.storage.transaction(async tx => {
             this.samePin(pin);

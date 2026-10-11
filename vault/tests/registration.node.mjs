@@ -582,6 +582,62 @@ test('replacement keeps the exact existing Access reader subjects and does not a
   assert.equal(Object.hasOwn(policy, 'passwordVerifier'), false); assert.equal(f.notifications, 0);
 });
 
+for (const currentMode of ['password', 'access']) test(`explicit link-only replacement removes the existing ${currentMode} grant without publishing`, async () => {
+  const f = await replacementFixture(currentMode), pins = [f.env.DUMMY_DOCUMENT_ID, f.env.DUMMY_RECORD_SHA256];
+  const response = await f.prepare({ input: { ...f.replacementInput, authMode: 'link' } }); assert.equal(response.status, 201);
+  const result = await response.json(), manifest = result.replacement;
+  assert.equal(manifest.version, 2); assert.equal(manifest.authMode, 'link'); assert.equal(manifest.status, 'prepared_not_active');
+  assert.equal(manifest.preparedSha256, f.candidate.preparedSha256); assert.equal(manifest.expiresAt, f.candidate.expiresAt);
+  const record = JSON.parse(Buffer.from(f.objects.get(`${manifest.id}.sealed.json`)).toString()), policy = await readPolicy(record, manifest.id, f.wrap);
+  assert.equal(policy.authMode, 'link'); assert.deepEqual(policy.subjects, []);
+  assert.equal(Object.hasOwn(policy, 'passwordVerifier'), false); assert.equal(Object.hasOwn(policy, 'password'), false);
+  assert.equal(policy.recipientName, manifest.recipientName); assert.deepEqual(await decryptDocument(record, f.wrap, policy), f.pdf);
+  const receipt = await openJSON(await f.storage.get(`encrypted-replacement:${manifest.id}`), f.audit, `${f.context}:replacement:v1:${manifest.id}`);
+  assert.equal(receipt.version, 2); assert.equal(receipt.authMode, 'link');
+  assert.deepEqual([f.env.DUMMY_DOCUMENT_ID, f.env.DUMMY_RECORD_SHA256], pins); assert.deepEqual(f.objects.get(`${pins[0]}.sealed.json`), f.currentBytes);
+  assert.equal(f.notifications, 0);
+  const writes = [f.writes, f.storage.writes], bytes = f.objects.get(`${manifest.id}.sealed.json`);
+  f.restart(); assert.deepEqual(await (await f.review()).json(), result);
+  assert.deepEqual(await (await f.prepare()).json(), result);
+  assert.deepEqual(await (await f.prepare({ input: { ...f.replacementInput, authMode: 'link' } })).json(), result);
+  assert.deepEqual([f.writes, f.storage.writes], writes); assert.deepEqual(f.objects.get(`${manifest.id}.sealed.json`), bytes);
+});
+
+test('an existing legacy replacement receipt cannot be changed to link-only mode', async () => {
+  const f = await replacementFixture(); assert.equal((await f.prepare()).status, 201);
+  const original = f.objects.get(`${f.candidate.id}.sealed.json`), writes = [f.writes, f.storage.writes];
+  assert.equal((await f.prepare({ input: { ...f.replacementInput, authMode: 'link' } })).status, 409);
+  assert.deepEqual(f.objects.get(`${f.candidate.id}.sealed.json`), original); assert.deepEqual([f.writes, f.storage.writes], writes);
+  assert.equal((await (await f.review()).json()).replacement.version, 1);
+});
+
+test('uncertain link-only preparation resumes the exact stored policy and canonical bytes', async () => {
+  const f = await replacementFixture(); f.putFailure = true;
+  assert.equal((await f.prepare({ input: { ...f.replacementInput, authMode: 'link' } })).status, 503);
+  const receipt = await openJSON(await f.storage.get(`encrypted-replacement:${f.candidate.id}`), f.audit, `${f.context}:replacement:v1:${f.candidate.id}`);
+  assert.equal(receipt.version, 2); assert.equal(receipt.authMode, 'link'); const writes = f.storage.writes;
+  f.restart(); f.putFailure = false; const response = await f.prepare(); assert.equal(response.status, 200);
+  const manifest = (await response.json()).replacement; assert.equal(manifest.authMode, 'link'); assert.equal(manifest.recordSha256, receipt.recordSha256);
+  assert.equal(f.storage.writes, writes); assert.equal(f.notifications, 0);
+});
+
+test('a link-only receipt cannot be downgraded or supplied with another auth mode', async () => {
+  const f = await replacementFixture(); assert.equal((await f.prepare({ input: { ...f.replacementInput, authMode: 'link' } })).status, 201);
+  const key = `encrypted-replacement:${f.candidate.id}`, context = `${f.context}:replacement:v1:${f.candidate.id}`;
+  const original = await openJSON(await f.storage.get(key), f.audit, context), before = [f.writes, f.storage.writes];
+  for (const change of [{ version: 1 }, { authMode: 'password' }, { authMode: 'access' }, { authMode: null }]) {
+    f.storage.map.set(key, await sealJSON({ ...original, ...change }, f.audit, context));
+    const response = await f.review(); assert.equal(response.status, 503); assert.deepEqual(await response.json(), { error: 'unavailable' });
+  }
+  assert.deepEqual([f.writes, f.storage.writes], before); assert.equal(f.notifications, 0);
+});
+
+for (const authMode of ['password', 'access', null, true]) test(`unsupported explicit replacement auth choice ${authMode} fails before encrypted records`, async () => {
+  const f = await replacementFixture(), before = [f.reads, f.writes, f.storage.writes, f.metadataReads];
+  assert.equal((await f.prepare({ input: { ...f.replacementInput, authMode } })).status, 400);
+  assert.deepEqual([f.reads, f.writes, f.storage.writes, f.metadataReads], before);
+});
+
 test('unprepared owner review does not reserve, write or publish a candidate', async () => {
   const f = await replacementFixture(), before = [f.writes, f.storage.writes];
   assert.deepEqual(await (await f.review()).json(), { replacement: null });

@@ -1,22 +1,23 @@
 # Kanariya Vault
 
-A document service with per-document Access or shared-password authentication, plus owner-issued sharing URLs for password documents. It decrypts on the server, commits an encrypted audit record and notification job, then returns the document bytes. There is no client key endpoint. This is a separate Worker; the existing public canary endpoint is not an authorization or acknowledgement mechanism.
+A document service with per-document Access, shared-password or owner-issued secret-URL authentication. It decrypts on the server, commits an encrypted audit record and notification job, then returns the document bytes. There is no client key endpoint. This is a separate Worker; the existing public canary endpoint is not an authorization or acknowledgement mechanism.
 
-## Two reader modes; owner administration always uses Access
+## Reader modes; owner administration always uses Access
 
 The encrypted version-2 document policy selects exactly one `authMode`:
 
 - `access` is the default, including historical policies with no mode field. It requires a verified Cloudflare Access JWT and an explicitly granted subject. Existing `/#<uuid>` links and `/v1/documents/<uuid>/open` remain supported.
 - `password` uses a 12–256 UTF-8-byte shared password and an empty `subjects` array. Its reader link is `/p/<uuid>`; an owner-issued secret URL can authorize the same document without password entry. Neither path requires the reader to obtain an Access JWT. It is **disabled by default** with `PASSWORD_READER_ENABLED="0"`; only the exact string `"1"` enables these reader routes.
+- `link` accepts only an owner-issued secret URL. It has empty `subjects` and no password verifier, so neither a prior password nor an Access reader grant can authorize it. Its routes use the same explicit `PASSWORD_READER_ENABLED="1"` switch.
 
 There is no fallback between modes. A password or secret-URL session cannot open an Access document, and an Access JWT cannot authorize a password document. Owner status, revocation and notification repair stay under `/v1/documents/...` and always require the verified owner Access subject. Password access is audited as `shared-password`, not as an identified individual.
 
 ### Owner-issued sharing URLs
 
-For a password document, the owner can issue a separate secret URL from the
-closed **閲覧用URL** panel in `/v1/admin`. This adds a password-free way to open
-that document; it does not replace its password or grant access to an Access
-document. Creating a URL still requires the verified owner Access subject.
+For a password or link-only document, the owner can issue a secret URL from the
+closed **閲覧用URL** panel in `/v1/admin`. It opens the document without password
+entry; a password-mode document retains its existing password. It does not grant
+access to an Access document. Creating a URL requires the verified owner Access subject.
 The panel shows the document's existing disclosure recipient and lets the owner
 set a URL deadline no later than the current document deadline. Its recipient
 and PDF watermark remain unchanged. A different recipient needs a separately
@@ -71,7 +72,7 @@ current session deadline; that session lasts at most five minutes, does not rene
 automatically, and may end before the document deadline. The reader can authenticate
 again while the document remains valid.
 
-The owner console at `/v1/admin` manages the current pinned dummy PDF, its reader
+The owner console at `/v1/admin` manages the current pinned PDF, its reader
 link, viewing deadline and irreversible revocation. It requires the existing
 verified owner Access subject; a reader's Access login or password session cannot
 use it. It does not open the PDF or send a notification when the page loads.
@@ -119,6 +120,12 @@ changing the file, recipient, watermark option or deadline invalidates the previ
 The original file is unchanged. Turning off the watermark still validates and
 previews the PDF. No PDF bytes leave the browser before registration is confirmed.
 
+The owner can instead select **検査済みのPDFをそのまま使う** and supply its bounded
+preparation metadata JSON. This validates and previews the exact selected bytes
+without adding another watermark. The measured final hash, recipient and watermark
+option must match the metadata. The imported original-source hash is provenance,
+not an independent measurement. Independent final-artifact QA is still required.
+
 The private registration stores the recipient, watermark option, input/output
 SHA-256 values and preparation version in encrypted metadata. The server checks
 the uploaded output hash; the other preparation fields are trusted owner claims,
@@ -135,7 +142,7 @@ current pinned record, candidate digest, final PDF digest, registration revision
 and deadlines. It creates an immutable encrypted record at the reader's canonical
 R2 path and an encrypted bounded receipt. Readers still cannot access the new ID.
 
-Preparation preserves the current reader authentication mode and grants. For
+Preparation preserves the current reader authentication mode and grants by default. For
 password mode, it copies the validated verifier inside the encrypted policy; it
 does not return a password or key to the browser. The new document uses the
 candidate's recipient and expiry. The console shows **公開前の確認待ち** and exports
@@ -143,11 +150,19 @@ only opaque IDs, hashes, deadlines and review state, without recipient names,
 email addresses, filenames or credentials. An uncertain preparation result must
 be checked with a read; the UI does not automatically repeat the write.
 
+The explicit **共有URLだけで開く方式** option prepares a version-2 receipt and
+link-only policy. It discards the previous password verifier and reader Access
+subjects. Existing sessions are bound to the old ciphertext digest and cannot
+authorize the replacement. The collapsed **確認情報** panel and export include
+the exact recipient and all 15 receipt fields for this mode; keep that receipt
+private. Legacy version-1 exports retain their redacted format.
+
 Actual publication changes the exact dummy ID and ciphertext digest together.
 It requires approval for the specific synthetic PDF and new pin pair after final
-PDF QA. Preparing a candidate does not classify its contents as dummy data, and
-the dummy-only guard is not removed. Registry history remains readable after a
-reviewed pin rotation. Real CV publication remains outside this rollout.
+PDF QA. Preparing a candidate does not classify its contents as dummy data.
+The exact ID-and-digest admission check remains enforced. Registry history stays
+readable after a reviewed pin rotation. Real documents require the separate
+approval and final-artifact gate below.
 
 The operator tool `scripts/rotate_vault_dummy.py` checks the exported review
 JSON, exact final PDF and its QA report. By default it only reads the current
@@ -172,6 +187,17 @@ deployment API does not provide an atomic compare-and-swap for activation.
 There is no automatic retry or rollback after an uncertain write. Once the
 new pins are verified, the source-only deployment tool's fixed pin baseline
 needs a separately reviewed update before another source release.
+
+For an explicitly approved real document, `scripts/rotate_vault_document.py`
+accepts only a version-2 link-only receipt, the exact final PDF, QA report,
+full-page visual review and a separate recipient- and manifest-bound owner
+approval receipt. It requires successful qpdf/Ghostscript exit codes, recorded
+tool versions, zero warnings and every page rendered by Poppler, Quartz, PDF.js
+and Chromium. Default operation is read-only; execution also requires
+`--execute --approve <exact-manifest-SHA-256>`. It preserves source, keys,
+settings and all bindings except the two exact document pins. It cannot verify
+R2 public-access settings or object contents, and performs no automatic retry,
+rollback, email sharing or broad publication.
 
 ### Canary management
 

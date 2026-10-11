@@ -11,9 +11,10 @@ export const html = `<!doctype html>
 <section id="management" class="viewer-card management-card" aria-label="共有文書の設定" hidden><div class="document-heading"><h2>管理対象のPDF</h2><span id="sharing-state" class="state-label"></span></div>
 <dl class="document-info"><div id="recipient-row" hidden><dt>開示先</dt><dd id="recipient"></dd></div><div><dt>閲覧期限</dt><dd id="deadline"></dd></div></dl>
 <div class="actions"><button id="copy-link" type="button" disabled>共有リンクをコピー</button><a id="preview" class="button-link" target="_blank" rel="noopener noreferrer" aria-label="閲覧ページを開く（新しいタブ）" aria-disabled="true">閲覧ページを開く</a></div>
+<p id="sharing-link-help" class="form-help" hidden>「閲覧用URL」でURLを発行してください。URLを持つ人は開けます。閲覧者本人は未確認です。</p>
 <form id="expiry-form" class="expiry-form"><label for="expires-at">閲覧期限を変更</label><p id="expiry-help" class="form-help">日本時間で指定してください。</p><div class="expiry-controls"><input id="expires-at" type="datetime-local" step="60" required disabled aria-describedby="expiry-help expiry-limit"><button id="save-expiry" type="submit" class="primary" disabled>期限を保存</button></div><p id="expiry-limit" class="form-help"></p></form>
 <div class="sharing-end"><button id="stop-sharing" type="button" class="quiet" disabled>共有を終了</button><div id="stop-confirmation" class="confirmation" hidden><p>共有を終了すると、この文書を新たに開いたり保存したりできなくなります。元に戻すことはできません。</p><div class="actions"><button id="confirm-stop" type="button" class="danger">共有を終了する</button><button id="cancel-stop" type="button">キャンセル</button></div></div></div>
-<details class="management-notes"><summary>ご案内</summary><p>現在はダミーPDFを共有しています。新しいPDFは、非公開の登録候補として保存できます。</p><p>閲覧期限や共有の終了は、すでに表示・保存された内容を回収するものではありません。</p></details></section>${links.html}${extensions.html}${canary.html}<noscript><p class="noscript">文書の管理にはJavaScriptが必要です。</p></noscript></main>
+<details class="management-notes"><summary>ご案内</summary><p>新しいPDFは、非公開の登録候補として保存できます。</p><p>閲覧期限や共有の終了は、すでに表示・保存された内容を回収するものではありません。</p></details></section>${links.html}${extensions.html}${canary.html}<noscript><p class="noscript">文書の管理にはJavaScriptが必要です。</p></noscript></main>
 <footer class="site-footer"><span>© 2026 ToppyMicroServices OÜ</span><span>Document sharing and control · Kanariya</span></footer><script src="/v1/admin/assets/admin.js" type="module"></script><script src="/v1/admin/assets/management.js" type="module"></script><script src="/v1/admin/assets/canary.js" type="module"></script><script src="/v1/admin/assets/links.js" type="module"></script></body></html>`;
 
 export const css = viewerCss + extensions.css + links.css + `
@@ -28,7 +29,7 @@ export const canaryJs = canary.js;
 export const linksJs = links.js;
 
 export const js = `"use strict";
-const ids=["status","error","reload","owner-page","management","sharing-state","recipient-row","recipient","deadline","copy-link","preview","expiry-form","expires-at","save-expiry","expiry-limit","stop-sharing","stop-confirmation","confirm-stop","cancel-stop"];
+const ids=["status","error","reload","owner-page","management","sharing-state","recipient-row","recipient","deadline","copy-link","preview","sharing-link-help","expiry-form","expires-at","save-expiry","expiry-limit","stop-sharing","stop-confirmation","confirm-stop","cancel-stop"];
 const el=Object.fromEntries(ids.map(id=>[id,document.getElementById(id)]));
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const JAPAN_OFFSET=9*60*60*1000,MAX_TIMER=2147483647;
@@ -41,7 +42,7 @@ function inputDate(value){
 }
 function timestamp(value){return Number.isSafeInteger(value)&&value>0&&value<=8640000000000000;}
 function validate(value){
- if(!value||value.id!==documentId||value.mime!=="application/pdf"||!Number.isSafeInteger(value.size)||value.size<=0||value.size>1048576||!["password","access"].includes(value.authMode)||!timestamp(value.expiresAt)||!timestamp(value.sealedExpiresAt)||value.expiresAt>value.sealedExpiresAt||typeof value.revoked!=="boolean"||!(value.recipientName===null||typeof value.recipientName==="string"&&value.recipientName.length<=200))throw new Error();
+ if(!value||value.id!==documentId||value.mime!=="application/pdf"||!Number.isSafeInteger(value.size)||value.size<=0||value.size>1048576||!["password","access","link"].includes(value.authMode)||!timestamp(value.expiresAt)||!timestamp(value.sealedExpiresAt)||value.expiresAt>value.sealedExpiresAt||typeof value.revoked!=="boolean"||!(value.recipientName===null||typeof value.recipientName==="string"&&value.recipientName.length<=200))throw new Error();
  return value;
 }
 function active(token){return pending===token&&generation===token.generation&&!token.controller.signal.aborted;}
@@ -50,15 +51,15 @@ function controls(){
  const blocked=Boolean(pending||uncertain||!metadata),shared=metadata&&!metadata.revoked&&metadata.expiresAt>Date.now();
  const latest=metadata&&metadata.sealedExpiresAt>Date.now();
  const chosen=inputDate(el["expires-at"].value),valid=metadata&&Number.isSafeInteger(chosen)&&chosen>Date.now()&&chosen<=metadata.sealedExpiresAt;
- el["copy-link"].disabled=blocked||!shared;el.preview.setAttribute("aria-disabled",blocked||!shared?"true":"false");
- if(!blocked&&shared)el.preview.href=location.origin+(metadata.authMode==="password"?"/p/"+documentId:"/#"+documentId);else el.preview.removeAttribute("href");
+ const bareUrl=metadata?.authMode!=="link";el["copy-link"].disabled=blocked||!shared||!bareUrl;el.preview.setAttribute("aria-disabled",blocked||!shared||!bareUrl?"true":"false");
+ if(!blocked&&shared&&bareUrl)el.preview.href=location.origin+(metadata.authMode==="password"?"/p/"+documentId:"/#"+documentId);else el.preview.removeAttribute("href");
  el["expires-at"].disabled=blocked||metadata?.revoked||!latest;el["save-expiry"].disabled=blocked||metadata?.revoked||!valid;el["stop-sharing"].disabled=blocked||metadata?.revoked;
  el["confirm-stop"].disabled=blocked||metadata?.revoked;el["cancel-stop"].disabled=Boolean(pending);el.reload.disabled=Boolean(pending);
 }
 function render(){
  clearTimeout(expiryTimer);if(!metadata){el.management.hidden=true;controls();return;}
  el.management.hidden=false;el["sharing-state"].textContent=metadata.revoked?"共有終了":metadata.expiresAt<=Date.now()?"閲覧期限切れ":"共有中";
- el["copy-link"].textContent=metadata.authMode==="password"?"パスワード用URLをコピー":"閲覧ページのURLをコピー";
+ el["copy-link"].textContent=metadata.authMode==="password"?"パスワード用URLをコピー":metadata.authMode==="link"?"閲覧用URLを下で発行":"閲覧ページのURLをコピー";el["sharing-link-help"].hidden=metadata.authMode!=="link";
  el["recipient-row"].hidden=!metadata.recipientName;el.recipient.textContent=metadata.recipientName||"";el.deadline.textContent=dateLabel(metadata.expiresAt);
  el["expires-at"].value=localDate(metadata.expiresAt);el["expires-at"].min=localDate(Math.ceil((Date.now()+1)/60000)*60000);el["expires-at"].max=localDate(metadata.sealedExpiresAt);
  el["expiry-limit"].textContent="設定できる最終日時："+dateLabel(metadata.sealedExpiresAt);
@@ -110,7 +111,7 @@ el["expiry-form"].addEventListener("submit",event=>{
  void change("expiry",{expiresAt,expectedExpiresAt:metadata.expiresAt});
 });
 el["copy-link"].addEventListener("click",async()=>{
- if(pending||uncertain||!metadata||metadata.revoked||metadata.expiresAt<=Date.now())return;
+ if(pending||uncertain||!metadata||metadata.authMode==="link"||metadata.revoked||metadata.expiresAt<=Date.now())return;
  const expected=metadata,version=generation;try{await navigator.clipboard.writeText(el.preview.href);if(metadata===expected&&version===generation){setError("");el.status.textContent="共有リンクをコピーしました。";}}
  catch{if(metadata===expected&&version===generation)setError("リンクをコピーできませんでした。閲覧ページを開き、アドレスをコピーしてください。");}
 });
