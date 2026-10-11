@@ -229,16 +229,37 @@ test("transient provider failure retries from encrypted durable state", async ()
   assert.equal((await f.state()).jobs[0].state, "pending"); f.providerStatus = 202; f.restart(); await f.alarm();
   assert.equal((await f.state()).jobs[0].state, "accepted"); assert.equal(f.calls.length, 2);
 });
-test("permanent provider failure blocks further opens until owner retries", async () => {
+test("permanent provider failure remains evidence without blocking a fresh open; only owner retries", async () => {
   const f = await fixture(); f.providerStatus = 401; await f.request(); await f.alarm();
-  assert.equal((await f.state()).jobs[0].state, "failed"); assert.equal((await f.request()).status, 503);
+  const failed = (await f.state()).jobs[0];
+  assert.equal(failed.state, "failed"); assert.equal((await f.request()).status, 200);
+  const before = structuredClone([...f.storage.map]);
   assert.equal((await f.request("retry-notifications")).status, 403);
-  assert.equal((await f.request("retry-notifications", { claims: { sub: f.env.VAULT_OWNER_SUB } })).status, 200);
-  f.providerStatus = 202; await f.alarm(); assert.equal((await f.request()).status, 200);
+  assert.deepEqual([...f.storage.map], before);
+  const retry = await f.request("retry-notifications", { claims: { sub: f.env.VAULT_OWNER_SUB } });
+  assert.equal(retry.status, 200); assert.deepEqual(await retry.json(), { accepted: true });
+  const queued = (await f.state()).jobs.find(job => job.eventId === failed.eventId);
+  assert.equal(queued.state, "pending"); assert.equal(queued.outcome, failed.outcome); assert.deepEqual(queued.target, failed.target);
+  f.providerStatus = 202; await f.alarm();
+  assert.equal((await f.state()).jobs.find(job => job.eventId === failed.eventId).state, "accepted");
+  assert.equal(f.calls.filter(call => call.payload.event.id === failed.eventId).length, 2);
+  assert.equal((await f.request()).status, 200);
 });
-test("a changed destination never receives already queued notifications automatically", async () => {
-  const f = await fixture(); await f.request(); f.env.WEBHOOK_URL = "https://notify.example.test/other-path"; await f.alarm();
+test("a changed destination only receives an old event after explicit owner retry", async () => {
+  const f = await fixture(); await f.request(); const original = (await f.state()).jobs[0];
+  f.env.WEBHOOK_URL = "https://notify.example.test/other-path"; await f.alarm();
   assert.equal(f.calls.length, 0); assert.equal((await f.state()).jobs[0].state, "failed");
+  assert.deepEqual((await f.state()).jobs[0].target, original.target);
+  assert.equal((await f.request()).status, 200);
+  assert.deepEqual((await f.state()).jobs.find(job => job.eventId === original.eventId).target, original.target);
+  const response = await f.request("retry-notifications", { claims: { sub: f.env.VAULT_OWNER_SUB } });
+  assert.equal(response.status, 200); assert.deepEqual(await response.json(), { accepted: true });
+  const rebound = (await f.state()).jobs.find(job => job.eventId === original.eventId);
+  assert.equal(rebound.target.type, original.target.type); assert.notEqual(rebound.target.fingerprint, original.target.fingerprint);
+  assert.equal(rebound.outcome, original.outcome);
+  await f.alarm();
+  const sent = f.calls.filter(call => call.payload.event.id === original.eventId);
+  assert.equal(sent.length, 1); assert.equal(String(sent[0].url), f.env.WEBHOOK_URL);
 });
 test("owner revocation survives restart; readers cannot revoke or inspect status", async () => {
   const f = await fixture(); assert.equal((await f.request("status")).status, 403); assert.equal((await f.request("revoke")).status, 403);

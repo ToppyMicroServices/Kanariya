@@ -355,6 +355,30 @@ export class RuntimeDocument extends VaultDocument {
   assert.equal(status.providerAccepted, 1); assert.ok(notifications.length >= 2);
   assert.equal(notifications.at(-1).event.outcome, "decrypted");
   report.checks.push("alarm_retry_and_provider_acceptance");
+  // A failed historical delivery is evidence for the owner, not a shared
+  // authorization gate that can prevent another permitted reader from opening.
+  const historicalState = await openJSON((await runtimeState(documentStub)).journal,
+    await importKey(env.VAULT_AUDIT_KEY), `journal:v1:${objectId.toString()}`);
+  const failedEventId = crypto.randomUUID(), failedAt = Date.now() - 120000;
+  historicalState.events.push({ id: failedEventId, documentId: id, subject, at: failedAt, outcome: 'decrypted' });
+  historicalState.jobs.push({ ...historicalState.jobs[0], eventId: failedEventId, at: failedAt, state: 'failed',
+    attempts: 1, outcome: 'decrypted', nextAt: failedAt, error: 'http_error', httpStatus: 401 });
+  const historicalBox = await sealJSON(historicalState, await importKey(env.VAULT_AUDIT_KEY), `journal:v1:${objectId.toString()}`);
+  assert.equal((await documentStub.fetch('https://vault.example.test/__synthetic_seed', { method: 'POST', body: JSON.stringify(historicalBox) })).status, 204);
+  const independentReader = await request('open', otherSubject);
+  assert.equal(independentReader.status, 200); assert.deepEqual(new Uint8Array(await independentReader.arrayBuffer()), pdf);
+  const preservedFailure = await openJSON((await runtimeState(documentStub)).journal,
+    await importKey(env.VAULT_AUDIT_KEY), `journal:v1:${objectId.toString()}`);
+  assert.equal(preservedFailure.jobs.find(job => job.eventId === failedEventId).state, 'failed');
+  assert.equal(preservedFailure.events.find(event => event.id === failedEventId).outcome, 'decrypted');
+  assert.equal((await (await request('status', env.VAULT_OWNER_SUB)).json()).failed, 1);
+  assert.equal((await request('retry-notifications', env.VAULT_OWNER_SUB)).status, 200);
+  const retryDeadline = Date.now() + 4000;
+  while (Date.now() < retryDeadline && (await (await request('status', env.VAULT_OWNER_SUB)).json()).pending) await pause(20);
+  const retriedHistory = await openJSON((await runtimeState(documentStub)).journal,
+    await importKey(env.VAULT_AUDIT_KEY), `journal:v1:${objectId.toString()}`);
+  assert.equal(retriedHistory.jobs.find(job => job.eventId === failedEventId).state, 'accepted');
+  report.checks.push('historical_failed_delivery_does_not_block_another_reader_and_remains_retryable');
   const at = Date.now() - 120000;
   const oldEvents = Array.from({ length: 500 }, () => ({ id: crypto.randomUUID(), documentId: id, subject, at, outcome: 'decrypted' }));
   const oldRequests = oldEvents.map(() => ({ requestId: crypto.randomUUID(), subject, at }));
@@ -646,7 +670,7 @@ export class RuntimeDocument extends VaultDocument {
     report.error ??= 'fixture_outbound_validation_failed'; process.exitCode = 1;
   }
   report.pass = report.status === "passed";
-  report.testCounts = { runtimeChecksExpected: 37, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
+  report.testCounts = { runtimeChecksExpected: 38, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
     bundleChecksPassed: report.checks.filter(check => check === "dry_run_bundle" || check.startsWith("frozen_")).length, totalChecksPassed: report.checks.length };
   await recordReport(); console.log(JSON.stringify(report));
 }

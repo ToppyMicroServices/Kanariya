@@ -13,7 +13,7 @@ const jwk = { ...await exportJWK(pair.publicKey), kid: "retention-fixture", use:
 let fixtureNumber = 0;
 
 class Storage {
-  constructor() { this.map = new Map(); this.alarmAt = null; this.failPut = () => false; }
+  constructor() { this.map = new Map(); this.alarmAt = null; this.failPut = () => false; this.lists = []; }
   async get(key) { return structuredClone(this.map.get(key)); }
   async setAlarm(at) { this.alarmAt = at; }
   async transaction(operation) {
@@ -26,9 +26,14 @@ class Storage {
         draft.set(key, structuredClone(value));
       },
       delete: async key => draft.delete(key),
-      list: async ({ prefix, end, limit }) => new Map([...draft]
-        .filter(([key]) => key.startsWith(prefix) && (!end || key < end))
-        .sort(([a], [b]) => a.localeCompare(b)).slice(0, limit)),
+      list: async options => {
+        this.lists.push({ ...options });
+        const { prefix, start, startAfter, end, limit, reverse } = options;
+        const rows = [...draft].filter(([key]) => key.startsWith(prefix) && (!start || key >= start) &&
+          (!startAfter || key > startAfter) && (!end || key < end)).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+        if (reverse) rows.reverse();
+        return new Map(rows.slice(0, limit));
+      },
       setAlarm: async at => { alarm = at; },
       deleteAlarm: async () => { alarm = null; },
     });
@@ -63,14 +68,14 @@ async function fixture() {
     calls.push(JSON.parse(options.body));
     return new Response(null, { status: 202 });
   };
-  async function request({ as = subject, requestId = crypto.randomUUID(), action = "open" } = {}) {
+  async function request({ as = subject, requestId = crypto.randomUUID(), action = "open", body } = {}) {
     const jwt = await new SignJWT({ sub: as, iss: env.ACCESS_ISSUER, aud: env.ACCESS_AUDIENCE,
       iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 600 })
       .setProtectedHeader({ alg: "RS256", kid: "retention-fixture" }).sign(pair.privateKey);
     return instance.fetch(new Request(`${env.PUBLIC_ORIGIN}/v1/documents/${id}/${action}`, {
       method: action === "status" ? "GET" : "POST",
       headers: { origin: env.PUBLIC_ORIGIN, "content-type": "application/json", "cf-access-jwt-assertion": jwt },
-      ...(action === "status" ? {} : { body: JSON.stringify({ requestId }) }),
+      ...(action === "status" ? {} : { body: JSON.stringify(body ?? (action === "open" ? { requestId } : {})) }),
     }));
   }
   return {
@@ -102,6 +107,207 @@ async function exactPDF(f, response) {
   assert.equal(response.headers.get("content-type"), "application/pdf");
   assert.deepEqual(new Uint8Array(await response.arrayBuffer()), f.pdf);
 }
+
+async function retainedEvidence(f) {
+  const state = await f.state(), events = [...state.events], jobs = [...state.jobs];
+  for (const name of f.storage.map.keys()) if (name.startsWith("audit:")) {
+    const saved = await f.archive(name); events.push(saved.event); jobs.push(...saved.jobs);
+  }
+  return { state, events, jobs };
+}
+
+async function seedFailedArchives(f, count, { sameActor = false, at = Date.now() - 120000 } = {}) {
+  const state = { version: 1, documentId: f.id, revoked: false, events: [], jobs: [], requests: [],
+    archivedAccepted: count, archivedFailed: count };
+  const entries = [];
+  for (let index = 0; index < count; index++) {
+    const event = { id: crypto.randomUUID(), documentId: f.id, subject: f.subject, at, outcome: index % 2 ? "decrypted" : "requested" };
+    const actor = `access:${sameActor ? f.subject : `synthetic-actor-${index}`}`;
+    const jobs = ["webhook", "slack"].map(type => ({ eventId: event.id, actor, target: { type, fingerprint: "ab".repeat(32) },
+      at, attempts: 1, nextAt: at + 1000, outcome: event.outcome === "requested" ? "unknown" : "decrypted",
+      state: type === "webhook" ? "failed" : "accepted", httpStatus: type === "webhook" ? 401 : 202 }));
+    const name = `audit:${event.id}`, expiresAt = at + 30 * DAY;
+    f.storage.map.set(name, await sealJSON({ event, jobs, expiresAt }, f.auditKey, `${f.context}:${name}`));
+    f.storage.map.set(`failed:${event.id}`, name);
+    f.storage.map.set(`expiry:${String(expiresAt).padStart(13, "0")}:${name}`, name);
+    entries.push({ event, jobs, name, expiresAt });
+  }
+  await f.writeState(state); f.restart();
+  return entries;
+}
+
+test("more than 500 failed notifications compact alongside accepted siblings without losing evidence or blocking a fresh open", async () => {
+  const f = await fixture(), old = legacyState(f, 601);
+  for (const job of old.jobs) if (job.target.type === "webhook") { job.state = "failed"; job.httpStatus = 401; }
+  const failed = old.jobs.filter(job => job.state === "failed").length;
+  assert.ok(failed > 500);
+  await f.writeState(old);
+  assert.ok(Buffer.byteLength(JSON.stringify(f.storage.map.get("encrypted-journal"))) > 128 * 1024);
+  await exactPDF(f, await f.request({ as: f.other }));
+  const { state, events, jobs } = await retainedEvidence(f), oldIds = new Set(old.events.map(event => event.id));
+  const order = values => values.toSorted((a, b) => `${a.id ?? a.eventId}:${a.target?.type ?? ""}`.localeCompare(`${b.id ?? b.eventId}:${b.target?.type ?? ""}`));
+  assert.deepEqual(order(events.filter(event => oldIds.has(event.id))), order(old.events));
+  assert.deepEqual(order(jobs.filter(job => oldIds.has(job.eventId))), order(old.jobs));
+  assert.ok(state.events.length < 200); assert.ok(state.jobs.length < 400); assert.ok(state.archivedFailed > 500);
+  for (const [name, value] of f.storage.map) {
+    assert.ok(Buffer.byteLength(JSON.stringify(value)) < 2 * 1024 * 1024, `SQLite value exceeds 2 MiB: ${name}`);
+    if (name.startsWith("failed:")) {
+      assert.equal(value, `audit:${name.slice("failed:".length)}`);
+      assert.ok((await f.archive(value)).jobs.some(job => job.state === "failed"));
+    }
+  }
+  const status = await f.status();
+  assert.equal(status.failed, failed); assert.equal(status.providerAccepted, old.jobs.length - failed); assert.equal(status.pending, 1);
+  assert.equal(f.calls.length, 0);
+});
+
+test("explicit owner retry restores archived events atomically, caps document pending work and never resends accepted siblings", async () => {
+  const f = await fixture(), entries = await seedFailedArchives(f, 105);
+  const before = structuredClone([...f.storage.map]);
+  assert.equal((await f.request({ action: "retry-notifications" })).status, 403);
+  assert.deepEqual([...f.storage.map], before);
+  const retry = await f.request({ action: "retry-notifications", as: f.env.VAULT_OWNER_SUB });
+  assert.equal(retry.status, 200); assert.deepEqual(await retry.json(), { accepted: true });
+  const { state, events, jobs } = await retainedEvidence(f), byId = new Map(entries.map(entry => [entry.event.id, entry]));
+  assert.equal(state.jobs.filter(job => job.state === "pending").length, 100);
+  assert.equal((await f.status()).failed, 5); assert.equal((await f.status()).providerAccepted, 105);
+  assert.equal(events.length, 105); assert.equal(new Set(events.map(event => event.id)).size, 105); assert.equal(jobs.length, 210);
+  for (const event of events) assert.deepEqual(event, byId.get(event.id).event);
+  for (const job of jobs) {
+    const original = byId.get(job.eventId).jobs.find(original => original.target.type === job.target.type);
+    assert.equal(job.outcome, original.outcome); assert.equal(job.target.type, original.target.type);
+    if (job.state === "pending") {
+      assert.notEqual(job.target.fingerprint, original.target.fingerprint);
+      const { name, expiresAt } = byId.get(job.eventId);
+      assert.ok(!f.storage.map.has(name)); assert.ok(!f.storage.map.has(`failed:${job.eventId}`));
+      assert.ok(!f.storage.map.has(`expiry:${String(expiresAt).padStart(13, "0")}:${name}`));
+    } else assert.deepEqual(job, original);
+  }
+  f.storage.lists = [];
+  assert.equal((await f.request({ action: "retry-notifications", as: f.env.VAULT_OWNER_SUB })).status, 200);
+  assert.equal((await f.status()).pending, 100);
+  assert.equal(f.storage.lists.filter(options => options.prefix === "failed:").length, 0);
+  await f.alarm();
+  assert.equal(f.calls.length, 10); assert.equal(new Set(f.calls.map(call => call.event.id)).size, 10);
+  for (const call of f.calls) assert.equal(call.event.outcome, byId.get(call.event.id).jobs[0].outcome);
+  assert.equal((await f.status()).providerAccepted, 115); assert.equal((await f.status()).pending, 90);
+});
+
+test("archived retry scans at most 100 records per page, respects each actor budget and wraps its durable cursor", async () => {
+  const f = await fixture(); await seedFailedArchives(f, 110, { sameActor: true });
+  f.storage.lists = [];
+  assert.equal((await f.request({ action: "retry-notifications", as: f.env.VAULT_OWNER_SUB })).status, 200);
+  let scans = f.storage.lists.filter(options => options.prefix === "failed:");
+  assert.deepEqual(scans, [{ prefix: "failed:", limit: 100 }]);
+  assert.equal((await f.status()).pending, 10); assert.equal((await f.status()).failed, 100);
+  const firstCursor = (await f.state()).failedRetryCursor;
+  assert.ok(firstCursor.startsWith("failed:")); f.restart(); f.storage.lists = [];
+  assert.equal((await f.request({ action: "retry-notifications", as: f.env.VAULT_OWNER_SUB })).status, 200);
+  scans = f.storage.lists.filter(options => options.prefix === "failed:");
+  assert.deepEqual(scans, [{ prefix: "failed:", limit: 100, startAfter: firstCursor }]);
+  assert.equal((await f.status()).pending, 10);
+  const lastCursor = (await f.state()).failedRetryCursor; assert.ok(lastCursor > firstCursor);
+  await f.alarm(); assert.equal(f.calls.length, 10);
+  f.restart(); f.storage.lists = [];
+  assert.equal((await f.request({ action: "retry-notifications", as: f.env.VAULT_OWNER_SUB })).status, 200);
+  scans = f.storage.lists.filter(options => options.prefix === "failed:");
+  assert.deepEqual(scans, [{ prefix: "failed:", limit: 100, startAfter: lastCursor }, { prefix: "failed:", limit: 100 }]);
+  assert.equal((await f.status()).pending, 10); assert.equal((await f.status()).failed, 90);
+});
+
+test("active owner retry includes existing pending work in both document and actor limits", async () => {
+  const f = await fixture(), state = legacyState(f, 121);
+  state.requests = [];
+  for (const [index, event] of state.events.entries()) {
+    for (const job of state.jobs.filter(job => job.eventId === event.id)) {
+      job.actor = `access:synthetic-active-${Math.floor((index - 1) / 11)}`;
+      if (job.target.type === "webhook") job.state = "failed";
+    }
+  }
+  // One actor already has ten pending targets; retry must leave its failures untouched.
+  state.jobs.filter(job => job.target.type === "webhook").slice(0, 10).forEach(job => { job.state = "pending"; job.nextAt = Date.now() + DAY; });
+  await f.writeState(state); f.restart();
+  const response = await f.request({ action: "retry-notifications", as: f.env.VAULT_OWNER_SUB });
+  assert.equal(response.status, 200); assert.deepEqual(await response.json(), { accepted: true });
+  const latest = await f.state(), pending = latest.jobs.filter(job => job.state === "pending"), counts = new Map();
+  assert.equal(pending.length, 100);
+  for (const job of pending) counts.set(job.actor, (counts.get(job.actor) ?? 0) + 1);
+  assert.ok([...counts.values()].every(count => count <= 10)); assert.equal(counts.get("access:synthetic-active-0"), 10);
+  const blocked = latest.jobs.find(job => job.eventId === state.events[11].id && job.target.type === "webhook");
+  assert.equal(blocked.state, "failed"); assert.equal(blocked.target.fingerprint, "ab".repeat(32));
+  assert.equal(latest.jobs.filter(job => job.state === "failed").length, 20);
+  assert.equal(latest.jobs.filter(job => job.state === "accepted").length, 120);
+  assert.equal(f.calls.length, 0);
+});
+
+test("retry journal commit failure leaves archived accepted and failed evidence and indexes unchanged", async () => {
+  const f = await fixture(); await seedFailedArchives(f, 1);
+  const before = structuredClone([...f.storage.map]); f.storage.failPut = key => key === "encrypted-journal";
+  const failed = await f.request({ action: "retry-notifications", as: f.env.VAULT_OWNER_SUB });
+  assert.equal(failed.status, 503); assert.deepEqual([...f.storage.map], before); assert.equal(f.calls.length, 0);
+  f.storage.failPut = () => false; f.restart();
+  assert.equal((await f.request({ action: "retry-notifications", as: f.env.VAULT_OWNER_SUB })).status, 200);
+  assert.deepEqual(await f.status(), { revoked: false, pending: 1, failed: 0, providerAccepted: 1 });
+});
+
+for (const archivedFailed of [null, -1, 1.5, "1"]) {
+  test(`malformed archived failure counter fails closed (${JSON.stringify(archivedFailed)})`, async () => {
+    const f = await fixture();
+    await f.writeState({ version: 1, documentId: f.id, revoked: false, events: [], jobs: [], requests: [], archivedFailed });
+    const before = structuredClone([...f.storage.map]);
+    const response = await f.request({ action: "retry-notifications", as: f.env.VAULT_OWNER_SUB });
+    assert.equal(response.status, 503); assert.deepEqual([...f.storage.map], before); assert.equal(f.calls.length, 0);
+  });
+}
+
+for (const fault of ["event mismatch", "wrong index target", "pending archive", "missing archive", "counter underflow"]) {
+  test(`malformed failed retry archive (${fault}) returns 503 without deleting or rebinding evidence`, async () => {
+    const f = await fixture(), [entry] = await seedFailedArchives(f, 1);
+    const saved = await f.archive(entry.name);
+    if (fault === "event mismatch") saved.event.id = crypto.randomUUID();
+    if (fault === "pending archive") saved.jobs[0].state = "pending";
+    if (["event mismatch", "pending archive"].includes(fault))
+      f.storage.map.set(entry.name, await sealJSON(saved, f.auditKey, `${f.context}:${entry.name}`));
+    if (fault === "wrong index target") f.storage.map.set(`failed:${entry.event.id}`, `audit:${crypto.randomUUID()}`);
+    if (fault === "missing archive") f.storage.map.delete(entry.name);
+    if (fault === "counter underflow") { const state = await f.state(); state.archivedFailed = 0; await f.writeState(state); }
+    const before = structuredClone([...f.storage.map]);
+    const response = await f.request({ action: "retry-notifications", as: f.env.VAULT_OWNER_SUB });
+    assert.equal(response.status, 503); assert.deepEqual(await response.json(), { error: "unavailable" });
+    assert.deepEqual([...f.storage.map], before); assert.equal(f.calls.length, 0);
+  });
+}
+
+test("active accepted, failed and pending jobs expire with their event after 30 days", async () => {
+  const f = await fixture(), at = Date.now() - 30 * DAY - 1, old = legacyState(f, 4, at);
+  old.jobs = old.events.slice(1).map((event, index) => ({ ...old.jobs[index], eventId: event.id,
+    at: Date.now(), state: ["accepted", "failed", "pending"][index], nextAt: Date.now() + DAY }));
+  await f.writeState(old); f.restart();
+  await exactPDF(f, await f.request({ as: f.other }));
+  const state = await f.state(); assert.equal(state.archivedFailed, 0);
+  assert.equal(state.events.length, 1); assert.equal(state.jobs.length, 1); assert.equal(state.jobs[0].state, "pending");
+  assert.deepEqual(await f.status(), { revoked: false, pending: 1, failed: 0, providerAccepted: 0 });
+  assert.equal(f.calls.length, 0);
+});
+
+test("expiry cleanup removes failed indexes and counts only retained mixed terminal evidence", async () => {
+  const f = await fixture(), now = Date.now();
+  const expired = await seedFailedArchives(f, 105, { at: now - 30 * DAY - 1 });
+  const future = await seedFailedArchives(f, 1, { at: now - DAY });
+  const state = await f.state(); state.archivedAccepted = 106; state.archivedFailed = 106; await f.writeState(state);
+  for (let pass = 0; pass < 3 && expired.some(entry => f.storage.map.has(entry.name)); pass++) {
+    await f.alarm();
+    const remaining = [...f.storage.map.keys()].filter(name => name.startsWith("audit:")).length;
+    assert.equal((await f.status()).failed, remaining); assert.equal((await f.status()).providerAccepted, remaining);
+  }
+  for (const entry of expired) {
+    assert.ok(!f.storage.map.has(entry.name)); assert.ok(!f.storage.map.has(`failed:${entry.event.id}`));
+    assert.ok(!f.storage.map.has(`expiry:${String(entry.expiresAt).padStart(13, "0")}:${entry.name}`));
+  }
+  assert.ok(f.storage.map.has(future[0].name)); assert.ok(f.storage.map.has(`failed:${future[0].event.id}`));
+  assert.deepEqual(await f.status(), { revoked: false, pending: 0, failed: 1, providerAccepted: 1 });
+  assert.equal(f.storage.alarmAt, now + 29 * DAY); assert.equal(f.calls.length, 0);
+});
 
 test("saturated v1 history migrates without blocking a different legitimate reader or losing evidence", async () => {
   const f = await fixture(), old = legacyState(f);

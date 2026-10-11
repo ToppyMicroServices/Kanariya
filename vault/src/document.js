@@ -12,6 +12,7 @@ import { readLinks, listLinks, createLink, revokeLink, getLiveLink } from './lin
 const DAY = 86400000;
 const LOG_PAGE_SIZE = 50, LOG_SCAN_SIZE = 100, LOG_CURSOR_MS = 600000;
 const LOG_INDEX = /^expiry:(\d{13}):(audit|replay):([0-9a-f-]{36})$/;
+const FAILED_INDEX = /^failed:([0-9a-f-]{36})$/;
 const LOG_ERRORS = new Set(['configuration_changed', 'configuration_error', 'http_error', 'timeout', 'network_error',
   'email_response_unknown', 'email_rate_limit', 'email_provider_unavailable', 'email_delivery_failed', 'email_provider_error', 'email_timeout_unknown']);
 
@@ -34,13 +35,17 @@ export class VaultDocument {
   }
   async state(storage, key) {
     const box = await storage.get('encrypted-journal');
-    if (!box) return { version: 1, documentId: null, revoked: false, requests: [], events: [], jobs: [], sessions: [], readerUsage: [], archivedAccepted: 0 };
+    if (!box) return { version: 1, documentId: null, revoked: false, requests: [], events: [], jobs: [], sessions: [], readerUsage: [], archivedAccepted: 0, archivedFailed: 0 };
     const state = await openJSON(box, key, this.context);
     if (state.version !== 1 || !Array.isArray(state.jobs) || !Array.isArray(state.events) || !Array.isArray(state.requests)) throw new Error('invalid_journal');
     state.sessions ??= [];
     if (!Array.isArray(state.sessions)) throw new Error('invalid_journal');
     state.readerUsage ??= []; state.archivedAccepted ??= 0;
     if (!Array.isArray(state.readerUsage) || !Number.isSafeInteger(state.archivedAccepted)) throw new Error('invalid_journal');
+    if (!Object.hasOwn(state, 'archivedFailed')) state.archivedFailed = 0;
+    if (!Number.isSafeInteger(state.archivedFailed) || state.archivedFailed < 0 ||
+        (Object.hasOwn(state, 'failedRetryCursor') && (typeof state.failedRetryCursor !== 'string' ||
+          !FAILED_INDEX.test(state.failedRetryCursor) || !UUID.test(state.failedRetryCursor.slice('failed:'.length))))) throw new Error('invalid_journal');
     if (Object.hasOwn(state, 'deadline') && (!state.deadline || Array.isArray(state.deadline) ||
         Object.keys(state.deadline).length !== 2 || typeof state.deadline.recordDigest !== 'string' || !/^[0-9a-f]{64}$/.test(state.deadline.recordDigest) ||
         !Number.isSafeInteger(state.deadline.expiresAt) || state.deadline.expiresAt <= 0)) throw new Error('invalid_journal');
@@ -52,17 +57,19 @@ export class VaultDocument {
     const name = `${type}:${id}`, expiresAt = at + 30 * DAY;
     await tx.put(name, await sealJSON({ ...value, expiresAt }, key, `${this.context}:${name}`));
     await tx.put(`expiry:${String(expiresAt).padStart(13, '0')}:${name}`, name);
+    if (type === 'audit' && value.jobs.some(job => job.state === 'failed')) await tx.put(`failed:${id}`, name);
   }
   async compact(tx, state, key) {
     // Preserve recent evidence in separate authenticated records instead of
     // allowing the 30-day history to fill the active notification/session box.
     if (state.events.length < 200 && state.requests.length < 200 && state.jobs.length < 400) return;
-    const removable = state.events.filter(e => !state.jobs.some(j => j.eventId === e.id && j.state !== 'accepted')).slice(0, -10);
+    const removable = state.events.filter(e => !state.jobs.some(j => j.eventId === e.id && !['accepted', 'failed'].includes(j.state))).slice(0, -10);
     const ids = new Set(removable.map(e => e.id));
     for (const event of removable) {
       const jobs = state.jobs.filter(j => j.eventId === event.id);
       await this.archive(tx, key, 'audit', event.id, { event, jobs }, event.at);
-      state.archivedAccepted += jobs.length;
+      state.archivedAccepted += jobs.filter(job => job.state === 'accepted').length;
+      state.archivedFailed += jobs.filter(job => job.state === 'failed').length;
     }
     state.events = state.events.filter(e => !ids.has(e.id));
     state.jobs = state.jobs.filter(j => !ids.has(j.eventId));
@@ -75,7 +82,12 @@ export class VaultDocument {
     for (const [index, name] of expired) {
       if (name.startsWith('audit:')) {
         const box = await tx.get(name);
-        if (box) state.archivedAccepted -= (await openJSON(box, key, `${this.context}:${name}`)).jobs.length;
+        if (box) {
+          const saved = await openJSON(box, key, `${this.context}:${name}`);
+          state.archivedAccepted -= saved.jobs.filter(job => job.state === 'accepted').length;
+          state.archivedFailed -= saved.jobs.filter(job => job.state === 'failed').length;
+        }
+        await tx.delete(`failed:${name.slice('audit:'.length)}`);
       }
       await tx.delete(name); await tx.delete(index);
     }
@@ -88,7 +100,8 @@ export class VaultDocument {
       const now = Date.now();
       state.events = state.events.filter(e => e.at > now - 30 * DAY);
       state.requests = state.requests.filter(e => e.at > now - 30 * DAY);
-      state.jobs = state.jobs.filter(j => j.state !== 'accepted' || j.at > now - 30 * DAY);
+      const retainedEvents = new Set(state.events.map(event => event.id));
+      state.jobs = state.jobs.filter(job => retainedEvents.has(job.eventId) && job.at > now - 30 * DAY);
       state.sessions = state.sessions.filter(s => s.expiresAt > now);
       state.readerUsage = state.readerUsage.filter(r => r.day === Math.floor(now / DAY));
       const result = await change(state, tx);
@@ -102,6 +115,56 @@ export class VaultDocument {
       else await tx.deleteAlarm();
       return result;
     });
+  }
+  async retryNotifications(tx, state, key, targets) {
+    const now = Date.now(), actors = new Map();
+    const actor = job => job.actor ?? 'legacy-notification';
+    let pending = 0;
+    for (const job of state.jobs.filter(job => job.state === 'pending')) {
+      pending++; actors.set(actor(job), (actors.get(actor(job)) ?? 0) + 1);
+    }
+    const retry = jobs => {
+      let changed = 0;
+      for (const job of jobs.filter(job => job.state === 'failed')) {
+        const target = targets.find(target => target.type === job.target.type), source = actor(job);
+        if (!target || pending >= 100 || (actors.get(source) ?? 0) >= 10) continue;
+        job.target = target; job.state = 'pending'; job.attempts = 0; job.nextAt = now; delete job.lease;
+        pending++; actors.set(source, (actors.get(source) ?? 0) + 1); changed++;
+      }
+      return changed;
+    };
+    retry(state.jobs);
+    if (pending >= 100) return;
+    const options = { prefix: 'failed:', limit: 100,
+      ...(state.failedRetryCursor ? { startAfter: state.failedRetryCursor } : {}) };
+    let page = await tx.list(options);
+    if (!page.size && state.failedRetryCursor) {
+      delete state.failedRetryCursor;
+      page = await tx.list({ prefix: 'failed:', limit: 100 });
+    }
+    for (const [index, name] of page) {
+      const match = FAILED_INDEX.exec(index);
+      if (!match || !UUID.test(match[1]) || name !== `audit:${match[1]}`) throw new Error('invalid_journal');
+      const box = await tx.get(name);
+      if (!box) throw new Error('invalid_journal');
+      const saved = await openJSON(box, key, `${this.context}:${name}`);
+      this.logEvent(saved.event, saved.jobs, state.documentId);
+      if (saved.event.id !== match[1] || saved.expiresAt !== saved.event.at + 30 * DAY ||
+          saved.jobs.some(job => !['accepted', 'failed'].includes(job.state)) ||
+          !saved.jobs.some(job => job.state === 'failed')) throw new Error('invalid_journal');
+      state.failedRetryCursor = index;
+      if (saved.expiresAt <= now) continue;
+      const accepted = saved.jobs.filter(job => job.state === 'accepted').length;
+      const failed = saved.jobs.filter(job => job.state === 'failed').length;
+      if (!retry(saved.jobs)) continue;
+      if (state.events.some(event => event.id === saved.event.id) ||
+          state.archivedAccepted < accepted || state.archivedFailed < failed) throw new Error('invalid_journal');
+      state.archivedAccepted -= accepted; state.archivedFailed -= failed;
+      state.events.push(saved.event); state.jobs.push(...saved.jobs);
+      await tx.delete(name); await tx.delete(index);
+      await tx.delete(`expiry:${String(saved.expiresAt).padStart(13, '0')}:${name}`);
+      if (pending >= 100) break;
+    }
   }
   async record(id, digest) {
     const object = await this.env.VAULT_DOCUMENTS.get(`${id}.sealed.json`);
@@ -324,7 +387,7 @@ export class VaultDocument {
     if (action === 'status') {
       const state = await this.state(this.ctx.storage, keys.audit);
       return json({ revoked: state.revoked, pending: state.jobs.filter(j => j.state === 'pending').length,
-        failed: state.jobs.filter(j => j.state === 'failed').length,
+        failed: state.archivedFailed + state.jobs.filter(j => j.state === 'failed').length,
         providerAccepted: state.archivedAccepted + state.jobs.filter(j => j.state === 'accepted').length });
     }
     if (action === 'metadata' || action === 'expiry') {
@@ -351,18 +414,15 @@ export class VaultDocument {
       return json({ id, mime: policy.mime, size: policy.size, authMode: policy.authMode ?? 'access',
         recipientName: policy.recipientName ?? null, expiresAt: this.expiresAt(policy, state), sealedExpiresAt: policy.expiresAt,
         revoked: policy.revoked || state.revoked, pending: state.jobs.filter(j => j.state === 'pending').length,
-        failed: state.jobs.filter(j => j.state === 'failed').length,
+        failed: state.archivedFailed + state.jobs.filter(j => j.state === 'failed').length,
         providerAccepted: state.archivedAccepted + state.jobs.filter(j => j.state === 'accepted').length });
     }
     const input = await this.input(request, 16);
     if (!input || Array.isArray(input) || typeof input !== 'object' || Object.keys(input).length) throw new Denied(400, 'invalid_request');
     const targets = action === 'retry-notifications' ? await requireNotificationTargets(this.env) : [];
-    await this.mutate(id, keys.audit, state => {
+    await this.mutate(id, keys.audit, async (state, tx) => {
       if (action === 'revoke') { state.revoked = true; state.sessions = []; }
-      else for (const job of state.jobs.filter(j => j.state === 'failed')) {
-        const target = targets.find(t => t.type === job.target.type);
-        if (target) { job.target = target; job.state = 'pending'; job.attempts = 0; job.nextAt = Date.now(); delete job.lease; }
-      }
+      else await this.retryNotifications(tx, state, keys.audit, targets);
     });
     return json({ accepted: true });
   }
@@ -456,7 +516,7 @@ export class VaultDocument {
       if (latest.requests.some(r => r.requestId === input.requestId)) throw new Denied(409, 'request_already_used');
       const archived = await tx.get(`replay:${input.requestId}`);
       if (archived && (await openJSON(archived, keys.audit, `${this.context}:replay:${input.requestId}`)).expiresAt > Date.now()) throw new Denied(409, 'request_already_used');
-      if (latest.jobs.some(j => j.state === 'failed') || latest.jobs.filter(j => j.state === 'pending').length + targets.length > 100) throw new Error('audit_capacity');
+      if (latest.jobs.filter(j => j.state === 'pending').length + targets.length > 100) throw new Error('audit_capacity');
       if (latest.jobs.filter(j => j.state === 'pending' && j.actor === actor).length + targets.length > 10) throw new Denied(429, 'rate_limited');
       if (latest.requests.filter(r => (r.actor ?? `access:${r.subject}`) === actor && r.at > Date.now() - 60000).length >= 10) throw new Denied(429, 'rate_limited');
       let usage = latest.readerUsage.find(r => r.actor === actor);
