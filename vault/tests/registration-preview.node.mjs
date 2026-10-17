@@ -253,9 +253,9 @@ test('timeout also bounds a stalled file read and a stalled PNG conversion', asy
 test('preview renders only a final-byte copy, with bounded canvases, safe text, and self-hosted PDF.js options', async () => {
   const ui = browser({ pages: 20 }), bytes = final.slice();
   await ui.showRegistrationPreview(ui.container, { bytes, pages: 20 }); assert.deepEqual(bytes, final);
-  assert.equal(ui.GlobalWorkerOptions.workerSrc, '/p/assets/pdfjs/pdf.worker.min.mjs');
+  assert.equal(ui.GlobalWorkerOptions.workerSrc, '/v1/admin/assets/pdfjs/pdf.worker.min.mjs');
   const load = ui.loads[0]; assert.deepEqual(load.transferred, final); assert.equal(load.destroyed, 1); assert.equal(ui.timers.size, 0);
-  assert.equal(load.settings.standardFontDataUrl, '/p/assets/pdfjs/standard_fonts/');
+  assert.equal(load.settings.standardFontDataUrl, '/v1/admin/assets/pdfjs/standard_fonts/');
   assert.equal(load.settings.isEvalSupported, false); assert.equal(load.settings.enableXfa, false); assert.equal(load.settings.useWasm, false);
   assert.equal(load.settings.disableAutoFetch, true); assert.equal(load.settings.disableStream, true);
   assert.equal(ui.container.children.length, 20); assert.equal(ui.pageCleanups.length, 20);

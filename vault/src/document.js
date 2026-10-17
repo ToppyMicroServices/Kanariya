@@ -1,12 +1,12 @@
-import { identity, accessConfiguration } from './auth.js';
+import { identity, accessConfiguration, emailIdentity } from './auth.js';
 import { UUID, MAX_RECORD_BYTES, importKey, openJSON, sealJSON, readPolicy, decryptDocument, boundedBody, parseJSON } from './crypto.js';
 import { requireNotificationTargets, deliverNotification } from '../../src/notifications.js';
-import { ACCESS_ROUTE, PASSWORD_ROUTE, HEADERS, json, Denied, failure, origin, dummyPin, passwordEnabled, requestBody } from './http.js';
+import { ACCESS_ROUTE, PASSWORD_ROUTE, EMAIL_ROUTE, HEADERS, json, Denied, failure, origin, dummyPin, passwordEnabled, requestBody } from './http.js';
 import { passwordValid, verifyPassword, randomToken, hashToken, readSession, sessionCookie,
   SESSION_MS, MAX_SESSIONS } from './password.js';
 import { recipientHeaders } from './recipient.js';
 import { PasswordAdmission } from './admission.js';
-import { readContacts, setContacts, MAX_RECIPIENT_REQUEST_BYTES } from './contacts.js';
+import { readContacts, setContacts, normalizeContactEmail, MAX_RECIPIENT_REQUEST_BYTES } from './contacts.js';
 import { VaultRegistrations } from './registration.js';
 import { readLinks, listLinks, createLink, revokeLink, getLiveLink } from './links.js';
 const DAY = 86400000;
@@ -291,7 +291,15 @@ export class VaultDocument {
         error: LOG_ERRORS.has(job.error) ? job.error : null,
         httpStatus: Number.isInteger(job.httpStatus) && job.httpStatus >= 100 && job.httpStatus <= 599 ? job.httpStatus : null };
     });
-    return { id: event.id, at: event.at, subject: event.subject, outcome: event.outcome, notifications };
+    const account = {};
+    if (Object.hasOwn(event, 'verifiedEmail') || Object.hasOwn(event, 'purpose')) {
+      try {
+        if (normalizeContactEmail(event.verifiedEmail) !== event.verifiedEmail ||
+            !['view', 'download'].includes(event.purpose) || event.subject.startsWith('shared-')) throw new Error();
+      } catch { throw new Error('invalid_journal'); }
+      account.verifiedEmail = event.verifiedEmail; account.purpose = event.purpose;
+    }
+    return { id: event.id, at: event.at, subject: event.subject, outcome: event.outcome, notifications, ...account };
   }
   async logs(request, id, key) {
     const pin = dummyPin(this.env), context = `${this.context}:logs:v1:${id}:${pin.digest}`, now = Date.now();
@@ -412,6 +420,7 @@ export class VaultDocument {
         });
       }
       return json({ id, mime: policy.mime, size: policy.size, authMode: policy.authMode ?? 'access',
+        ...(policy.authMode === 'email' ? { allowedEmails: [...policy.allowedEmails] } : {}),
         recipientName: policy.recipientName ?? null, expiresAt: this.expiresAt(policy, state), sealedExpiresAt: policy.expiresAt,
         revoked: policy.revoked || state.revoked, pending: state.jobs.filter(j => j.state === 'pending').length,
         failed: state.archivedFailed + state.jobs.filter(j => j.state === 'failed').length,
@@ -427,8 +436,8 @@ export class VaultDocument {
     return json({ accepted: true });
   }
   async handle(request, prepared = null) {
-    const url = new URL(request.url), passwordPath = url.pathname.startsWith('/p/');
-    const match = (passwordPath ? PASSWORD_ROUTE : ACCESS_ROUTE).exec(url.pathname);
+    const url = new URL(request.url), passwordPath = url.pathname.startsWith('/p/'), emailPath = url.pathname.startsWith('/e/');
+    const match = (emailPath ? EMAIL_ROUTE : passwordPath ? PASSWORD_ROUTE : ACCESS_ROUTE).exec(url.pathname);
     if (url.origin !== origin(this.env) || url.search || !match || !UUID.test(match[1])) throw new Denied();
     const [, id, action] = match, pin = dummyPin(this.env);
     if (id !== pin.id) throw new Denied();
@@ -440,16 +449,20 @@ export class VaultDocument {
     if (!methods.includes(request.method)) throw new Denied(405, 'method_not_allowed');
     if (!(request.method === 'GET' && ['status', 'metadata', 'logs', 'recipients', 'links'].includes(action)) && (request.headers.get('origin') !== origin(this.env) ||
         request.headers.get('content-type') !== 'application/json')) throw new Denied();
-    if (passwordPath && ['cross-site', 'same-site'].includes(request.headers.get('sec-fetch-site'))) throw new Denied();
-    let subject;
-    if (!passwordPath) {
+    if ((passwordPath || emailPath) && ['cross-site', 'same-site'].includes(request.headers.get('sec-fetch-site'))) throw new Denied();
+    let subject, account;
+    if (emailPath) {
+      try { account = await emailIdentity(request, this.env); subject = account.subject; }
+      catch { throw new Denied(401, 'unauthenticated'); }
+    } else if (!passwordPath) {
       try { subject = await identity(request, this.env); } catch { throw new Denied(401, 'unauthenticated'); }
       if (action !== 'open') return this.owner(request, id, action, subject);
     }
     let input, token;
     if (action === 'open') {
       input = passwordPath ? prepared.input : await this.input(request);
-      if (!input || Object.keys(input).length !== 1 || !UUID.test(input.requestId)) throw new Denied(400, 'invalid_request');
+      if (!input || Array.isArray(input) || Object.keys(input).length !== (emailPath ? 2 : 1) || !UUID.test(input.requestId) ||
+          (emailPath && !['view', 'download'].includes(input.purpose))) throw new Denied(400, 'invalid_request');
     } else if (action === 'session') {
       input = prepared.input;
       if (!input || Array.isArray(input) || typeof input !== 'object') throw new Denied(400, 'invalid_request');
@@ -467,8 +480,16 @@ export class VaultDocument {
     const record = prepared ? prepared.record : await this.record(id, pin.digest), keys = await this.keys();
     const policy = await readPolicy(record, id, keys.wrap);
     const mode = policy.authMode ?? 'access';
-    if (passwordPath ? !['password', 'link'].includes(mode) : mode !== 'access') throw new Denied();
+    if (emailPath ? mode !== 'email' : passwordPath ? !['password', 'link'].includes(mode) : mode !== 'access') throw new Denied();
     let state = await this.state(this.ctx.storage, keys.audit), session = null;
+    if (emailPath) {
+      if (!policy.allowedEmails.includes(account.email)) throw new Denied();
+      // This lifetime comes from the signed reader JWT, not a browser field.
+      session = { expiresAt: account.expiresAt };
+      this.live(policy, state, session);
+      if (action === 'status') return json({ expiresAt: this.expiresAt(policy, state),
+        sessionExpiresAt: account.expiresAt, verifiedEmail: account.email });
+    }
     if (passwordPath && action === 'session') {
       if (request.method === 'DELETE') {
         const hash = token ? await hashToken(token) : null;
@@ -510,7 +531,7 @@ export class VaultDocument {
       this.live(policy, state, session);
       subject = session.linkId ? `shared-link:${session.linkId}` : 'shared-password'; // Credential possession is not individual identity.
       if (action === 'status') return json({ expiresAt: this.readerExpiresAt(policy, state, session), sessionExpiresAt: session.expiresAt });
-    } else if (!policy.subjects.includes(subject)) throw new Denied();
+    } else if (!emailPath && !policy.subjects.includes(subject)) throw new Denied();
     if (request.headers.has('range') || request.headers.has('if-range')) throw new Denied(400, 'range_not_supported');
     const eventId = crypto.randomUUID();
     const actor = passwordPath ? `source:${prepared.source}` : `access:${subject}`;
@@ -528,7 +549,8 @@ export class VaultDocument {
       usage.count++;
       const at = Date.now();
       latest.requests.push({ requestId: input.requestId, subject, actor, at });
-      latest.events.push({ id: eventId, subject, documentId: id, at, outcome: 'requested' });
+      latest.events.push({ id: eventId, subject, documentId: id, at, outcome: 'requested',
+        ...(emailPath ? { verifiedEmail: account.email, purpose: input.purpose } : {}) });
       for (const target of targets) latest.jobs.push({ eventId, actor, target, at, state: 'pending', attempts: 0, outcome: 'unknown', nextAt: at + 10000 });
     });
     let bytes;

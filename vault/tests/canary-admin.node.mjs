@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { html, js } from '../src/canary-admin.js';
+import { html, js, script } from '../src/canary-admin.js';
 
 const id = '39d0e59d-e5a6-4c02-a8b9-b2a169071eea', token = 'kr_' + 'a'.repeat(64);
 const now = Date.UTC(2026, 9, 10), expiry = now + 3600000;
@@ -25,7 +25,7 @@ function browser(options = {}) {
   let clock = now, timerId = 0;
   const state = { status: summary(), logs: { configured: true, documentId: id, events: [] }, ...options.state };
   class BrowserDate extends Date { static now() { return clock; } }
-  vm.runInNewContext(js, {
+  vm.runInNewContext(options.env ? script(options.env) : js, {
     Date: BrowserDate, Intl, Uint8Array, TextDecoder, AbortController, URL,
     document: { getElementById: name => elements[name], createElement: () => element() },
     navigator: { clipboard: { async writeText(value) { copies.push(value); } } },
@@ -173,6 +173,33 @@ test('invalid IDs and foreign URL responses cannot produce a URL or enable a mut
   assert.equal(invalid.requests.length, 1); assert.equal(invalid.elements['canary-create'].disabled, true);
   const foreign = browser({ state: { status: summary(item({ url: 'https://attacker.example/canary/' + token })) } }); await settled(); await foreign.open();
   assert.equal(foreign.elements['canary-url'].value, ''); assert.equal(foreign.elements['canary-create'].disabled, true);
+});
+
+test('the development browser accepts only its configured Canary origin', async () => {
+  const origin = 'https://canary-dev.toppymicros.com', env = { CANARY_PUBLIC_ORIGIN: origin };
+  const expected = `${origin}/canary/${token}`;
+  const ui = browser({ env, state: { status: summary(item({ url: expected })) } });
+  await settled(); await ui.open(); await ui.click('canary-copy');
+  assert.deepEqual(ui.copies, [expected]);
+  for (const url of [item().url, 'https://attacker.example/canary/' + token,
+    expected + '?other=1', expected + '#other', origin + '.attacker.example/canary/' + token]) {
+    ui.state.status = summary(item({ url }));
+    ui.click('canary-refresh'); await settled();
+    assert.equal(ui.elements['canary-url'].value, '');
+    assert.equal(ui.elements['canary-create'].disabled, true);
+    await ui.click('canary-copy');
+    assert.deepEqual(ui.copies, [expected]);
+  }
+  assert.equal(ui.posts().length, 0);
+});
+
+test('the default browser keeps the production origin and refuses a development URL', async () => {
+  assert.equal(script(), js);
+  const ui = browser({ state: { status: summary(item({ url: 'https://canary-dev.toppymicros.com/canary/' + token })) } });
+  await settled(); await ui.open();
+  assert.equal(ui.elements['canary-url'].value, '');
+  assert.equal(ui.elements['canary-copy'].disabled, true);
+  assert.throws(() => script({ CANARY_PUBLIC_ORIGIN: 'https://canary-dev.toppymicros.com/unsafe' }), /configuration/);
 });
 
 test('oversized responses fail closed before displaying or mutating Canary state', async () => {

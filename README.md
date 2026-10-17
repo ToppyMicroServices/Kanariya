@@ -259,4 +259,9 @@ See `LICENSE` for the full text.
 
 ### Vault reader authentication
 
+Recipient email authentication is available as an opt-in document mode with a
+separate Cloudflare Access reader application and an encrypted email allowlist.
+See [recipient email authentication](docs/recipient-email-auth.md) for setup,
+audit records, and activation checks. It does not change existing shares.
+
 The separate [Vault](vault/README.md) retains Access-based readers and now supports an explicitly enabled per-document shared-password mode with short sessions and expiry. Owner administration always uses Access. Password mode, public Vault routes and real-document admission remain disabled in the checked-in configuration. Main pushes automatically deploy the canary Worker after both packages pass CI; they do not deploy or activate Vault.

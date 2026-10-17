@@ -4,6 +4,15 @@ import { boundedBody, parseJSON } from './crypto.js';
 import { isIP } from 'node:net';
 
 export const CANARY_ORIGIN = 'https://kanariya.toppymicros.com';
+export function canaryOrigin(env = {}) {
+  const value = env.CANARY_PUBLIC_ORIGIN === undefined ? CANARY_ORIGIN : env.CANARY_PUBLIC_ORIGIN;
+  if (typeof value !== 'string' || value.length > 2048 || /[\s\u0000-\u0020\u007f-\u009f]/.test(value)) throw new Error('configuration');
+  let url;
+  try { url = new URL(value); } catch { throw new Error('configuration'); }
+  if (url.protocol !== 'https:' || url.origin !== value || url.username || url.password ||
+      url.pathname !== '/' || url.search || url.hash) throw new Error('configuration');
+  return value;
+}
 const TOKEN = /^kr_[a-f0-9]{64}$/;
 const EVENT = /^[a-f0-9]{32}$/;
 const time = value => Number.isSafeInteger(value) && value > 0 && value <= 8640000000000000;
@@ -31,14 +40,14 @@ function sourceValue(value) {
   return value;
 }
 
-function statusValue(value, id) {
+function statusValue(value, id, publicOrigin) {
   if (!exact(value, ['documentId', 'canary']) || value.documentId !== id) throw new Error('canary_response');
   const item = value.canary;
   if (item === null) return { configured: true, documentId: id, canary: null };
   if (!exact(item, ['token', 'state', 'expiresAt', 'hitCount', 'lastSeenAt']) || !TOKEN.test(item.token) ||
       !['active', 'expired', 'revoked'].includes(item.state) || !time(item.expiresAt) ||
       !Number.isSafeInteger(item.hitCount) || item.hitCount < 0 || !(item.lastSeenAt === null || time(item.lastSeenAt))) throw new Error('canary_response');
-  return { configured: true, documentId: id, canary: { ...item, url: `${CANARY_ORIGIN}/canary/${item.token}` } };
+  return { configured: true, documentId: id, canary: { ...item, url: `${publicOrigin}/canary/${item.token}` } };
 }
 function eventValue(value, id) {
   if (!exact(value, ['documentId', 'events']) || value.documentId !== id || !Array.isArray(value.events) || value.events.length > 50) throw new Error('canary_response');
@@ -79,6 +88,7 @@ export async function handleCanary(request, env, { id, getExpiresAt }) {
   if (!(logs ? ['GET'] : ['GET', 'POST']).includes(request.method)) throw new Denied(405, 'method_not_allowed');
   if (request.method === 'POST' && (request.headers.get('origin') !== url.origin || request.headers.get('content-type') !== 'application/json' ||
       ['cross-site', 'same-site'].includes(request.headers.get('sec-fetch-site')))) throw new Denied();
+  const publicOrigin = canaryOrigin(env);
   const binding = env.CANARY_ADMIN;
   if (!binding || ['status', 'create', 'revoke', 'events'].some(method => typeof binding[method] !== 'function')) {
     if (request.method !== 'GET') throw new Denied(503, 'canary_not_configured');
@@ -86,7 +96,7 @@ export async function handleCanary(request, env, { id, getExpiresAt }) {
   }
   if (request.method === 'GET') {
     const result = await rpc(binding, logs ? 'events' : 'status', [id]);
-    return json(logs ? eventValue(result.value, id) : statusValue(result.value, id));
+    return json(logs ? eventValue(result.value, id) : statusValue(result.value, id, publicOrigin));
   }
   const ready = await requestBody(request, 5000, 128);
   let input;
@@ -99,5 +109,5 @@ export async function handleCanary(request, env, { id, getExpiresAt }) {
     args.push(expiresAt);
   }
   const result = await rpc(binding, input.action, args);
-  return json(statusValue(result.value, id), result.status);
+  return json(statusValue(result.value, id, publicOrigin), result.status);
 }

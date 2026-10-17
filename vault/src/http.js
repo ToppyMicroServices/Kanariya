@@ -1,5 +1,6 @@
 export const ACCESS_ROUTE = /^\/v1\/documents\/([0-9a-f-]{36})\/(open|revoke|status|retry-notifications|metadata|expiry|logs|recipients|links)$/;
 export const PASSWORD_ROUTE = /^\/p\/([0-9a-f-]{36})\/(open|session|status)$/;
+export const EMAIL_ROUTE = /^\/e\/([0-9a-f-]{36})\/(open|status)$/;
 export const HEADERS = {
   'cache-control': 'private, no-store, max-age=0', 'cdn-cache-control': 'no-store',
   'cloudflare-cdn-cache-control': 'no-store', 'surrogate-control': 'no-store', pragma: 'no-cache', expires: '0',

@@ -179,7 +179,9 @@ export class VaultRegistrations {
       currentDocumentId: receipt.currentDocumentId, currentRecordSha256: receipt.currentRecordSha256,
       recordSha256: receipt.recordSha256, preparedSha256: entry.preparedSha256, sourceSha256: entry.sourceSha256,
       recipient: prepared.metadata.recipient, recipientName: prepared.recipientName, watermarkEnabled: entry.watermarkEnabled,
-      expiresAt: entry.expiresAt, authMode: policy.authMode ?? 'access', registryRevision: receipt.registryRevision, createdAt: receipt.createdAt };
+      expiresAt: entry.expiresAt, authMode: policy.authMode ?? 'access',
+      ...(policy.authMode === 'email' ? { allowedEmails: [...policy.allowedEmails] } : {}),
+      registryRevision: receipt.registryRevision, createdAt: receipt.createdAt };
   }
   async replacement(request, id, subject, pin) {
     let input = null, plaintext;
@@ -207,17 +209,21 @@ export class VaultRegistrations {
         this.samePin(pin);
         const candidatePolicy = await readPolicy(candidate, id, keys.wrap), currentPolicy = await readPolicy(current, pin.id, keys.wrap);
         const prepared = preparation(entry), currentMode = currentPolicy.authMode ?? 'access';
+        // An owner may prepare a new, separately admitted document after the
+        // source expires. This leaves the source's expiry and reader pin intact.
+        if (currentMode === 'email' && input?.authMode) throw new Denied();
         if ((candidatePolicy.authMode ?? 'access') !== 'access' || candidatePolicy.subjects.length !== 1 || candidatePolicy.subjects[0] !== subject ||
             candidatePolicy.revoked || candidatePolicy.size !== entry.size || candidatePolicy.expiresAt !== entry.expiresAt ||
-            candidatePolicy.recipientName !== prepared.recipientName || currentPolicy.revoked || currentPolicy.expiresAt <= Date.now()) throw new Denied();
+            candidatePolicy.recipientName !== prepared.recipientName || currentPolicy.revoked) throw new Denied();
         const metadataRequest = new Request(`${origin(this.env)}/v1/documents/${pin.id}/metadata`, { headers: request.headers });
         const metadataResponse = await replacementWait(this.env.VAULT.get(this.env.VAULT.idFromName(pin.id)).fetch(metadataRequest));
         if (!metadataResponse.ok) throw new Denied();
-        const metadataBytes = await replacementBytes(metadataResponse, origin(this.env), 4096);
+        const metadataBytes = await replacementBytes(metadataResponse, origin(this.env), currentMode === 'email' ? 16 * 1024 : 4096);
         let metadata;
         try { metadata = parseJSON(metadataBytes); } finally { metadataBytes.fill(0); }
         if (metadata.id !== pin.id || metadata.authMode !== currentMode || metadata.revoked !== false || !timestamp(metadata.expiresAt) ||
-            metadata.expiresAt <= Date.now() || metadata.expiresAt > currentPolicy.expiresAt) throw new Denied();
+            metadata.expiresAt > currentPolicy.expiresAt ||
+            currentMode === 'email' && JSON.stringify(metadata.allowedEmails) !== JSON.stringify(currentPolicy.allowedEmails)) throw new Denied();
         plaintext = await decryptDocument(candidate, keys.wrap, candidatePolicy);
         if (await sha256(plaintext) !== entry.preparedSha256) throw new Denied(409, 'replacement_changed');
         plaintext.fill(0); plaintext = null;
@@ -226,8 +232,10 @@ export class VaultRegistrations {
         if (receipt && (receipt.currentDocumentId !== pin.id || receipt.currentRecordSha256 !== pin.digest)) throw new Denied(409, 'replacement_changed');
         const mode = receipt?.version === 2 ? receipt.authMode : receipt ? currentMode : input?.authMode ?? currentMode;
         if (receipt && input?.authMode && input.authMode !== mode) throw new Denied(409, 'replacement_changed');
+        if (currentMode === 'email' && mode !== 'email') throw new Denied(409, 'replacement_changed');
         const policy = validatePolicy({ mime: candidatePolicy.mime, size: candidatePolicy.size, subjects: mode === 'link' ? [] : [...currentPolicy.subjects],
           expiresAt: entry.expiresAt, revoked: false, authMode: mode, recipientName: prepared.recipientName,
+          ...(mode === 'email' ? { allowedEmails: [...currentPolicy.allowedEmails] } : {}),
           ...(mode === 'password' ? { passwordVerifier: currentPolicy.passwordVerifier } : {}) });
         let created = false;
         if (!receipt) {
@@ -269,7 +277,7 @@ export class VaultRegistrations {
         this.samePin(pin);
         const latest = await this.state(this.ctx.storage, keys.audit, pin);
         if (input && latest.revision !== input.expectedRevision) throw new Denied(409, 'registration_changed');
-        if (entry.expiresAt <= Date.now() || currentPolicy.expiresAt <= Date.now() || metadata.expiresAt <= Date.now()) throw new Denied();
+        if (entry.expiresAt <= Date.now()) throw new Denied();
         return json({ replacement: final ? this.manifest(receipt, entry, preparedPolicy) : null }, created ? 201 : 200);
       });
     } finally { plaintext?.fill(0); }

@@ -84,6 +84,7 @@ function browser(options = {}) {
     clearTimeout: key => timers.delete(key),
     fetch: async (path, request) => {
       requests.push({ path, request });
+      if (path === `/v1/documents/${id}/metadata`) return options.metadataFetch ? options.metadataFetch(path, request) : json({ id, authMode: "password", ...options.metadata });
       if (options.fetch) return options.fetch(path, request, state, requests.length);
       if (path === '/v1/management') return json({ documentId: id });
       if (path.endsWith('/recipients')) {
@@ -612,7 +613,7 @@ test('pagehide erases recipient inputs and prepared plaintext before a restored 
 test('owner extension controls are collapsed, labelled and free from inline script or secret fields', () => {
   assert.doesNotMatch(html, /<details[^>]*\sopen(?:\s|=|>)/);
   assert.doesNotMatch(html, /<script|\son\w+=|\sstyle=|type="password"|mailto:/i);
-  assert.match(html, /登録したPDFは非公開です/); assert.match(html, /本人を確認するものではありません/);
+  assert.match(html, /登録したPDFは非公開です/); assert.match(html, /この欄は連絡先の記録です。閲覧許可は変更されません/);
   assert.match(html, /<th scope="col">日時（日本時間）/); assert.match(html, /role="status" aria-live="polite"/);
 });
 
@@ -677,7 +678,7 @@ test('replacement confirmation JSON is cleared and collapsed during reads and re
     if (next === 'unknown') gate.reject(new Error('PRIVATE_RESPONSE_FAILURE'));
     else gate.resolve(json({ replacement: next === 'absent' ? null : replacementManifest({ authMode: 'link' }) }));
     await settled(); assert.equal(ui.elements['replacement-info'].hidden, true); assert.equal(ui.elements['replacement-info-json'].textContent, '');
-    assert.equal(ui.downloadBlobs.length, 0); assert.equal(ui.posts().length, 0); assert.equal(ui.requests.length, 4);
+    assert.equal(ui.downloadBlobs.length, 0); assert.equal(ui.posts().length, 0); assert.equal(ui.requests.length, 6);
     assert.doesNotMatch(ui.elements['replacement-status'].textContent, /PRIVATE_RESPONSE_FAILURE/);
   }
 });
@@ -847,4 +848,114 @@ for (const stage of ['GET', 'POST']) test(`a stale replacement ${stage} cannot f
   if (stage === 'POST') {
     assert.equal(ui.elements['replacement-prepare'].disabled, true); await ui.click('replacement-prepare'); assert.equal(ui.posts().length, 1);
   } else assert.equal(ui.elements['replacement-status'].textContent, '公開前の確認待ち');
+});
+
+
+test('email events show the verified account and distinguish view from download', async () => {
+  const ui = browser({ state: { logs: { retentionDays: 30, nextCursor: null, events: [
+    { id: uploadId, at: now, subject: 'verified-subject', verifiedEmail: 'recipient@example.com', purpose: 'view', outcome: 'decrypted', notifications: [] },
+    { id, at: now, subject: 'verified-subject', verifiedEmail: 'recipient@example.com', purpose: 'download', outcome: 'decrypted', notifications: [] },
+  ] } } });
+  await ui.open('logs'); const rows = ui.elements['log-rows'].children;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].children[1].textContent, 'メール認証済み：recipient@example.com');
+  assert.equal(rows[0].children[2].textContent, '復号済み（表示用）');
+  assert.equal(rows[1].children[2].textContent, '復号済み（保存用）');
+});
+for (const extra of [
+  { verifiedEmail: '<img>@example.com', purpose: 'view' }, { verifiedEmail: 'recipient@example.com' },
+  { purpose: 'view' }, { verifiedEmail: 'recipient@example.com', purpose: 'print' },
+  { subject: 'shared-password', verifiedEmail: 'recipient@example.com', purpose: 'view' },
+  { subject: 'shared-link:' + id, verifiedEmail: 'recipient@example.com', purpose: 'view' },
+]) test('invalid email attribution does not create a misleading log row: ' + JSON.stringify(extra), async () => {
+  const ui = browser({ state: { logs: { retentionDays: 30, nextCursor: null, events: [
+    { id: uploadId, at: now, subject: 'verified-subject', outcome: 'decrypted', notifications: [], ...extra },
+  ] } } });
+  await ui.open('logs'); assert.equal(ui.elements['log-rows'].children.length, 0);
+  assert.notEqual(ui.elements['logs-status'].textContent, '');
+});
+
+test('email replacement review shows allowed accounts but exports only opaque review anchors', async () => {
+  const allowedEmails = ['recipient@example.test', 'other@example.test'];
+  const manifest = replacementManifest({ authMode: 'email', allowedEmails });
+  const ui = browser({ metadata: { authMode: 'email', allowedEmails }, state: {
+    registry: { revision: 2, pending: 0, documents: [replacementCandidate()] }, replacement: manifest,
+  } });
+  await settled(); await ui.open('registration'); await ui.review();
+  assert.equal(ui.elements['replacement-status'].textContent, '公開前の確認待ち');
+  assert.match(ui.elements['replacement-summary'].textContent, /開き方：メール認証.*認証の許可先：recipient@example.test、other@example.test/);
+  assert.equal(ui.elements['replacement-link-field'].hidden, true);
+  assert.equal(ui.elements['replacement-link-mode'].disabled, true);
+  assert.equal(ui.elements['replacement-info-help'].hidden, true);
+  await ui.click('replacement-save');
+  const exported = await ui.downloadBlobs[0].text(), review = JSON.parse(exported);
+  assert.equal(review.version, 1); assert.equal(review.authMode, 'email');
+  assert.equal(review.recordSha256, manifest.recordSha256);
+  assert.deepEqual(Object.keys(review), ['version', 'status', 'id', 'currentDocumentId', 'currentRecordSha256', 'recordSha256',
+    'preparedSha256', 'sourceSha256', 'watermarkEnabled', 'expiresAt', 'authMode', 'registryRevision', 'createdAt']);
+  assert.doesNotMatch(exported, /recipient|allowedEmails|@example|株式会社|ダミー|personName|organizationName/);
+  assert.equal(ui.elements['replacement-info-json'].textContent, exported);
+  assert.equal(ui.posts().length, 0);
+  ui.event('pagehide'); assert.equal(ui.elements['replacement-summary'].textContent, '');
+  assert.equal(ui.elements['replacement-info-json'].textContent, '');
+});
+
+test('email replacement preparation cannot request URL-only even if the hidden checkbox is changed', async () => {
+  const allowedEmails = ['recipient@example.test'];
+  const ui = browser({ metadata: { authMode: 'email', allowedEmails }, fetch(path, request) {
+    if (path === '/v1/management') return json({ documentId: id });
+    if (path === '/v1/registrations') return json({ revision: 2, pending: 0, documents: [replacementCandidate()] });
+    return json({ replacement: request.method === 'POST' ? replacementManifest({ authMode: 'email', allowedEmails }) : null });
+  } });
+  await settled(); await ui.open('registration'); await ui.review();
+  assert.equal(ui.elements['replacement-prepare'].disabled, false);
+  assert.equal(ui.elements['replacement-link-field'].hidden, true);
+  assert.equal(ui.elements['replacement-link-mode'].disabled, true);
+  assert.match(ui.elements['replacement-summary'].textContent, /認証の許可先：recipient@example.test/);
+  ui.elements['replacement-link-mode'].checked = true;
+  await ui.click('replacement-prepare');
+  assert.deepEqual(JSON.parse(ui.posts()[0].request.body), { expectedRevision: 2, currentDocumentId: id });
+  assert.equal(ui.elements['replacement-status'].textContent, '公開前の確認待ち');
+});
+
+for (const overrides of [
+  { allowedEmails: undefined }, { allowedEmails: [] }, { allowedEmails: ['other@example.test'] },
+  { allowedEmails: ['recipient@example.test', 'extra@example.test'] },
+  { allowedEmails: ['recipient@example.test', 'recipient@example.test'] },
+  { authMode: 'link', version: 2 }, { authMode: 'access' }, { version: 3 }, { expiresAt: future + 1 },
+]) test('email replacement refuses changed or malformed inherited policy: ' + JSON.stringify(overrides), async () => {
+  const allowedEmails = ['recipient@example.test'];
+  const manifest = replacementManifest({ authMode: 'email', allowedEmails, ...overrides });
+  if (manifest.authMode !== 'email') delete manifest.allowedEmails;
+  const ui = browser({ metadata: { authMode: 'email', allowedEmails }, state: {
+    registry: { revision: 2, pending: 0, documents: [replacementCandidate()] }, replacement: manifest,
+  } });
+  await settled(); await ui.open('registration'); await ui.review();
+  assert.equal(ui.elements['replacement-save'].hidden, true);
+  assert.equal(ui.elements['replacement-prepare'].disabled, true);
+  assert.equal(ui.elements['replacement-info-json'].textContent, '');
+  await ui.click('replacement-save'); assert.equal(ui.downloadBlobs.length, 0);
+});
+
+test('replacement controls stay closed until the current auth policy is verified', async () => {
+  const gate = deferred();
+  const ui = browser({ metadataFetch: () => gate.promise, state: { registry: { revision: 2, pending: 0, documents: [replacementCandidate()] } } });
+  await settled(); await ui.open('registration'); await ui.review();
+  assert.equal(ui.elements['replacement-prepare'].disabled, true);
+  assert.equal(ui.elements['replacement-link-field'].hidden, true);
+  await ui.click('replacement-prepare'); assert.equal(ui.posts().length, 0);
+  gate.resolve(json({ id, authMode: 'email', allowedEmails: ['<script>@example.test'] })); await settled();
+  assert.equal(ui.elements['replacement-prepare'].disabled, true);
+  assert.equal(ui.elements['replacement-link-field'].hidden, true);
+  assert.equal(ui.requests.filter(({ path }) => path.endsWith('/replacement')).length, 0);
+});
+
+test('a late auth-policy read cannot resume replacement work after navigation', async () => {
+  const gate = deferred();
+  const ui = browser({ metadataFetch: () => gate.promise, state: { registry: { revision: 2, pending: 0, documents: [replacementCandidate()] } } });
+  await settled(); await ui.open('registration'); await ui.review(); ui.event('pagehide');
+  gate.resolve(json({ id, authMode: 'email', allowedEmails: ['recipient@example.test'] })); await settled();
+  assert.equal(ui.elements['replacement-review'].hidden, true);
+  assert.equal(ui.elements['replacement-summary'].textContent, '');
+  assert.equal(ui.requests.filter(({ path }) => path.endsWith('/replacement')).length, 0);
 });

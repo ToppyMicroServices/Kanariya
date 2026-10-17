@@ -759,6 +759,157 @@ export class RuntimeDocument extends VaultDocument {
     assert.ok(!bytes.includes(Buffer.from(pdf)));
   }
   report.checks.push('native_link_only_policy_document_and_bearer_secrets_not_stored_in_plaintext');
+  await mf.dispose(); mf = null;
+  const emailId = crypto.randomUUID(), verifiedEmail = 'Reviewer@example.test';
+  const emailEnv = { ...env, PASSWORD_READER_ENABLED: '0', EMAIL_READER_ENABLED: '1', READER_ACCESS_AUDIENCE: 'synthetic-email-reader',
+    DUMMY_DOCUMENT_ID: emailId };
+  const emailRecord = JSON.stringify(await sealDocument({ id: emailId, bytes: pdf, subjects: [],
+    authMode: 'email', allowedEmails: [verifiedEmail], expiresAt: sealedExpiresAt }, await importKey(env.VAULT_WRAP_KEY)));
+  emailEnv.DUMMY_RECORD_SHA256 = createHash('sha256').update(emailRecord).digest('hex');
+  const emailPersist = join(temporary, 'email-durable-objects');
+  mf = new runtime.Miniflare({ modules: true, modulesRoot: build, scriptPath: candidate,
+    compatibilityDate: '2026-01-12', compatibilityFlags: ['nodejs_compat'], host: '127.0.0.1', port: 0, cf: false,
+    log: new runtime.Log(runtime.LogLevel.ERROR), bindings: emailEnv,
+    durableObjects: { VAULT: { className: 'VaultDocument', useSQLite: true } }, durableObjectsPersist: emailPersist,
+    r2Buckets: ['VAULT_DOCUMENTS'], outboundService: async request => {
+      if (request.url === env.ACCESS_ISSUER + '/cdn-cgi/access/certs') return new runtime.Response(JSON.stringify({ keys: [jwk] }), { headers: { 'content-type': 'application/json' } });
+      if (request.url !== env.WEBHOOK_URL) { forbidden.push('blocked'); throw new Error('unexpected_network'); }
+      const body = await request.text();
+      try {
+        for (const secret of [verifiedEmail, subject, emailId, env.VAULT_WRAP_KEY, env.VAULT_AUDIT_KEY]) assert.ok(!body.includes(secret));
+        assert.ok(!body.includes(Buffer.from(pdf).toString('base64')));
+      } catch { validationErrors.push('fixture_outbound_validation_failed'); throw new Error('fixture_outbound_validation_failed'); }
+      return new runtime.Response(null, { status: 202 });
+    } });
+  await mf.ready;
+  await (await mf.getR2Bucket('VAULT_DOCUMENTS')).put(`${emailId}.sealed.json`, emailRecord);
+  const emailToken = email => new SignJWT({ sub: subject, email, type: 'app' }).setProtectedHeader({ alg: 'RS256', kid: 'runtime' })
+    .setIssuer(env.ACCESS_ISSUER).setAudience(emailEnv.READER_ACCESS_AUDIENCE).setIssuedAt().setExpirationTime('10m').sign(pair.privateKey);
+  const readerToken = await emailToken(verifiedEmail);
+  const ownerManagement = await signed('/v1/admin/assets/management.js');
+  assert.equal(ownerManagement.status, 200); privateManagementHeaders(ownerManagement);
+  const managementImports = [...(await ownerManagement.text()).matchAll(/^import .*? from ["']([^"']+)["'];/gm)].map(match => match[1]);
+  const previewPath = managementImports.find(path => path.endsWith('/registration-preview.js'));
+  assert.ok(previewPath);
+  let previewSource;
+  for (const path of managementImports) {
+    assert.ok(path.startsWith('/v1/admin/assets/'));
+    const response = await signed(path); assert.equal(response.status, 200); privateManagementHeaders(response);
+    const source = await response.text(); assert.ok(source.length > 100);
+    if (path === previewPath) previewSource = source;
+  }
+  const previewModule = /^import .*? from ["']([^"']+)["'];/m.exec(previewSource)?.[1];
+  const previewWorker = /GlobalWorkerOptions\.workerSrc\s*=\s*["']([^"']+)["']/.exec(previewSource)?.[1];
+  const previewFonts = /standardFontDataUrl\s*:\s*["']([^"']+)["']/.exec(previewSource)?.[1];
+  for (const path of [previewModule, previewWorker, previewFonts]) assert.ok(path?.startsWith('/v1/admin/assets/pdfjs/'));
+  for (const path of [previewModule, previewWorker, ...['LiberationSans-Regular.ttf', 'LiberationSans-Bold.ttf'].map(name => previewFonts + name)]) {
+    const response = await signed(path); assert.equal(response.status, 200); privateManagementHeaders(response);
+    const bytes = new Uint8Array(await response.arrayBuffer()); assert.ok(bytes.length > 100);
+    assert.equal(response.headers.get('content-type'), path.endsWith('.ttf') ? 'font/ttf' : 'text/javascript; charset=utf-8');
+    if (path.endsWith('.ttf')) assert.deepEqual([...bytes.slice(0, 4)], [0, 1, 0, 0]);
+    assert.equal((await signed(path, { actor: '' })).status, 401);
+    assert.equal((await signed(path, { headers: { 'cf-access-jwt-assertion': readerToken } })).status, 401);
+    assert.equal((await signed(path.replace('/v1/admin/assets/', '/p/assets/'))).status, 403);
+  }
+  report.checks.push('native_owner_preview_dependencies_work_with_password_reader_disabled_without_reader_exposure');
+  async function emailRequest(action, { jwt = readerToken, purpose = 'view' } = {}) {
+    const method = action === 'status' ? 'GET' : 'POST';
+    return mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/e/${emailId}/${action}`, { method,
+      headers: { origin: env.PUBLIC_ORIGIN, 'content-type': 'application/json', 'cf-access-jwt-assertion': jwt },
+      ...(method === 'GET' ? {} : { body: JSON.stringify({ requestId: crypto.randomUUID(), purpose }) }), signal: AbortSignal.timeout(10000) });
+  }
+  assert.equal((await emailRequest('status', { jwt: '' })).status, 401);
+  assert.equal((await emailRequest('open', { jwt: await token(env.VAULT_OWNER_SUB) })).status, 401);
+  assert.equal((await emailRequest('open', { jwt: await emailToken('outsider@example.test') })).status, 403);
+  assert.equal((await signed('/v1/admin', { headers: { 'cf-access-jwt-assertion': readerToken } })).status, 401);
+  assert.equal((await request('open', subject, crypto.randomUUID(), emailId)).status, 403);
+  assert.equal((await signed(`/v1/documents/${emailId}/links`, { method: 'POST', body: {
+    action: 'create', expectedRevision: 0, expiresAt: sealedExpiresAt } })).status, 403);
+  assert.equal((await mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/p/${emailId}/open`, { method: 'POST',
+    headers: { origin: env.PUBLIC_ORIGIN, 'content-type': 'application/json' }, body: JSON.stringify({ requestId: crypto.randomUUID() }) })).status, 403);
+  report.checks.push('native_email_reader_rejects_unsigned_wrong_account_and_audience_bypass');
+  const emailStatusResponse = await emailRequest('status'); assert.equal(emailStatusResponse.status, 200);
+  const emailStatus = await emailStatusResponse.json(); assert.equal(emailStatus.verifiedEmail, verifiedEmail);
+  assert.equal(emailStatus.expiresAt, sealedExpiresAt); assert.ok(emailStatus.sessionExpiresAt > Date.now());
+  const emailPage = await mf.dispatchFetch(`${env.PUBLIC_ORIGIN}/e/${emailId}`, { headers: { 'cf-access-jwt-assertion': readerToken } });
+  assert.equal(emailPage.status, 200); assert.ok((await emailPage.text()).includes('/e/assets/viewer.js'));
+  for (const purpose of ['view', 'download']) {
+    const response = await emailRequest('open', { purpose }); assert.equal(response.status, 200); privateManagementHeaders(response);
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), pdf);
+    assert.equal(Number(response.headers.get('x-vault-session-expires-at')), emailStatus.sessionExpiresAt);
+  }
+  const emailLogsResponse = await signed(`/v1/documents/${emailId}/logs`); assert.equal(emailLogsResponse.status, 200);
+  const emailLogs = await emailLogsResponse.json(); assert.equal(emailLogs.events.length, 2);
+  assert.deepEqual(emailLogs.events.map(event => event.purpose).sort(), ['download', 'view']);
+  for (const event of emailLogs.events) { assert.equal(event.verifiedEmail, verifiedEmail); assert.equal(event.subject, subject); assert.equal(event.outcome, 'decrypted'); }
+  report.checks.push('native_email_reader_verifies_account_and_audits_view_and_download');
+  const emailShortExpiry = Date.now() + 1200;
+  assert.equal((await signed(`/v1/documents/${emailId}/expiry`, { method: 'POST', body: {
+    expiresAt: emailShortExpiry, expectedExpiresAt: sealedExpiresAt } })).status, 200);
+  await pause(Math.max(0, emailShortExpiry - Date.now() + 100));
+  assert.equal((await emailRequest('status')).status, 403); assert.equal((await emailRequest('open')).status, 403);
+  assert.equal((await signed(`/v1/documents/${emailId}/expiry`, { method: 'POST', body: {
+    expiresAt: sealedExpiresAt, expectedExpiresAt: emailShortExpiry } })).status, 200);
+  assert.equal((await request('revoke', env.VAULT_OWNER_SUB, crypto.randomUUID(), emailId)).status, 200);
+  assert.equal((await emailRequest('status')).status, 403); assert.equal((await emailRequest('open')).status, 403);
+  const emailMetadata = await (await signed(`/v1/documents/${emailId}/metadata`)).json();
+  assert.equal(emailMetadata.revoked, true); assert.deepEqual(emailMetadata.allowedEmails, [verifiedEmail]);
+  report.checks.push('native_email_deadline_and_revocation_stop_authenticated_retrieval');
+  for (const path of await files(emailPersist)) {
+    const bytes = await readFile(path);
+    for (const secret of [verifiedEmail, readerToken, env.VAULT_WRAP_KEY, env.VAULT_AUDIT_KEY]) assert.ok(!bytes.includes(Buffer.from(secret)));
+    assert.ok(!bytes.includes(Buffer.from(pdf)));
+  }
+  report.checks.push('native_email_account_document_and_keys_not_persisted_in_plaintext');
+  await mf.dispose(); mf = null;
+  const expiredEmailId = crypto.randomUUID(), expiredEmailRecord = JSON.stringify(await sealDocument({
+    id: expiredEmailId, bytes: pdf, subjects: [], authMode: 'email', allowedEmails: [verifiedEmail], expiresAt: 1,
+  }, await importKey(env.VAULT_WRAP_KEY)));
+  const expiredEmailEnv = { ...emailEnv, DUMMY_DOCUMENT_ID: expiredEmailId,
+    DUMMY_RECORD_SHA256: createHash('sha256').update(expiredEmailRecord).digest('hex') };
+  mf = new runtime.Miniflare({ modules: true, modulesRoot: build, scriptPath: candidate,
+    compatibilityDate: '2026-01-12', compatibilityFlags: ['nodejs_compat'], host: '127.0.0.1', port: 0, cf: false,
+    log: new runtime.Log(runtime.LogLevel.ERROR), bindings: expiredEmailEnv,
+    durableObjects: { VAULT: { className: 'VaultDocument', useSQLite: true } },
+    durableObjectsPersist: join(temporary, 'expired-email-durable-objects'), r2Buckets: ['VAULT_DOCUMENTS'],
+    outboundService: async request => {
+      if (request.url === env.ACCESS_ISSUER + '/cdn-cgi/access/certs') return new runtime.Response(JSON.stringify({ keys: [jwk] }), { headers: { 'content-type': 'application/json' } });
+      forbidden.push('expired_replacement_outbound'); throw new Error('unexpected_network');
+    } });
+  await mf.ready;
+  const expiredBucket = await mf.getR2Bucket('VAULT_DOCUMENTS');
+  await expiredBucket.put(`${expiredEmailId}.sealed.json`, expiredEmailRecord);
+  const expiredReaderRequest = (documentId = expiredEmailId) => signed(`/e/${documentId}/open`, {
+    method: 'POST', headers: { 'cf-access-jwt-assertion': readerToken },
+    body: { requestId: crypto.randomUUID(), purpose: 'view' },
+  });
+  assert.equal((await expiredReaderRequest()).status, 403);
+  const renewedId = crypto.randomUUID(), renewedExpiry = Date.now() + 24 * 60 * 60 * 1000;
+  const renewedRegistration = await signed(registryPath, { method: 'POST', body: { ...registrationInput,
+    id: renewedId, expiresAt: renewedExpiry, replaceOf: expiredEmailId, expectedRevision: 0 } });
+  assert.equal(renewedRegistration.status, 201);
+  const renewedRegistry = await renewedRegistration.json(), renewedPath = `/v1/registrations/${renewedId}/replacement`;
+  const renewedBody = { currentDocumentId: expiredEmailId, expectedRevision: renewedRegistry.revision };
+  assert.equal((await signed(renewedPath, { method: 'POST', body: { ...renewedBody, authMode: 'link' } })).status, 403);
+  const renewedResponse = await signed(renewedPath, { method: 'POST', body: renewedBody });
+  assert.equal(renewedResponse.status, 201);
+  const renewedManifest = (await renewedResponse.json()).replacement;
+  assert.equal(renewedManifest.status, 'prepared_not_active'); assert.equal(renewedManifest.authMode, 'email');
+  assert.equal(renewedManifest.expiresAt, renewedExpiry); assert.deepEqual(renewedManifest.allowedEmails, [verifiedEmail]);
+  const renewedBytes = await (await expiredBucket.get(`${renewedId}.sealed.json`)).text();
+  assert.equal(createHash('sha256').update(renewedBytes).digest('hex'), renewedManifest.recordSha256);
+  const renewedRecord = JSON.parse(renewedBytes), renewedPolicy = await readPolicy(renewedRecord, renewedId, await importKey(env.VAULT_WRAP_KEY));
+  assert.equal(renewedPolicy.authMode, 'email'); assert.equal(renewedPolicy.expiresAt, renewedExpiry);
+  assert.deepEqual(renewedPolicy.subjects, []); assert.deepEqual(renewedPolicy.allowedEmails, [verifiedEmail]);
+  assert.deepEqual(await decryptDocument(renewedRecord, await importKey(env.VAULT_WRAP_KEY), renewedPolicy), candidatePDF);
+  assert.equal(await (await expiredBucket.get(`${expiredEmailId}.sealed.json`)).text(), expiredEmailRecord);
+  assert.deepEqual(await (await signed('/v1/management')).json(), { documentId: expiredEmailId });
+  assert.equal((await (await signed(`/v1/documents/${expiredEmailId}/metadata`)).json()).expiresAt, 1);
+  assert.equal((await expiredReaderRequest()).status, 403); assert.equal((await expiredReaderRequest(renewedId)).status, 403);
+  assert.equal((await request('revoke', env.VAULT_OWNER_SUB, crypto.randomUUID(), expiredEmailId)).status, 200);
+  assert.equal((await signed(renewedPath)).status, 403);
+  assert.equal((await signed(renewedPath, { method: 'POST', body: renewedBody })).status, 403);
+  report.checks.push('native_expired_email_source_replacement_preserves_grants_and_stays_private');
   assert.deepEqual(forbidden, []); assert.deepEqual(validationErrors, []); report.checks.push("no_unexpected_outbound");
   if (candidatePath) {
     report.candidateSha256After = createHash("sha256").update(await readFile(candidate)).digest("hex");
@@ -780,7 +931,7 @@ export class RuntimeDocument extends VaultDocument {
     report.error ??= 'fixture_outbound_validation_failed'; process.exitCode = 1;
   }
   report.pass = report.status === "passed";
-  report.testCounts = { runtimeChecksExpected: 42, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
+  report.testCounts = { runtimeChecksExpected: 48, runtimeChecksPassed: report.checks.filter(check => check !== "dry_run_bundle" && !check.startsWith("frozen_")).length,
     bundleChecksPassed: report.checks.filter(check => check === "dry_run_bundle" || check.startsWith("frozen_")).length, totalChecksPassed: report.checks.length };
   await recordReport(); console.log(JSON.stringify(report));
 }

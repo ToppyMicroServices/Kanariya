@@ -15,7 +15,7 @@ function response(value, status = 200, type = 'application/json') {
   return { ok: status >= 200 && status < 300, status, headers: new Headers({ 'content-type': type }), text: async () => JSON.stringify(value) };
 }
 function management(options = {}) {
-  const elements = Object.fromEntries(['status', 'error', 'reload', 'owner-page', 'management', 'sharing-state', 'recipient-row', 'recipient', 'deadline', 'copy-link', 'preview', 'sharing-link-help', 'expiry-form', 'expires-at', 'save-expiry', 'expiry-limit', 'stop-sharing', 'stop-confirmation', 'confirm-stop', 'cancel-stop'].map(name => [name, {
+  const elements = Object.fromEntries(['status', 'error', 'reload', 'owner-page', 'management', 'sharing-state', 'recipient-row', 'recipient', 'allowed-emails-row', 'allowed-emails', 'deadline', 'copy-link', 'preview', 'sharing-link-help', 'expiry-form', 'expires-at', 'save-expiry', 'expiry-limit', 'stop-sharing', 'stop-confirmation', 'confirm-stop', 'cancel-stop'].map(name => [name, {
     textContent: '', value: '', hidden: true, disabled: false, attributes: new Map(), listeners: new Map(),
     addEventListener(event, callback) { this.listeners.set(event, callback); },
     setAttribute(name, value) { this.attributes.set(name, value); },
@@ -213,4 +213,32 @@ test('protected page supports strict CSP and keeps limitations in the collapsed 
   assert.doesNotMatch(html, /現在はダミーPDFを共有しています/);
   assert.doesNotMatch(html, /type="password"|パスワードの変更|アップロード/);
   assert.match(css, /prefers-reduced-motion/); assert.match(css, /@media\(max-width:540px\)/);
+});
+
+
+test('email documents expose a non-secret reader URL and read-only allowed accounts', async () => {
+  const ui = management({ metadata: { authMode: 'email', allowedEmails: ['recipient@example.com', 'Other+tag@example.com'] } }); await settled();
+  assert.equal(ui.elements.management.hidden, false);
+  assert.equal(ui.elements.preview.href, 'https://vault.example/e/' + id);
+  assert.equal(ui.elements['allowed-emails-row'].hidden, false);
+  assert.equal(ui.elements['allowed-emails'].textContent, 'recipient@example.com、Other+tag@example.com');
+  await ui.click('copy-link'); assert.deepEqual(ui.copied, ['https://vault.example/e/' + id]);
+  assert.ok(ui.requests.every(({ request }) => request.method === 'GET'));
+  ui.event('pagehide'); assert.equal(ui.elements['allowed-emails'].textContent, '');
+  assert.equal(ui.elements['allowed-emails-row'].hidden, true);
+});
+for (const allowedEmails of [undefined, [], ['x'], ['<img>@example.com'], ['a@example.com', 'a@example.com'], ['a@EXAMPLE.COM']]) test('invalid email allowlist hides owner controls: ' + JSON.stringify(allowedEmails), async () => {
+  const ui = management({ metadata: { authMode: 'email', allowedEmails } }); await settled();
+  assert.equal(ui.elements.management.hidden, true); assert.equal(ui.elements['copy-link'].disabled, true);
+  assert.equal(ui.elements['allowed-emails'].textContent, '');
+});
+
+
+test('owner metadata can display the bounded fifty-account email allowlist', async () => {
+  const domain = 'a'.repeat(63) + '.' + 'b'.repeat(63) + '.' + 'c'.repeat(61);
+  const allowedEmails = Array.from({ length: 50 }, (_, n) => 'r' + String(n).padStart(2, '0') + 'a'.repeat(61) + '@' + domain);
+  assert.equal(allowedEmails[0].length, 254);
+  const ui = management({ metadata: { authMode: 'email', allowedEmails } }); await settled();
+  assert.equal(ui.elements.management.hidden, false);
+  assert.equal(ui.elements['allowed-emails'].textContent, allowedEmails.join('、'));
 });

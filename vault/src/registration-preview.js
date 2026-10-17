@@ -1,5 +1,5 @@
-export const js = String.raw`import { getDocument, GlobalWorkerOptions } from "/p/assets/pdfjs/pdf.min.mjs";
-GlobalWorkerOptions.workerSrc="/p/assets/pdfjs/pdf.worker.min.mjs";
+export const js = String.raw`import { getDocument, GlobalWorkerOptions } from "/v1/admin/assets/pdfjs/pdf.min.mjs";
+GlobalWorkerOptions.workerSrc="/v1/admin/assets/pdfjs/pdf.worker.min.mjs";
 const MAX_BYTES=1048576,MAX_METADATA_BYTES=4096,MAX_PNG_BYTES=524288,MAX_PAGES=20,MAX_PAGE_PIXELS=4000000,MAX_TOTAL_PIXELS=12000000;
 const MAX_TEXT_CHARS=200000,MAX_TEXT_ITEMS=20000,TIMEOUT=20000,SHA256=/^[0-9a-f]{64}$/;
 const unsafeName=/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\\/:*?"<>|]/u;
@@ -136,7 +136,7 @@ export async function showRegistrationPreview(container,result,signal){
  session.stop=()=>{if(previews.get(container)===session)clearRegistrationPreview(container);};
  previews.set(container,session);signal?.addEventListener("abort",session.stop,{once:true});session.timer=setTimeout(()=>{session.timedOut=true;session.stop();},TIMEOUT);
  try{
-  session.loading=getDocument({data:session.data,standardFontDataUrl:"/p/assets/pdfjs/standard_fonts/",disableFontFace:true,useSystemFonts:false,useWasm:false,isEvalSupported:false,
+  session.loading=getDocument({data:session.data,standardFontDataUrl:"/v1/admin/assets/pdfjs/standard_fonts/",disableFontFace:true,useSystemFonts:false,useWasm:false,isEvalSupported:false,
    enableXfa:false,disableAutoFetch:true,disableStream:true,stopAtErrors:true,verbosity:0,maxImageSize:MAX_PAGE_PIXELS,canvasMaxAreaInBytes:MAX_PAGE_PIXELS*4});
   const pdf=await bounded(session.loading.promise,session.controller.signal);current(container,session);
   if(!Number.isSafeInteger(pdf.numPages)||pdf.numPages!==result.pages)throw failed();let pixels=0;

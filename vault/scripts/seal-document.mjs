@@ -1,5 +1,5 @@
 // Trusted owner-side provisioning only. Read paths, grants and the wrapping key
-// and any document password from stdin; write only an encrypted record.
+// and any document password or allowed emails from stdin; write only an encrypted record.
 import { open } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -64,11 +64,11 @@ try {
   }
   const id = crypto.randomUUID();
   const options = { id, bytes, subjects: request.subjects, expiresAt: request.expiresAt };
-  for (const name of ["authMode", "password", "passwordVerifier", "recipientName"]) if (Object.hasOwn(request, name)) options[name] = request[name];
+  for (const name of ["authMode", "password", "passwordVerifier", "recipientName", "allowedEmails"]) if (Object.hasOwn(request, name)) options[name] = request[name];
   let record;
   try { record = await sealDocument(options, await importKey(request.wrappingKey)); }
-  finally { options.password = ""; options.recipientName = ""; }
-  bytes.fill(0); request.wrappingKey = ""; request.password = ""; request.recipientName = ""; input = "";
+  finally { options.password = ""; options.recipientName = ""; options.allowedEmails = []; }
+  bytes.fill(0); request.wrappingKey = ""; request.password = ""; request.recipientName = ""; request.allowedEmails = []; input = "";
   const serialized = JSON.stringify(record);
   const output = await open(join(request.outputDirectory, `${id}.sealed.json`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try { await output.writeFile(serialized); await output.sync(); } finally { await output.close(); }
@@ -78,6 +78,6 @@ try {
 } finally {
   // JS strings are immutable, so clearing references is best effort only.
   bytes?.fill(0); input = "";
-  if (request && typeof request === "object") { request.wrappingKey = ""; request.password = ""; request.recipientName = ""; }
+  if (request && typeof request === "object") { request.wrappingKey = ""; request.password = ""; request.recipientName = ""; request.allowedEmails = []; }
   await fd?.close();
 }

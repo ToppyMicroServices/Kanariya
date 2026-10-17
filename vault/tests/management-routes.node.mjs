@@ -6,6 +6,7 @@ import * as admin from '../src/admin.js';
 import { HEADERS } from '../src/http.js';
 import * as registrationPreview from '../src/registration-preview.js';
 import { pdfPreparationAssets } from '../src/pdf-preparation-assets.generated.js';
+import { pdfjsAssets } from '../src/pdfjs-assets.generated.js';
 
 const originalFetch = globalThis.fetch;
 after(() => { globalThis.fetch = originalFetch; });
@@ -31,7 +32,7 @@ async function token(subject) {
 async function request(path, subject, options = {}) {
   const headers = subject ? { 'cf-access-jwt-assertion': await token(subject) } : {};
   return worker.fetch(new Request(env.PUBLIC_ORIGIN + path, { method: options.method ?? 'GET',
-    headers: { ...headers, ...options.headers } }), env);
+    headers: { ...headers, ...options.headers } }), options.env ?? env);
 }
 const extraAssets = [
   ['/v1/admin/assets/links.js', admin.linksJs, 'text/javascript; charset=utf-8'],
@@ -40,7 +41,8 @@ const extraAssets = [
   ['/v1/admin/assets/pdf-preparation-worker.js', registrationPreview.workerJs, 'text/javascript; charset=utf-8'],
   ...Object.entries(pdfPreparationAssets).map(([path, asset]) => [path, asset.data, asset.mime]),
 ];
-const surfaces = [...extraAssets.map(([path]) => path),'/v1/admin', '/v1/admin/assets/admin.js', '/v1/admin/assets/admin.css', '/v1/admin/assets/management.js', '/v1/management'];
+const ownerPdfAssets = Object.entries(pdfjsAssets).map(([path, asset]) => ['/v1/admin/assets' + path, asset]);
+const surfaces = [...extraAssets.map(([path]) => path), ...ownerPdfAssets.map(([path]) => path), '/v1/admin', '/v1/admin/assets/admin.js', '/v1/admin/assets/admin.css', '/v1/admin/assets/management.js', '/v1/management'];
 
 test('owner administration surfaces reject anonymous, password-cookie and non-owner identities', async () => {
   for (const path of [...surfaces, '/v1/registrations', `/v1/registrations/${crypto.randomUUID()}/replacement`]) {
@@ -85,6 +87,46 @@ test('owner page and assets return exact UI with private headers and no document
   }
 });
 
+test('the owner Canary asset receives its environment without broadening CSP or accessing documents', async () => {
+  const development = Object.assign(Object.create(env), { CANARY_PUBLIC_ORIGIN: 'https://canary-dev.toppymicros.com' });
+  const response = await request('/v1/admin/assets/canary.js', env.VAULT_OWNER_SUB, { env: development });
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), admin.canaryScript(development));
+  for (const [name, value] of Object.entries(HEADERS)) assert.equal(response.headers.get(name), value);
+  const malformed = Object.assign(Object.create(env), { CANARY_PUBLIC_ORIGIN: 'https://canary-dev.toppymicros.com/path' });
+  const rejected = await request('/v1/admin/assets/canary.js', env.VAULT_OWNER_SUB, { env: malformed });
+  assert.equal(rejected.status, 503);
+  assert.deepEqual(await rejected.json(), { error: 'unavailable' });
+  assert.equal((await request('/v1/admin/assets/canary.js', null, { env: development })).status, 401);
+  assert.equal((await request('/v1/admin/assets/canary.js', 'synthetic-reader', { env: development })).status, 403);
+});
+
+test('management preview dependencies load through owner routes with password reading disabled', async () => {
+  assert.equal(env.PASSWORD_READER_ENABLED, '0');
+  const management = await (await request('/v1/admin/assets/management.js', env.VAULT_OWNER_SUB)).text();
+  const imports = [...management.matchAll(/^import .*? from ["']([^"']+)["'];/gm)].map(match => match[1]);
+  const previewPath = imports.find(path => path.endsWith('/registration-preview.js'));
+  assert.ok(previewPath);
+  for (const path of imports) assert.equal((await request(path, env.VAULT_OWNER_SUB)).status, 200, path);
+  const preview = await (await request(previewPath, env.VAULT_OWNER_SUB)).text();
+  const modulePath = /^import .*? from ["']([^"']+)["'];/m.exec(preview)?.[1];
+  const workerPath = /GlobalWorkerOptions\.workerSrc\s*=\s*["']([^"']+)["']/.exec(preview)?.[1];
+  const fontPath = /standardFontDataUrl\s*:\s*["']([^"']+)["']/.exec(preview)?.[1];
+  for (const path of [modulePath, workerPath, fontPath]) assert.ok(path?.startsWith('/v1/admin/assets/pdfjs/'), path);
+  for (const path of [modulePath, workerPath, ...ownerPdfAssets.map(([path]) => path).filter(path => path.startsWith(fontPath))]) {
+    const response = await request(path, env.VAULT_OWNER_SUB);
+    assert.equal(response.status, 200, path);
+  }
+  for (const [path, asset] of ownerPdfAssets) {
+    const response = await request(path, env.VAULT_OWNER_SUB);
+    assert.equal(response.status, 200, path);
+    assert.equal(response.headers.get('content-type'), asset.mime, path);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(asset.data, asset.encoding === 'base64' ? 'base64' : 'utf8'), path);
+    for (const [name, value] of Object.entries(HEADERS)) assert.equal(response.headers.get(name), value, path);
+    assert.equal((await request(path.replace('/v1/admin/assets/', '/p/assets/'), env.VAULT_OWNER_SUB)).status, 403, path);
+  }
+});
+
 test('owner bootstrap exposes only the pinned document ID without reading records or keys', async () => {
   const response = await request('/v1/management', env.VAULT_OWNER_SUB);
   assert.equal(response.status, 200);
@@ -96,7 +138,7 @@ test('owner page routes reject mutation methods, query strings and lookalike pat
     assert.equal((await request(path, env.VAULT_OWNER_SUB, { method: 'POST' })).status, 405);
     assert.equal((await request(path + '?document=other', env.VAULT_OWNER_SUB)).status, 403);
   }
-  for (const path of ['/v1/admin/', '/v1/admin/assets/missing.js', '/v1/management/']) {
+  for (const path of ['/v1/admin/', '/v1/admin/assets/missing.js', '/v1/admin/assets/pdfjs/missing.mjs', '/v1/admin/assets/pdfjs/standard_fonts/missing.ttf', '/v1/admin/assets/pdfjs/', '/v1/management/']) {
     assert.equal((await request(path, env.VAULT_OWNER_SUB)).status, 404);
   }
 });

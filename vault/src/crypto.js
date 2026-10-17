@@ -1,5 +1,6 @@
 import { createPasswordVerifier, passwordVerifierValid } from "./password.js";
 import { normalizeRecipientName } from "./recipient.js";
+import { normalizeContactEmail, MAX_RECIPIENT_CONTACTS } from "./contacts.js";
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const MAX_PDF_BYTES = 1024 * 1024;
@@ -40,6 +41,14 @@ export async function open(box, key, context) {
 export const sealJSON = (value, key, context) => seal(utf8(JSON.stringify(value)), key, context);
 export async function openJSON(box, key, context) { return JSON.parse(decoder.decode(await open(box, key, context))); }
 
+export function normalizeAllowedEmails(value, stored = false) {
+  if (!Array.isArray(value) || !value.length || value.length > MAX_RECIPIENT_CONTACTS) throw new Error("invalid_policy");
+  let emails;
+  try { emails = Array.from(value, normalizeContactEmail); } catch { throw new Error("invalid_policy"); }
+  if (new Set(emails).size !== emails.length || stored && emails.some((email, index) => email !== value[index])) throw new Error("invalid_policy");
+  return emails;
+}
+
 export function validatePolicy(policy) {
   if (!policy || typeof policy !== "object" || Array.isArray(policy) || policy.mime !== "application/pdf" ||
       !Number.isSafeInteger(policy.size) || policy.size < 5 || policy.size > MAX_PDF_BYTES ||
@@ -51,12 +60,16 @@ export function validatePolicy(policy) {
     catch { throw new Error("invalid_policy"); }
   }
   const mode = Object.hasOwn(policy, "authMode") ? policy.authMode : "access";
+  if (mode !== "email" && Object.hasOwn(policy, "allowedEmails")) throw new Error("invalid_policy");
   if (mode === "access") {
     if (!policy.subjects.length || Object.hasOwn(policy, "passwordVerifier")) throw new Error("invalid_policy");
   } else if (mode === "password") {
     if (policy.subjects.length || !passwordVerifierValid(policy.passwordVerifier)) throw new Error("invalid_policy");
   } else if (mode === "link") {
     if (policy.subjects.length || Object.hasOwn(policy, "passwordVerifier")) throw new Error("invalid_policy");
+  } else if (mode === "email") {
+    if (policy.subjects.length || Object.hasOwn(policy, "passwordVerifier")) throw new Error("invalid_policy");
+    normalizeAllowedEmails(policy.allowedEmails, true);
   } else throw new Error("invalid_policy");
   return policy;
 }
@@ -69,6 +82,10 @@ export async function sealDocument(options, wrappingKey) {
   const authMode = Object.hasOwn(options, "authMode") ? options.authMode : "access";
   if (Object.hasOwn(options, "passwordVerifier") || (authMode !== "password" && Object.hasOwn(options, "password"))) throw new Error("invalid_policy");
   const policy = { mime: "application/pdf", size: bytes.length, subjects, expiresAt, revoked: false, authMode };
+  if (Object.hasOwn(options, "allowedEmails")) {
+    if (authMode !== "email") throw new Error("invalid_policy");
+    policy.allowedEmails = normalizeAllowedEmails(options.allowedEmails);
+  }
   if (Object.hasOwn(options, "recipientName")) policy.recipientName = normalizeRecipientName(options.recipientName);
   if (authMode === "password") {
     if (!Array.isArray(subjects) || subjects.length) throw new Error("invalid_policy");

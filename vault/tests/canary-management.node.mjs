@@ -1,7 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
-import { handleCanary, CANARY_ORIGIN } from '../src/canary-management.js';
+import { handleCanary, CANARY_ORIGIN, canaryOrigin } from '../src/canary-management.js';
 import { failure } from '../src/http.js';
 
 const originalFetch = globalThis.fetch;
@@ -84,6 +84,46 @@ test('creation reads the effective document deadline only after owner action val
   assert.equal((await revoked.json()).canary.state, 'revoked'); assert.equal(f.deadlineReads.length, 1);
   assert.equal(f.sideEffects, 0); assert.match(response.headers.get('cache-control'), /no-store/);
   assert.equal(response.headers.get('access-control-allow-origin'), null);
+});
+
+test('an explicit environment origin applies to status, creation and revocation URLs', async () => {
+  const f = fixture(), publicOrigin = 'https://canary-dev.toppymicros.com';
+  f.env.CANARY_PUBLIC_ORIGIN = publicOrigin;
+  assert.equal(canaryOrigin(), CANARY_ORIGIN);
+  assert.equal(canaryOrigin(f.env), publicOrigin);
+  for (const options of [{}, { method: 'POST', action: 'create' }, { method: 'POST', action: 'revoke' }]) {
+    const { response } = await f.request(options);
+    assert.ok([200, 201].includes(response.status));
+    const value = await response.json();
+    assert.equal(value.canary.url, `${publicOrigin}/canary/${token}`);
+    assert.ok(!value.canary.url.startsWith(CANARY_ORIGIN + '/'));
+  }
+  assert.equal(f.sideEffects, 0);
+});
+
+test('malformed explicit Canary origins fail before binding, deadline or request-body access', async () => {
+  const f = fixture();
+  for (const value of [null, false, 1, '', 'http://canary-dev.toppymicros.com',
+    'https://canary-dev.toppymicros.com/', 'https://canary-dev.toppymicros.com/path',
+    'https://canary-dev.toppymicros.com?', 'https://canary-dev.toppymicros.com#',
+    'https://user:secret@canary-dev.toppymicros.com', 'https://@canary-dev.toppymicros.com',
+    'https://canary-dev.toppymicros.com:443', 'https://CANARY-DEV.toppymicros.com',
+    ' https://canary-dev.toppymicros.com', 'https://canary-dev.toppymicros.com\n',
+    'https://canary-dev.toppymicros.com\u00a0', 'https://canary-dev.toppymicros.com/../',
+    'https://canary-dev.toppymicros.com\\', 'https://' + 'a'.repeat(2048),
+  ]) {
+    f.env.CANARY_PUBLIC_ORIGIN = value;
+    assert.throws(() => canaryOrigin(f.env), /configuration/);
+    for (const options of [{}, { logs: true }, { method: 'POST', action: 'create', forbidBody: true },
+      { method: 'POST', action: 'revoke', forbidBody: true }]) {
+      const result = await f.request(options);
+      assert.equal(result.response.status, 503);
+      assert.deepEqual(await result.response.json(), { error: 'unavailable' });
+      assert.equal(result.bodyReaders, 0);
+    }
+  }
+  assert.equal(f.bindingReads, 0); assert.equal(f.sideEffects, 0);
+  assert.deepEqual(f.calls, []); assert.deepEqual(f.deadlineReads, []);
 });
 
 test('closed or expired document deadlines cannot create a Canary', async () => {

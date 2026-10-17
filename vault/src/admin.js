@@ -9,7 +9,7 @@ export const html = `<!doctype html>
 <main><div class="intro"><p class="eyebrow">KANARIYA · DOCUMENT SHARING</p><h1>文書の管理</h1></div>
 <p id="status" role="status" aria-live="polite" aria-atomic="true">文書の情報を読み込んでいます…</p><p id="error" role="alert" hidden></p><div class="recovery-actions"><button id="reload" type="button" class="quiet" hidden>再読み込み</button><a id="owner-page" href="/v1/admin" hidden>管理ページを開き直す</a></div>
 <section id="management" class="viewer-card management-card" aria-label="共有文書の設定" hidden><div class="document-heading"><h2>管理対象のPDF</h2><span id="sharing-state" class="state-label"></span></div>
-<dl class="document-info"><div id="recipient-row" hidden><dt>開示先</dt><dd id="recipient"></dd></div><div><dt>閲覧期限</dt><dd id="deadline"></dd></div></dl>
+<dl class="document-info"><div id="recipient-row" hidden><dt>開示先</dt><dd id="recipient"></dd></div><div id="allowed-emails-row" hidden><dt>認証の許可先</dt><dd id="allowed-emails"></dd></div><div><dt>閲覧期限</dt><dd id="deadline"></dd></div></dl>
 <div class="actions"><button id="copy-link" type="button" disabled>共有リンクをコピー</button><a id="preview" class="button-link" target="_blank" rel="noopener noreferrer" aria-label="閲覧ページを開く（新しいタブ）" aria-disabled="true">閲覧ページを開く</a></div>
 <p id="sharing-link-help" class="form-help" hidden>「閲覧用URL」でURLを発行してください。URLを持つ人は開けます。閲覧者本人は未確認です。</p>
 <form id="expiry-form" class="expiry-form"><label for="expires-at">閲覧期限を変更</label><p id="expiry-help" class="form-help">日本時間で指定してください。</p><div class="expiry-controls"><input id="expires-at" type="datetime-local" step="60" required disabled aria-describedby="expiry-help expiry-limit"><button id="save-expiry" type="submit" class="primary" disabled>期限を保存</button></div><p id="expiry-limit" class="form-help"></p></form>
@@ -26,10 +26,11 @@ export const css = viewerCss + extensions.css + links.css + `
 
 export const managementJs = extensions.js;
 export const canaryJs = canary.js;
+export const canaryScript = canary.script;
 export const linksJs = links.js;
 
 export const js = `"use strict";
-const ids=["status","error","reload","owner-page","management","sharing-state","recipient-row","recipient","deadline","copy-link","preview","sharing-link-help","expiry-form","expires-at","save-expiry","expiry-limit","stop-sharing","stop-confirmation","confirm-stop","cancel-stop"];
+const ids=["status","error","reload","owner-page","management","sharing-state","recipient-row","recipient","allowed-emails-row","allowed-emails","deadline","copy-link","preview","sharing-link-help","expiry-form","expires-at","save-expiry","expiry-limit","stop-sharing","stop-confirmation","confirm-stop","cancel-stop"];
 const el=Object.fromEntries(ids.map(id=>[id,document.getElementById(id)]));
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const JAPAN_OFFSET=9*60*60*1000,MAX_TIMER=2147483647;
@@ -41,8 +42,14 @@ function inputDate(value){
  const parsed=Date.parse(value+":00+09:00");return Number.isSafeInteger(parsed)&&localDate(parsed)===value?parsed:NaN;
 }
 function timestamp(value){return Number.isSafeInteger(value)&&value>0&&value<=8640000000000000;}
+function validEmail(value){
+ if(typeof value!=="string"||value.length>254||/[^\\x20-\\x7e]/.test(value)||value!==value.trim())return false;
+ const at=value.lastIndexOf("@"),local=value.slice(0,at),domain=value.slice(at+1);
+ return at>0&&value.indexOf("@")===at&&local.length<=64&&/^[A-Za-z0-9!#$%&'*+\\/=?^_\\x60{|}~-]+(?:\\.[A-Za-z0-9!#$%&'*+\\/=?^_\\x60{|}~-]+)*$/.test(local)&&domain.length>0&&domain.length<=253&&domain===domain.toLowerCase()&&domain.split(".").every(label=>/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+}
 function validate(value){
- if(!value||value.id!==documentId||value.mime!=="application/pdf"||!Number.isSafeInteger(value.size)||value.size<=0||value.size>1048576||!["password","access","link"].includes(value.authMode)||!timestamp(value.expiresAt)||!timestamp(value.sealedExpiresAt)||value.expiresAt>value.sealedExpiresAt||typeof value.revoked!=="boolean"||!(value.recipientName===null||typeof value.recipientName==="string"&&value.recipientName.length<=200))throw new Error();
+ if(!value||value.id!==documentId||value.mime!=="application/pdf"||!Number.isSafeInteger(value.size)||value.size<=0||value.size>1048576||!["password","access","link","email"].includes(value.authMode)||!timestamp(value.expiresAt)||!timestamp(value.sealedExpiresAt)||value.expiresAt>value.sealedExpiresAt||typeof value.revoked!=="boolean"||!(value.recipientName===null||typeof value.recipientName==="string"&&value.recipientName.length<=200))throw new Error();
+ if(value.authMode==="email"&&(!Array.isArray(value.allowedEmails)||!value.allowedEmails.length||value.allowedEmails.length>50||!value.allowedEmails.every(validEmail)||new Set(value.allowedEmails).size!==value.allowedEmails.length))throw new Error();
  return value;
 }
 function active(token){return pending===token&&generation===token.generation&&!token.controller.signal.aborted;}
@@ -52,14 +59,15 @@ function controls(){
  const latest=metadata&&metadata.sealedExpiresAt>Date.now();
  const chosen=inputDate(el["expires-at"].value),valid=metadata&&Number.isSafeInteger(chosen)&&chosen>Date.now()&&chosen<=metadata.sealedExpiresAt;
  const bareUrl=metadata?.authMode!=="link";el["copy-link"].disabled=blocked||!shared||!bareUrl;el.preview.setAttribute("aria-disabled",blocked||!shared||!bareUrl?"true":"false");
- if(!blocked&&shared&&bareUrl)el.preview.href=location.origin+(metadata.authMode==="password"?"/p/"+documentId:"/#"+documentId);else el.preview.removeAttribute("href");
+ if(!blocked&&shared&&bareUrl)el.preview.href=location.origin+(metadata.authMode==="email"?"/e/"+documentId:metadata.authMode==="password"?"/p/"+documentId:"/#"+documentId);else el.preview.removeAttribute("href");
  el["expires-at"].disabled=blocked||metadata?.revoked||!latest;el["save-expiry"].disabled=blocked||metadata?.revoked||!valid;el["stop-sharing"].disabled=blocked||metadata?.revoked;
  el["confirm-stop"].disabled=blocked||metadata?.revoked;el["cancel-stop"].disabled=Boolean(pending);el.reload.disabled=Boolean(pending);
 }
 function render(){
- clearTimeout(expiryTimer);if(!metadata){el.management.hidden=true;controls();return;}
+ clearTimeout(expiryTimer);if(!metadata){el.management.hidden=true;el["allowed-emails"].textContent="";el["allowed-emails-row"].hidden=true;controls();return;}
  el.management.hidden=false;el["sharing-state"].textContent=metadata.revoked?"共有終了":metadata.expiresAt<=Date.now()?"閲覧期限切れ":"共有中";
  el["copy-link"].textContent=metadata.authMode==="password"?"パスワード用URLをコピー":metadata.authMode==="link"?"閲覧用URLを下で発行":"閲覧ページのURLをコピー";el["sharing-link-help"].hidden=metadata.authMode!=="link";
+ el["allowed-emails-row"].hidden=metadata.authMode!=="email";el["allowed-emails"].textContent=metadata.authMode==="email"?metadata.allowedEmails.join("、"):"";
  el["recipient-row"].hidden=!metadata.recipientName;el.recipient.textContent=metadata.recipientName||"";el.deadline.textContent=dateLabel(metadata.expiresAt);
  el["expires-at"].value=localDate(metadata.expiresAt);el["expires-at"].min=localDate(Math.ceil((Date.now()+1)/60000)*60000);el["expires-at"].max=localDate(metadata.sealedExpiresAt);
  el["expiry-limit"].textContent="設定できる最終日時："+dateLabel(metadata.sealedExpiresAt);
@@ -75,7 +83,7 @@ function failure(status){const error=new Error();error.status=status;return erro
 async function request(token,path,method="GET",body){
  const response=await fetch(path,{method,credentials:"same-origin",cache:"no-store",redirect:"error",signal:token.controller.signal,...(body===undefined?{}:{headers:{"content-type":"application/json"},body:JSON.stringify(body)})});
  if(!active(token))throw new Error();if(!response.ok)throw failure(response.status);
- if(!response.headers.get("content-type")?.startsWith("application/json"))throw new Error();const text=await response.text();if(!active(token)||text.length>8192)throw new Error();return JSON.parse(text);
+ if(!response.headers.get("content-type")?.startsWith("application/json"))throw new Error();const text=await response.text();if(!active(token)||text.length>16384)throw new Error();return JSON.parse(text);
 }
 async function readMetadata(token){return validate(await request(token,"/v1/documents/"+documentId+"/metadata"));}
 function readError(error){

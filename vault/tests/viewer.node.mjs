@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { randomUUID } from "node:crypto";
-import { js, passwordJs, html, passwordHtml } from "../src/viewer.js";
+import { js, passwordJs, emailJs, html, passwordHtml, emailHtml } from "../src/viewer.js";
 
 const importPrefix = 'import { getDocument, GlobalWorkerOptions } from "/pdfjs/pdf.min.mjs";\n';
 assert.ok(js.startsWith(importPrefix), "the viewer must use the local PDF.js module");
@@ -10,6 +10,9 @@ const script = js.slice(importPrefix.length);
 const passwordImportPrefix = 'import { getDocument, GlobalWorkerOptions } from "/p/assets/pdfjs/pdf.min.mjs";\n';
 assert.ok(passwordJs.startsWith(passwordImportPrefix));
 const passwordScript = passwordJs.slice(passwordImportPrefix.length);
+const emailImportPrefix = 'import { getDocument, GlobalWorkerOptions } from "/e/assets/pdfjs/pdf.min.mjs";\n';
+assert.ok(emailJs.startsWith(emailImportPrefix));
+const emailScript = emailJs.slice(emailImportPrefix.length);
 const maxBytes = 1048576, maxPagePixels = 4000000, maxTotalPixels = 12000000;
 function deferred() {
   let resolve, reject;
@@ -17,7 +20,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 function viewer(options = {}) {
-  const elements = Object.fromEntries(["open", "close", "download", "status", "deadline", "session-deadline", "document", "unlock-form", "password", "unlock", "logout", "identity-note", "session-note"].map(id => [id, {
+  const elements = Object.fromEntries(["open", "close", "download", "status", "deadline", "session-deadline", "document", "unlock-form", "password", "unlock", "logout", "identity-note", "session-note", "verified-account"].map(id => [id, {
     hidden: id === "close" || id === "document", disabled: false, textContent: "", value: "",
     clientWidth: options.clientWidth ?? 1000, children: [], listeners: new Map(),
     addEventListener(name, fn) { this.listeners.set(name, fn); },
@@ -29,7 +32,7 @@ function viewer(options = {}) {
   const downloads = [], objectURLs = new Map(), textElements = [];
   const stageStarts = new Map(), timers = new Map(), scheduledTimers = [];
   const id = randomUUID(), linkId = options.linkId ?? randomUUID(), now = options.now ?? 1800000000000;
-  const location = { hash: options.fragment ?? (options.passwordMode ? "" : "#" + id), pathname: options.passwordMode ? "/p/" + id : "/", search: "" }, globalWorkerOptions = {};
+  const location = { hash: options.fragment ?? (options.passwordMode || options.emailMode ? "" : "#" + id), pathname: options.emailMode ? "/e/" + id : options.passwordMode ? "/p/" + id : "/", search: "" }, globalWorkerOptions = {};
   const clock = { now };
   const historyCalls = [];
   const history = Object.fromEntries(["pushState", "replaceState"].map(method => [method, function (_state, _unused, url) {
@@ -52,7 +55,7 @@ function viewer(options = {}) {
     return node;
   }, addEventListener: (name, fn) => events.set(name, fn) };
   function sessionResponse(settings = {}) {
-    return { ok: settings.ok ?? true, headers: new Headers({ "content-type": "application/json", ...settings.headers }), json: () => Promise.resolve(settings.value ?? { expiresAt: clock.now + 600000, sessionExpiresAt: clock.now + 300000, ...(options.fragment?.startsWith("#link=") ? { linkId } : {}) }) };
+    return { ok: settings.ok ?? true, headers: new Headers({ "content-type": "application/json", ...settings.headers }), json: () => Promise.resolve(settings.value ?? { expiresAt: clock.now + 600000, sessionExpiresAt: clock.now + 300000, ...(options.emailMode ? { verifiedEmail: "recipient@example.com" } : {}), ...(options.fragment?.startsWith("#link=") ? { linkId } : {}) }) };
   }
   let timerId = 0, pageCount = 0;
   function stage(name) {
@@ -119,14 +122,14 @@ function viewer(options = {}) {
   function response(settings = {}) {
     return {
       ok: settings.ok ?? true,
-      headers: new Headers({ "content-type": "application/pdf", "x-vault-expires-at": String(clock.now + 600000), ...(options.passwordMode ? { "x-vault-session-expires-at": String(clock.now + 300000) } : {}), ...settings.headers }),
+      headers: new Headers({ "content-type": "application/pdf", "x-vault-expires-at": String(clock.now + 600000), ...(options.passwordMode || options.emailMode ? { "x-vault-session-expires-at": String(clock.now + 300000) } : {}), ...settings.headers }),
       arrayBuffer() {
         stage("body");
         return options.bodyResult ? options.bodyResult() : Promise.resolve(new Uint8Array([37, 80, 68, 70]).buffer);
       },
     };
   }
-  vm.runInNewContext(options.passwordMode ? passwordScript : script, {
+  vm.runInNewContext(options.emailMode ? emailScript : options.passwordMode ? passwordScript : script, {
     document: browserDocument, Date: { now: () => clock.now },
     location, history, AbortController, Uint8Array, Blob, URL: {
       createObjectURL(blob) { const url = "blob:https://viewer.example/" + randomUUID(); objectURLs.set(url, blob); return url; },
@@ -995,4 +998,78 @@ test("a replaced shared cookie cannot switch a link viewer's download into anoth
   await v.openDocument(); cookieContext = randomUUID(); await v.downloadDocument();
   assert.equal(v.requests[2].options.headers["x-vault-reader-link"], expected);
   assert.equal(v.downloads.length, 0); assertClosed(v); assert.equal(v["unlock-form"].hidden, true);
+});
+
+
+test("email viewer confirms the signed account before retrieval and records view intent", async () => {
+  const v = viewer({ emailMode: true });
+  assert.equal(v.requests.length, 0);
+  assert.equal(v["unlock-form"].listeners.has("submit"), false);
+  await v.openDocument();
+  assert.deepEqual(v.requests.map(r => r.url), ["/e/" + v.id + "/status", "/e/" + v.id + "/open"]);
+  assert.equal(v.requests[0].options.method, "GET");
+  assert.equal(v.requests[0].options.body, undefined);
+  assert.equal(JSON.parse(v.requests[1].options.body).purpose, "view");
+  assert.deepEqual(Object.keys(JSON.parse(v.requests[1].options.body)).sort(), ["purpose", "requestId"]);
+  for (const { options } of v.requests) {
+    assert.equal(options.credentials, "same-origin"); assert.equal(options.redirect, "error"); assert.equal(options.cache, "no-store");
+  }
+  assert.equal(v["verified-account"].textContent, "認証済みメール：recipient@example.com");
+  assert.equal(v["verified-account"].hidden, false);
+  assert.equal(v.document.hidden, false);
+  assert.equal(v.globalWorkerOptions.workerSrc, "/e/assets/pdfjs/pdf.worker.min.mjs");
+  assert.ok([...v.timers.values()].some(t => t.milliseconds === 15000));
+});
+
+test("email download records download intent without accepting a client email", async () => {
+  const v = viewer({ emailMode: true, fetchResult: (_n, response, session, url) => Promise.resolve(url.endsWith("/open") ? response({ headers: { "x-vault-download-filename": "CV_Recipient.pdf" } }) : session()) });
+  await v.openDocument(); await v.downloadDocument();
+  assert.equal(v.downloads.length, 1);
+  assert.equal(v.downloads[0].filename, "CV_Recipient.pdf");
+  assert.equal(v.requests.at(-1).url, "/e/" + v.id + "/open");
+  const request = JSON.parse(v.requests.at(-1).options.body);
+  assert.deepEqual(Object.keys(request).sort(), ["purpose", "requestId"]);
+  assert.equal(request.purpose, "download");
+});
+
+for (const verifiedEmail of [undefined, null, "", "recipient", "<img>@example.com", "a@example.com\n", "a@EXAMPLE.COM", "a..b@example.com", "a@-example.com", "a".repeat(65) + "@example.com"]) {
+  test("invalid email status never retrieves the PDF: " + JSON.stringify(verifiedEmail), async () => {
+    const v = viewer({ emailMode: true, fetchResult: (_n, _r, session) => Promise.resolve(session({ value: { expiresAt: 1800000600000, sessionExpiresAt: 1800000300000, verifiedEmail } })) });
+    await v.openDocument(); assert.equal(v.requests.length, 1); assertClosed(v);
+    assert.equal(v["verified-account"].textContent, ""); assert.match(v.status.textContent, /開き直して/);
+  });
+}
+for (const failure of ["denied", "redirect", "html", "expired"]) test("email status fails closed on " + failure, async () => {
+  const v = viewer({ emailMode: true, fetchResult: (_n, _r, session) => failure === "redirect" ? Promise.reject(new TypeError("redirect")) : Promise.resolve(session({
+    ...(failure === "denied" ? { ok: false } : {}),
+    ...(failure === "html" ? { headers: { "content-type": "text/html" } } : {}),
+    ...(failure === "expired" ? { value: { expiresAt: 1800000600000, sessionExpiresAt: 1800000000000, verifiedEmail: "recipient@example.com" } } : {}),
+  })) });
+  await v.openDocument(); assert.equal(v.requests.length, 1); assertClosed(v); assert.equal(v.loadingTasks.length, 0);
+});
+for (const cause of ["revoked", "account-changed", "expired"]) test("email status polling closes the PDF on " + cause, async () => {
+  const v = viewer({ emailMode: true, fetchResult: (n, response, session, url) => Promise.resolve(url.endsWith("/open") ? response() : n === 1 ? session() : session({
+    ...(cause === "revoked" ? { ok: false } : {}),
+    value: { expiresAt: 1800000600000, sessionExpiresAt: cause === "expired" ? 1800000000000 : 1800000300000, verifiedEmail: cause === "account-changed" ? "another@example.com" : "recipient@example.com" },
+  })) });
+  await v.openDocument(); await v.fireTimer(15000);
+  assertClosed(v); assert.equal(v["verified-account"].textContent, ""); assert.equal(v["verified-account"].hidden, true);
+  assert.equal(v.requests.at(-1).url, "/e/" + v.id + "/status");
+});
+for (const milliseconds of [60000, 300000]) test("email display enforces the earlier document or JWT expiry: " + milliseconds, async () => {
+  const v = viewer({ emailMode: true, fetchResult: (_n, response, session, url) => Promise.resolve(url.endsWith("/open") ? response({ headers: { "x-vault-expires-at": String(1800000000000 + milliseconds) } }) : session()) });
+  await v.openDocument(); v.advance(milliseconds); await v.fireTimer(milliseconds);
+  assertClosed(v); assert.equal(v["verified-account"].textContent, "");
+});
+for (const event of ["pagehide", "visibilitychange", "hashchange"]) test("email confirmation cannot reopen a PDF after " + event, async () => {
+  const gate = deferred(); const v = viewer({ emailMode: true, fetchResult: () => gate.promise });
+  const opening = v.openDocument(); close(v, event); gate.resolve(v.sessionResponse()); await opening;
+  assertClosed(v); assert.equal(v.requests.length, 1); assert.equal(v["verified-account"].textContent, "");
+});
+
+test("email guidance stays collapsed and never presents a local OTP or password form", () => {
+  assert.match(emailHtml, /src="\/e\/assets\/viewer.js"/);
+  assert.match(emailHtml, /href="\/e\/assets\/viewer.css"/);
+  assert.doesNotMatch(emailHtml, /<form|id="password"|共通パスワード|通知には、閲覧・保存のどちらを行ったかは含まれません/);
+  assert.match(emailHtml, /<details><summary>ご案内<\/summary>.*認証したメールアドレスと閲覧・保存の操作が記録されます/);
 });

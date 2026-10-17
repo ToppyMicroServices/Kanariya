@@ -520,7 +520,8 @@ test('owner upload reader rejects a stalled stream without waiting for cancellat
 async function replacementFixture(mode = 'password', policyChanges = {}) {
   const f = await fixture(), currentId = f.env.DUMMY_DOCUMENT_ID;
   const currentRecord = await sealDocument({ id: currentId, bytes: utf8('%PDF-1.4\nSYNTHETIC_CURRENT_DOCUMENT'),
-    subjects: mode === 'password' ? [] : [f.owner, 'synthetic-approved-access-reader'],
+    subjects: ['password', 'email'].includes(mode) ? [] : [f.owner, 'synthetic-approved-access-reader'],
+    ...(mode === 'email' ? { allowedEmails: ['Reviewer@example.test', 'Second@example.test'] } : {}),
     expiresAt: Date.now() + 1200000, authMode: mode, ...(mode === 'password' ? { password: 'synthetic-dummy-password' } : {}) }, f.wrap);
   if (Object.keys(policyChanges).length) {
     const policy = { ...await readPolicy(currentRecord, currentId, f.wrap), ...policyChanges };
@@ -530,7 +531,8 @@ async function replacementFixture(mode = 'password', policyChanges = {}) {
   f.objects.set(`${currentId}.sealed.json`, currentBytes);
   f.env.DUMMY_RECORD_SHA256 = createHash('sha256').update(currentBytes).digest('hex');
   const policy = await readPolicy(currentRecord, currentId, f.wrap);
-  f.metadata = { id: currentId, authMode: mode, expiresAt: policy.expiresAt, revoked: false };
+  f.metadata = { id: currentId, authMode: mode, expiresAt: policy.expiresAt, revoked: false,
+    ...(mode === 'email' ? { allowedEmails: [...policy.allowedEmails] } : {}) };
   const candidate = preparedInput(f, { replaceOf: currentId });
   assert.equal((await f.request({ input: candidate })).status, 201);
   const path = `/v1/registrations/${candidate.id}/replacement`;
@@ -580,6 +582,109 @@ test('replacement keeps the exact existing Access reader subjects and does not a
   const record = JSON.parse(Buffer.from(f.objects.get(`${f.candidate.id}.sealed.json`)).toString()), policy = await readPolicy(record, f.candidate.id, f.wrap);
   assert.equal(policy.authMode, 'access'); assert.deepEqual(policy.subjects, [f.owner, 'synthetic-approved-access-reader']);
   assert.equal(Object.hasOwn(policy, 'passwordVerifier'), false); assert.equal(f.notifications, 0);
+});
+
+test('email replacement inherits the exact approved accounts and keeps private candidates owner-only', async () => {
+  const f = await replacementFixture('email'), pins = [f.env.DUMMY_DOCUMENT_ID, f.env.DUMMY_RECORD_SHA256];
+  const currentPolicy = await readPolicy(f.currentRecord, pins[0], f.wrap);
+  const stagedBytes = f.objects.get(`staging/${f.candidate.id}.sealed.json`), staged = JSON.parse(Buffer.from(stagedBytes).toString());
+  const stagedPolicy = await readPolicy(staged, f.candidate.id, f.wrap);
+  assert.equal(stagedPolicy.authMode, 'access'); assert.deepEqual(stagedPolicy.subjects, [f.owner]);
+  assert.equal(Object.hasOwn(stagedPolicy, 'allowedEmails'), false);
+  const response = await f.prepare(); assert.equal(response.status, 201);
+  const result = await response.json(), manifest = result.replacement;
+  assert.equal(manifest.version, 1); assert.equal(manifest.authMode, 'email'); assert.equal(manifest.status, 'prepared_not_active');
+  assert.deepEqual(manifest.allowedEmails, currentPolicy.allowedEmails);
+  const canonical = f.objects.get(`${f.candidate.id}.sealed.json`), final = JSON.parse(Buffer.from(canonical).toString());
+  const finalPolicy = await readPolicy(final, f.candidate.id, f.wrap);
+  assert.deepEqual(finalPolicy.subjects, []); assert.deepEqual(finalPolicy.allowedEmails, currentPolicy.allowedEmails);
+  assert.equal(finalPolicy.authMode, 'email'); assert.equal(Object.hasOwn(finalPolicy, 'passwordVerifier'), false);
+  assert.equal(finalPolicy.expiresAt, f.candidate.expiresAt); assert.equal(finalPolicy.recipientName, manifest.recipientName);
+  assert.deepEqual(await decryptDocument(final, f.wrap, finalPolicy), f.pdf);
+  assert.deepEqual(final.document, staged.document); assert.deepEqual(final.wrappedKey, staged.wrappedKey);
+  assert.deepEqual(f.objects.get(`staging/${f.candidate.id}.sealed.json`), stagedBytes);
+  assert.deepEqual(f.objects.get(`${pins[0]}.sealed.json`), f.currentBytes);
+  assert.deepEqual([f.env.DUMMY_DOCUMENT_ID, f.env.DUMMY_RECORD_SHA256], pins);
+  for (const persisted of [JSON.stringify([...f.storage.map]), Buffer.from(canonical).toString()]) {
+    for (const secret of [...currentPolicy.allowedEmails, f.owner, 'SYNTHETIC_PRIVATE_REGISTRATION_CONTENT', f.env.VAULT_WRAP_KEY, f.env.VAULT_AUDIT_KEY]) {
+      assert.ok(!persisted.includes(secret));
+    }
+  }
+  const writes = [f.writes, f.storage.writes];
+  f.restart(); const review = await f.review(); assert.equal(review.status, 200); assert.deepEqual(await review.json(), result);
+  const repeated = await f.prepare(); assert.equal(repeated.status, 200); assert.deepEqual(await repeated.json(), result);
+  assert.deepEqual([f.writes, f.storage.writes], writes); assert.equal(f.notifications, 0);
+});
+
+test('email replacement supports the full fifty-address metadata bound', async () => {
+  const allowedEmails = Array.from({ length: 50 }, (_, i) => `${String(i).padStart(2, '0')}${'a'.repeat(62)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(61)}`);
+  assert.ok(allowedEmails.every(email => email.length === 254));
+  const f = await replacementFixture('email', { allowedEmails });
+  const response = await f.prepare(); assert.equal(response.status, 201);
+  const result = await response.json(); assert.deepEqual(result.replacement.allowedEmails, allowedEmails);
+  f.restart(); assert.deepEqual(await (await f.review()).json(), result);
+});
+
+test('uncertain email replacement resumes the encrypted receipt without changing its grants', async () => {
+  const f = await replacementFixture('email'); f.putFailure = true;
+  assert.equal((await f.prepare()).status, 503);
+  const receipt = await openJSON(await f.storage.get(`encrypted-replacement:${f.candidate.id}`), f.audit, `${f.context}:replacement:v1:${f.candidate.id}`);
+  assert.equal(receipt.version, 1); const writes = f.storage.writes;
+  f.restart(); f.putFailure = false;
+  const response = await f.prepare(); assert.equal(response.status, 200);
+  const manifest = (await response.json()).replacement;
+  assert.equal(manifest.authMode, 'email'); assert.deepEqual(manifest.allowedEmails, ['Reviewer@example.test', 'Second@example.test']);
+  assert.equal(manifest.recordSha256, receipt.recordSha256); assert.equal(f.storage.writes, writes);
+  assert.equal(f.notifications, 0);
+});
+
+test('email replacement cannot be downgraded to a bearer URL or accept supplied account grants', async () => {
+  const f = await replacementFixture('email'), before = [f.writes, f.storage.writes];
+  assert.equal((await f.prepare({ input: { ...f.replacementInput, authMode: 'link' } })).status, 403);
+  for (const changes of [{ allowedEmails: ['other@example.test'] }, { authMode: 'email', allowedEmails: ['other@example.test'] }]) {
+    assert.equal((await f.prepare({ input: { ...f.replacementInput, ...changes } })).status, 400);
+  }
+  assert.deepEqual([f.writes, f.storage.writes], before); assert.equal(f.objects.has(`${f.candidate.id}.sealed.json`), false);
+  assert.equal((await f.prepare()).status, 201); const canonical = f.objects.get(`${f.candidate.id}.sealed.json`);
+  assert.equal((await f.prepare({ input: { ...f.replacementInput, authMode: 'link' } })).status, 403);
+  assert.deepEqual(f.objects.get(`${f.candidate.id}.sealed.json`), canonical); assert.equal(f.notifications, 0);
+});
+
+test('email replacement refuses a changed source pin, mismatched account metadata or revoked source', async () => {
+  for (const changes of [{ allowedEmails: ['other@example.test'] }, { allowedEmails: undefined }, { revoked: true }]) {
+    const f = await replacementFixture('email'), before = [f.writes, f.storage.writes];
+    f.metadata = { id: f.env.DUMMY_DOCUMENT_ID, authMode: 'email', expiresAt: Date.now() + 600000,
+      allowedEmails: ['Reviewer@example.test', 'Second@example.test'], revoked: false, ...changes };
+    assert.equal((await f.prepare()).status, 403); assert.deepEqual([f.writes, f.storage.writes], before);
+    assert.equal(f.notifications, 0);
+  }
+  const f = await replacementFixture('email'); assert.equal((await f.prepare()).status, 201);
+  const policy = await readPolicy(f.currentRecord, f.env.DUMMY_DOCUMENT_ID, f.wrap);
+  f.currentRecord.policy = await sealJSON({ ...policy, allowedEmails: ['other@example.test'] }, f.wrap, `policy:v2:${f.env.DUMMY_DOCUMENT_ID}`);
+  const bytes = utf8(JSON.stringify(f.currentRecord));
+  f.objects.set(`${f.env.DUMMY_DOCUMENT_ID}.sealed.json`, bytes);
+  f.env.DUMMY_RECORD_SHA256 = createHash('sha256').update(bytes).digest('hex');
+  f.metadata = { id: f.env.DUMMY_DOCUMENT_ID, authMode: 'email', expiresAt: policy.expiresAt,
+    allowedEmails: ['other@example.test'], revoked: false };
+  const before = [f.writes, f.storage.writes];
+  assert.equal((await f.review()).status, 409); assert.equal((await f.prepare()).status, 409);
+  assert.deepEqual([f.writes, f.storage.writes], before); assert.equal(f.notifications, 0);
+});
+
+test('email replacement validates the prepared receipt against its anchored current policy', async () => {
+  const f = await replacementFixture('email'); assert.equal((await f.prepare()).status, 201);
+  const name = `encrypted-replacement:${f.candidate.id}`, context = `${f.context}:replacement:v1:${f.candidate.id}`;
+  const receipt = await openJSON(await f.storage.get(name), f.audit, context);
+  const record = JSON.parse(Buffer.from(f.objects.get(`${f.candidate.id}.sealed.json`)).toString());
+  const policy = await readPolicy(record, f.candidate.id, f.wrap);
+  for (const changes of [{ allowedEmails: ['other@example.test'] }, { authMode: 'link', allowedEmails: undefined }]) {
+    const changed = { ...record, policy: await sealJSON({ ...policy, ...changes }, f.wrap, `policy:v2:${f.candidate.id}`) };
+    const modified = { ...receipt, policy: changed.policy, recordSha256: createHash('sha256').update(JSON.stringify(changed)).digest('hex') };
+    f.storage.map.set(name, await sealJSON(modified, f.audit, context));
+    assert.equal((await f.review()).status, 409);
+  }
+  f.storage.map.set(name, await sealJSON({ ...receipt, version: 2, authMode: 'link' }, f.audit, context));
+  assert.equal((await f.review()).status, 409); assert.equal(f.notifications, 0);
 });
 
 for (const currentMode of ['password', 'access']) test(`explicit link-only replacement removes the existing ${currentMode} grant without publishing`, async () => {
@@ -712,12 +817,39 @@ test('candidate policy must match the registered owner-only prepared candidate',
   const before = [f.writes, f.storage.writes]; assert.equal((await f.prepare()).status, 403); assert.deepEqual([f.writes, f.storage.writes], before);
 });
 
-for (const changes of [{ revoked: true }, { expiresAt: 1 }]) test('revoked or expired sealed reader grants cannot be copied', async () => {
-  const f = await replacementFixture('password', changes), before = [f.writes, f.storage.writes];
+for (const mode of ['password', 'access', 'email']) for (const expiry of ['sealed', 'effective'])
+test(`owner can prepare a ${mode} replacement after ${expiry} expiry without reopening the source`, async () => {
+  const f = await replacementFixture(mode, expiry === 'sealed' ? { expiresAt: 1 } : {});
+  if (expiry === 'effective') f.metadata = { ...f.metadata, expiresAt: 1 };
+  const pin = [f.env.DUMMY_DOCUMENT_ID, f.env.DUMMY_RECORD_SHA256], metadata = structuredClone(f.metadata);
+  const sourcePolicy = await readPolicy(f.currentRecord, pin[0], f.wrap);
+  assert.deepEqual(await (await f.review()).json(), { replacement: null });
+  const response = await f.prepare(); assert.equal(response.status, 201);
+  const manifest = (await response.json()).replacement;
+  assert.equal(manifest.status, 'prepared_not_active'); assert.notEqual(manifest.id, pin[0]);
+  const record = JSON.parse(Buffer.from(f.objects.get(`${manifest.id}.sealed.json`)).toString());
+  const policy = await readPolicy(record, manifest.id, f.wrap);
+  assert.equal(policy.authMode, mode); assert.equal(policy.expiresAt, f.candidate.expiresAt);
+  assert.ok(policy.expiresAt > Date.now()); assert.deepEqual(policy.subjects, sourcePolicy.subjects);
+  if (mode === 'email') assert.deepEqual(policy.allowedEmails, sourcePolicy.allowedEmails);
+  if (mode === 'password') assert.deepEqual(policy.passwordVerifier, sourcePolicy.passwordVerifier);
+  assert.deepEqual(await decryptDocument(record, f.wrap, policy), f.pdf);
+  assert.deepEqual(f.objects.get(`${pin[0]}.sealed.json`), f.currentBytes);
+  assert.deepEqual(await readPolicy(f.currentRecord, pin[0], f.wrap), sourcePolicy);
+  assert.deepEqual(f.metadata, metadata); assert.equal(f.metadata.expiresAt, 1);
+  assert.deepEqual([f.env.DUMMY_DOCUMENT_ID, f.env.DUMMY_RECORD_SHA256], pin);
+  assert.equal(f.notifications, 0);
+  f.restart(); assert.deepEqual((await (await f.review()).json()).replacement, manifest);
+});
+
+for (const mode of ['password', 'email']) for (const changes of [{ revoked: true }, { revoked: true, expiresAt: 1 }])
+test(`revoked ${mode} sealed grants cannot be copied, including after expiry`, async () => {
+  const f = await replacementFixture(mode, changes), before = [f.writes, f.storage.writes];
   assert.equal((await f.prepare()).status, 403); assert.deepEqual([f.writes, f.storage.writes], before);
 });
 
-for (const changes of [{ revoked: true }, { expiresAt: 1 }, { id: crypto.randomUUID() }, { authMode: 'access' }])
+for (const changes of [{ revoked: true }, { revoked: true, expiresAt: 1 }, { expiresAt: 0 }, { expiresAt: 8640000000000001 },
+  { id: crypto.randomUUID() }, { authMode: 'access' }])
 test('effective owner metadata must still allow the current reader grant', async () => {
   const f = await replacementFixture(); f.metadata = { ...f.metadata, ...changes }; const before = [f.writes, f.storage.writes];
   assert.equal((await f.prepare()).status, 403); assert.deepEqual([f.writes, f.storage.writes], before);
